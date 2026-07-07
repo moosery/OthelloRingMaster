@@ -3,6 +3,9 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="OthelloBasics/OthelloBasics.vcxproj" Id="2cc52c70-80f3-4700-9e46-0f6b1c077667" />
+  <Project Path="OthelloBasicsForCUDA/OthelloBasicsForCUDA.vcxproj" Id="375f3354-bf89-48cd-8405-d660fa4a3983" />
   <Project Path="OthelloRingMaster.vcxproj" Id="315f59e9-3126-47c8-a292-a60ef2004ff7" />
+  <Project Path="OthelloRingSplitAnalyzer/OthelloRingSplitAnalyzer.vcxproj" Id="e848a716-96ed-4828-9d9c-1ebbbf10a85c" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
 </Solution>
