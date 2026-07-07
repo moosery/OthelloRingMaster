@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.2.1] - 2026-07-07
+
+### Extract lz4 into its own project
+
+- Added `lz4/lz4.vcxproj` (static library) so the vendored lz4 source
+  (`lz4`/`lz4hc`/`lz4frame`/`xxhash`) lives in its own project instead of
+  being compiled directly into whichever project happened to need it. Matches
+  the intent (not the letter) of `OthelloLevelBlaster`'s pattern, which
+  compiled lz4 directly per-consumer -- quietly duplicating it across
+  projects. Here there's exactly one lz4 project, referenced by whoever needs it.
+- `OthelloRingSplitAnalyzer` now references `lz4.vcxproj` via
+  `ProjectReference` instead of compiling `lz4/*.c` itself.
+- No behavior change -- pure build-structure cleanup ahead of the planned
+  BlasterFile genericization (moving the generic compressed-record-file
+  logic into `Utility`, which will then also depend on `lz4`).
+
 ## [0.2.0] - 2026-07-07
 
 ### Add OthelloBasics, OthelloBasicsForCUDA, OthelloRingSplitAnalyzer; BlasterFile format
