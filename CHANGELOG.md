@@ -4,6 +4,24 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.2.2] - 2026-07-07
+
+### Move BlasterFile.h/.cpp under OthelloRingSplitAnalyzer
+
+- `BlasterFile.h`/`.cpp` were only ever here so the analyzer could read
+  Blaster's real on-disk store format to validate the ring-split theory
+  against production data -- not a solution-wide shared format. Moved them
+  from the solution root into `OthelloRingSplitAnalyzer/` to reflect that
+  actual scope honestly, instead of a premature "shared utility" location.
+  Genericizing this into `Utility` is explicitly deferred, not abandoned --
+  revisit if/when the ring-split work graduates past an analysis experiment.
+- Updated `OthelloRingSplitAnalyzer.vcxproj`/`.vcxproj.filters` paths
+  accordingly, and dropped the now-dead bare `..` entry from
+  `AdditionalIncludeDirectories` (it existed only so the quoted
+  `#include "BlasterFile.h"` could reach the solution root; no longer
+  needed now that the header lives alongside its only includer).
+- No behavior change.
+
 ## [0.2.1] - 2026-07-07
 
 ### Extract lz4 into its own project

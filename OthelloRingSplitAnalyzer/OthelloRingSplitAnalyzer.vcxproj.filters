@@ -18,12 +18,12 @@
     <ClCompile Include="OthelloRingSplitAnalyzer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\BlasterFile.cpp">
+    <ClCompile Include="BlasterFile.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\BlasterFile.h">
+    <ClInclude Include="BlasterFile.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
