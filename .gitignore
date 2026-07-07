@@ -1,0 +1,33 @@
+# Visual Studio build output
+x64/
+Debug/
+Release/
+
+# Visual Studio IDE state (not source)
+.vs/
+*.user
+*.suo
+*.aps
+*.ncb
+*.opendb
+*.sdf
+*.opensdf
+
+# VS IntelliSense/browse database cache folders (named ProjectName.GUID)
+OthelloR.*/
+
+# Compiled output that ends up outside x64/ for any reason
+*.obj
+*.pdb
+*.lib
+*.exp
+*.exe
+*.dll
+*.ilk
+
+# Log files produced at runtime
+*.log
+*.log.*
+
+# Claude Code memory/config (session-local, not source)
+.claude/

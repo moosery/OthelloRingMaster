@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="OthelloRingMaster.vcxproj" Id="315f59e9-3126-47c8-a292-a60ef2004ff7" />
+  <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
+</Solution>
