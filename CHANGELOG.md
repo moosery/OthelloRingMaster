@@ -4,6 +4,41 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.15.0] - 2026-07-07
+
+### Wire the ring nested-index into the live store write/read path
+
+- **Closes the gap flagged right after Phase 4 completed**: `DoEndOfLevelMerge`
+  previously wrote each level as a flat, sorted+deduped RSF file (ring-ordered
+  bit content, but the same one-file-per-player shape Blaster always used) --
+  the `RingNestedIndexBuilder`/`Reader` machinery from Phase 3 was never
+  actually attached to the live pipeline, so none of the validated extra
+  storage savings (2.4-2.9% compressed / 5.77x uncompressed, see
+  project_ring_split_validated_findings memory) were being realized.
+- Added `ConvertLevelOutputToNestedIndex` (`MergeFiles.cpp`, new, not ported
+  from Blaster): after `DoEndOfLevelMerge`'s merge produces the flat sorted
+  output, re-reads it and rebuilds it as the 4-file `CellsInUse`/`Ring_1`/
+  `Ring_2`/`Ring_3_4` nested index, deleting the flat intermediate only
+  after every nested file is fully written and closed -- so an interruption
+  mid-conversion just falls back to the existing "re-solve the level from
+  scratch" resume behavior, no new failure mode.
+- Added `RSFNameCellsInUseFile`/`RSFNameRing1File`/`RSFNameRing2File`/
+  `RSFNameRing34File` (`RSFFileName.h`) for the new `.cellsinuse`/`.ring1`/
+  `.ring2`/`.ring34` file naming.
+- Replaced `LevelSolverThread.cpp`'s read side: `EnumerateStoreFilesForLevel`
+  + `RSFOpen`/`RSFRead` (dead now, removed) became `FeedNestedIndexLevel`/
+  `FeedBoardIntoBatch`, which `RingNestedIndexReader::Load`s a level's 4
+  index files and `ExpandAll`s them back into the same ping-pong-buffered
+  GPU-batch feed the old flat-file loop did.
+- `CreateSeedFile.cpp` now writes level 0's single starting board in the
+  same nested-index format, so the very first level the feeder ever reads
+  is already in the steady-state format.
+- **Known follow-up, not fixed now**: `InitSolver.cpp`'s `checkLevelFile`/
+  `deletePlayerOutputFile` resume-scan fallback (used only when a level has
+  no sentinel at all) still only knows the old flat `.rsf`/`.rsfz`/`.rsfzl`
+  extensions. Harmless in practice -- every level in this project now always
+  gets a sentinel written -- but worth revisiting if that ever stops being true.
+
 ## [0.14.2] - 2026-07-07
 
 ### Fix v0.14.1 build: add _CRT_SECURE_NO_WARNINGS to OthelloRingMaster

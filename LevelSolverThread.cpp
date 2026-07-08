@@ -5,17 +5,25 @@
 **   Implements the two thread-pool jobs declared in LevelSolverThread.h:
 **   the merge-writer job (RunMergeWriterJob, D2H + compress a completed GPU
 **   flush into the per-thread pool buffer) and the GPU feeder job
-**   (RunGpuFeederJob, the real per-level driver loop: reads a level's store
-**   files in two sub-passes, black then white, and feeds batches to
-**   GpuKernels). EnumerateStoreFilesForLevel and FlushAccumulator are private
-**   helpers used only by these two jobs.
+**   (RunGpuFeederJob, the real per-level driver loop: expands a level's
+**   ring nested-index store in two sub-passes, black then white, and feeds
+**   batches to GpuKernels). FeedNestedIndexLevel/FeedBoardIntoBatch and
+**   FlushAccumulator are private helpers used only by these two jobs.
 **
 ** Notes:
 **   Promoted from OthelloLevelBlaster's LevelSolverThread.cpp. Renamed
 **   BOARD_KEY_DISK -> UINT64_PAIR, BLF* -> RSF*, BlasterFileTrailer ->
-**   RSFTrailer, BlasterFileName.h -> RSFFileName.h. Logic and choreography
-**   unchanged -- this file never interprets board bits, it only moves opaque
-**   UINT64_PAIR records between file/GPU/pool buffer.
+**   RSFTrailer, BlasterFileName.h -> RSFFileName.h. Merge-writer job logic
+**   and choreography unchanged -- it never interprets board bits, it only
+**   moves opaque UINT64_PAIR records between GPU/pool buffer.
+**
+**   RunGpuFeederJob's read side is NOT a straight port: Blaster (and this
+**   project until now) read a level's input as flat RSF store files.
+**   FeedNestedIndexLevel/FeedBoardIntoBatch are new, replacing the old
+**   EnumerateStoreFilesForLevel + RSFOpen/RSFRead loop with
+**   RingNestedIndexReader::Load/ExpandAll, since the store format is now
+**   the 4-file ring nested index (see MergeFiles.cpp's
+**   ConvertLevelOutputToNestedIndex, which is what produces it).
 */
 
 /* Includes */
@@ -24,6 +32,7 @@
 #include "MergeFiles.h"
 #include "RSFFileName.h"
 #include "OthelloBasics.h"
+#include "RingNestedIndex.h"
 #include "Logger.h"
 #include "Mem.h"
 #include <string.h>
@@ -208,59 +217,107 @@ void FlushAllMergeWriterBuffers(PSolveContext pCtx)
 */
 
 /*
-** Function: EnumerateStoreFilesForLevel
-** @brief    Enumerates RSF store files for a given level and player,
-**           trying plain/.rsfz/.rsfzl in turn (whichever tier this run used).
-** @param    storeDir     - store directory to search
-** @param    boardSize    - board size
-** @param    level        - level to enumerate
-** @param    player       - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    pOutPaths    - out: array of newly-allocated path strings (caller frees each)
-** @param    maxFiles     - capacity of pOutPaths
-** @return   Number of files found.
+** Type:    FeedBatchState
+** @brief   Ping-pong batching state threaded through FeedBoardIntoBatch as
+**          RingNestedIndexReader::ExpandAll walks one player's boards.
 */
-static int EnumerateStoreFilesForLevel(const char* storeDir, int boardSize,
-                                        int level, int player,
-                                        char** pOutPaths, int maxFiles)
+struct FeedBatchState
 {
-    char pattern[MAX_FULL_PATH_NAME];
-    RSFPatternStoreFiles(pattern, sizeof(pattern), storeDir, boardSize, level, player);
+    UINT64_PAIR*     slots[PING_PONG_SLOTS];
+    int              slotIdx;
+    int              count;      /* records currently buffered in slots[slotIdx] */
+    int              optBatch;
+    uint8_t          playerBit;
+    GpuAccumulator*  pAccum;
+    PSolveContext    pCtx;
+};
 
-    /* Extract directory component from the pattern */
-    char dir[MAX_FULL_PATH_NAME];
-    strncpy_s(dir, sizeof(dir), pattern, _TRUNCATE);
-    char* lastSlash = strrchr(dir, '\\');
-    if (!lastSlash) return 0;
-    *lastSlash = '\0';
+/*
+** Function: FeedBoardIntoBatch
+** @brief    Appends one expanded board into the current ping-pong slot,
+**           flushing a full batch to the GPU accumulator once optBatch is reached.
+** @param    st  - the batching state to append into
+** @param    key - the ring-ordered board to feed
+*/
+static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
+{
+    POthelloRingMasterState pSt = st->pCtx->pState;
+    if (pSt->terminateThreads) return;
 
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE)
+    st->slots[st->slotIdx][st->count].hi = key.ullCellsInUse;
+    st->slots[st->slotIdx][st->count].lo = key.ullCellColors;
+    st->count++;
+    pSt->levelStats[pSt->playLevel].boardsReadFromStore++;
+
+    if (st->count < st->optBatch) return;
+
+    if (!GpuAccumulatorHasRoom(st->pAccum, st->count))
+        FlushAccumulator(st->pAccum, st->pCtx);
+
+    GpuProcessBatch(st->pAccum, st->slots[st->slotIdx], st->count, st->playerBit);
+    st->slotIdx = (st->slotIdx + 1) % PING_PONG_SLOTS;
+    st->count   = 0;
+}
+
+/*
+** Function: FeedNestedIndexLevel
+** @brief    Loads one player's nested-index store for a level and feeds
+**           every board through FeedBoardIntoBatch, flushing any leftover
+**           partial batch at the end.
+** @param    pCtx      - solve context
+** @param    pAccum    - the GPU accumulator to feed
+** @param    slots     - the ping-pong slot buffers (shared across both players)
+** @param    pSlotIdx  - in/out: current slot index, carried across calls
+** @param    optBatch  - records per full batch
+** @param    boardSize - board size
+** @param    level     - level to read
+** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    playerBit - the same value as player, passed through to GpuProcessBatch
+*/
+static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
+                                  UINT64_PAIR* const slots[PING_PONG_SLOTS], int* pSlotIdx,
+                                  int optBatch, int boardSize, int level, int player, uint8_t playerBit)
+{
+    POthelloRingMasterState pSt = pCtx->pState;
+
+    char cellsInUsePath[MAX_FULL_PATH_NAME];
+    char ring1Path[MAX_FULL_PATH_NAME];
+    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring34Path[MAX_FULL_PATH_NAME];
+    RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+
+    RingNestedIndexReader reader;
+    if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
     {
-        RSFZPatternStoreFiles(pattern, sizeof(pattern), storeDir, boardSize, level, player);
-        h = FindFirstFileA(pattern, &fd);
+        LoggerLog("GpuFeederJob: no nested-index data for level %d %s, skipping\n",
+                  level, RSFPlayerStr(player));
+        return;
     }
-    if (h == INVALID_HANDLE_VALUE)
-    {
-        RSFZLPatternStoreFiles(pattern, sizeof(pattern), storeDir, boardSize, level, player);
-        h = FindFirstFileA(pattern, &fd);
-    }
-    if (h == INVALID_HANDLE_VALUE) return 0;
 
-    int count = 0;
-    do
+    FeedBatchState st;
+    for (int i = 0; i < PING_PONG_SLOTS; i++) st.slots[i] = slots[i];
+    st.slotIdx   = *pSlotIdx;
+    st.count     = 0;
+    st.optBatch  = optBatch;
+    st.playerBit = playerBit;
+    st.pAccum    = pAccum;
+    st.pCtx      = pCtx;
+
+    reader.ExpandAll([&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); });
+
+    /* Flush whatever's left in the current partially-filled slot. */
+    if (st.count > 0 && !pSt->terminateThreads)
     {
-        if (count >= maxFiles) break;
-        char full[MAX_FULL_PATH_NAME];
-        snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName);
-        pOutPaths[count] = (char*)MemMalloc("levelFilePath", strlen(full) + 1);
-        if (!pOutPaths[count])
-            Fatal(FATAL_ALLOCATION_FAILED, "EnumerateStoreFilesForLevel: cannot allocate path");
-        strcpy(pOutPaths[count], full);
-        count++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    return count;
+        if (!GpuAccumulatorHasRoom(pAccum, st.count))
+            FlushAccumulator(pAccum, pCtx);
+        GpuProcessBatch(pAccum, st.slots[st.slotIdx], st.count, playerBit);
+        st.slotIdx = (st.slotIdx + 1) % PING_PONG_SLOTS;
+    }
+
+    *pSlotIdx = st.slotIdx;
 }
 
 /*
@@ -328,10 +385,11 @@ static void FlushAccumulator(GpuAccumulator* pAccum, PSolveContext pCtx)
 
 /*
 ** Function: RunGpuFeederJob
-** @brief    The per-level driver loop: enumerates a level's store files,
-**           reads them in black-then-white sub-passes through a ping-pong
-**           buffer, and feeds each batch to the GPU accumulator, flushing
-**           whenever there isn't room for the next batch.
+** @brief    The per-level driver loop: loads a level's nested-index store
+**           for each player, expands it back into a flat board stream in
+**           black-then-white sub-passes through a ping-pong buffer, and
+**           feeds each batch to the GPU accumulator, flushing whenever
+**           there isn't room for the next batch.
 ** @param    pCtx  - solve context
 ** @param    level - level to solve
 */
@@ -353,29 +411,26 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
 
     GpuAccumulator* pAccum = GpuAccumulatorCreate(optBatch, maxMoves, totalGpuMem);
 
-    static const int kMaxFiles = 65536;
-    char** blackFiles = (char**)MemMalloc("blackFiles", (size_t)kMaxFiles * sizeof(char*));
-    char** whiteFiles = (char**)MemMalloc("whiteFiles", (size_t)kMaxFiles * sizeof(char*));
-    if (!blackFiles || !whiteFiles)
-        Fatal(FATAL_ALLOCATION_FAILED, "GpuFeederJob: cannot allocate file lists");
-
-    int numBlack = EnumerateStoreFilesForLevel(pSt->storeDirectory, boardSize, level,
-                                               RSF_PLAYER_BLACK, blackFiles, kMaxFiles);
-    int numWhite = EnumerateStoreFilesForLevel(pSt->storeDirectory, boardSize, level,
-                                               RSF_PLAYER_WHITE, whiteFiles, kMaxFiles);
-
-    /* Pre-scan for StatsListener solve-phase % progress */
+    /* Pre-scan for StatsListener solve-phase % progress -- GetBoardCount()
+    ** reads straight off the already-loaded index, no extra I/O beyond the
+    ** Load() FeedNestedIndexLevel does anyway below.
+    */
     {
         uint64_t total = 0;
-        for (int fi = 0; fi < numBlack; fi++)
+        for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
         {
-            RSFReader* r = RSFOpen(blackFiles[fi]);
-            if (r) { total += RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
-        }
-        for (int fi = 0; fi < numWhite; fi++)
-        {
-            RSFReader* r = RSFOpen(whiteFiles[fi]);
-            if (r) { total += RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+            char cellsInUsePath[MAX_FULL_PATH_NAME];
+            char ring1Path[MAX_FULL_PATH_NAME];
+            char ring2Path[MAX_FULL_PATH_NAME];
+            char ring34Path[MAX_FULL_PATH_NAME];
+            RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
+            RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
+            RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
+            RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+
+            RingNestedIndexReader reader;
+            if (reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+                total += reader.GetBoardCount();
         }
         pSt->currentLevelTotalBoards = total;
     }
@@ -383,68 +438,18 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
     int slotIdx = 0;
 
     /* Sub-pass 1: black-turn input boards -> playerBit = RSF_PLAYER_BLACK */
-    for (int fi = 0; fi < numBlack && !pSt->terminateThreads; fi++)
-    {
-        RSFReader* r = RSFOpen(blackFiles[fi]);
-        if (!r)
-        {
-            LoggerLog("GpuFeederJob: WARNING cannot open '%s', skipping\n", blackFiles[fi]);
-            MemFree(blackFiles[fi]);
-            continue;
-        }
-
-        while (!pSt->terminateThreads)
-        {
-            int got = RSFRead(r, slots[slotIdx], optBatch);
-            if (got == 0) break;
-
-            pSt->levelStats[pSt->playLevel].boardsReadFromStore += (uint64_t)got;
-
-            if (!GpuAccumulatorHasRoom(pAccum, got))
-                FlushAccumulator(pAccum, pCtx);
-
-            GpuProcessBatch(pAccum, slots[slotIdx], got, RSF_PLAYER_BLACK);
-            slotIdx = (slotIdx + 1) % PING_PONG_SLOTS;
-        }
-
-        RSFClose(&r);
-        MemFree(blackFiles[fi]);
-    }
+    if (!pSt->terminateThreads)
+        FeedNestedIndexLevel(pCtx, pAccum, slots, &slotIdx, optBatch, boardSize,
+                              level, RSF_PLAYER_BLACK, RSF_PLAYER_BLACK);
 
     /* Sub-pass 2: white-turn input boards -> playerBit = RSF_PLAYER_WHITE */
-    for (int fi = 0; fi < numWhite && !pSt->terminateThreads; fi++)
-    {
-        RSFReader* r = RSFOpen(whiteFiles[fi]);
-        if (!r)
-        {
-            LoggerLog("GpuFeederJob: WARNING cannot open '%s', skipping\n", whiteFiles[fi]);
-            MemFree(whiteFiles[fi]);
-            continue;
-        }
-
-        while (!pSt->terminateThreads)
-        {
-            int got = RSFRead(r, slots[slotIdx], optBatch);
-            if (got == 0) break;
-
-            pSt->levelStats[pSt->playLevel].boardsReadFromStore += (uint64_t)got;
-
-            if (!GpuAccumulatorHasRoom(pAccum, got))
-                FlushAccumulator(pAccum, pCtx);
-
-            GpuProcessBatch(pAccum, slots[slotIdx], got, RSF_PLAYER_WHITE);
-            slotIdx = (slotIdx + 1) % PING_PONG_SLOTS;
-        }
-
-        RSFClose(&r);
-        MemFree(whiteFiles[fi]);
-    }
+    if (!pSt->terminateThreads)
+        FeedNestedIndexLevel(pCtx, pAccum, slots, &slotIdx, optBatch, boardSize,
+                              level, RSF_PLAYER_WHITE, RSF_PLAYER_WHITE);
 
     if (!pSt->terminateThreads)
         FlushAccumulator(pAccum, pCtx);
 
-    MemFree(blackFiles);
-    MemFree(whiteFiles);
     GpuAccumulatorDestroy(pAccum);
 }
 

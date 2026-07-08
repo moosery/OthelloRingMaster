@@ -9,7 +9,8 @@
 **   medium drive, or performs a total flush to the store drive if the
 **   medium drive is full), and DoEndOfLevelMerge (the end-of-level
 **   consolidation of every remaining writer/intermediate file into a single
-**   sorted, deduped store file per player).
+**   sorted, deduped store file per player, then converted into the ring
+**   nested-index format via ConvertLevelOutputToNestedIndex).
 **
 ** Notes:
 **   Promoted from OthelloLevelBlaster's MergeFiles.cpp. Renamed
@@ -24,6 +25,11 @@
 **
 **   InMemDiskHead/InMemDiskHeadGreater from the original file were dropped
 **   -- confirmed dead code there (declared, never used anywhere).
+**
+**   ConvertLevelOutputToNestedIndex is new, not ported from Blaster -- it's
+**   the piece that actually realizes the ring-ordered storage scheme's
+**   validated space savings (Blaster has no equivalent; it only ever wrote
+**   flat files). See that function's own header comment for the design.
 */
 
 /* Includes */
@@ -31,6 +37,7 @@
 #include "RSFFileName.h"
 #include "DriveLedger.h"
 #include "OthelloBasics.h"
+#include "RingNestedIndex.h"
 #include "Logger.h"
 #include "Mem.h"
 #include <windows.h>
@@ -1257,11 +1264,111 @@ static void CollectPoolReadersForPlayer(POthelloRingMasterState pSt, int player,
 }
 
 /*
+** Function: ConvertLevelOutputToNestedIndex
+** @brief    Converts one player's flat, sorted+deduped RSF store output into
+**           the 4-file ring nested-index format (CellsInUse/Ring_1/Ring_2/
+**           Ring_3_4 -- see OthelloBasics/RingNestedIndex.h), deleting the
+**           flat intermediate once the nested files are fully written.
+** @details  This is the actual point of the ring-ordered storage scheme --
+**           the flat RSF file alone only carries the same delta+varint+LZ4
+**           compression Blaster already had; the nested index is what
+**           realizes the additional validated savings (see
+**           project_ring_split_validated_findings memory). Implemented as a
+**           straightforward re-read-and-rebuild pass rather than fused into
+**           the merge's own output step, to keep this addition isolated
+**           from the already-delicate CascadingMerge/KWayMergeFiles machinery.
+**           If interrupted before the flat file is deleted (the last step),
+**           the flat file is still intact and the existing resume-scan
+**           recovery (re-solve the level from scratch) covers it exactly
+**           like any other interrupted merge -- no new failure mode.
+** @param    pCtx            - solve context
+** @param    level           - the level this output belongs to (the level being produced)
+** @param    player          - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    flatPath        - path to the flat merged output to convert
+** @param    flatActualBytes - bytes on disk for flatPath (already known by the caller)
+** @return   Total bytes on disk across the 4 new nested-index files, or 0 if flatPath didn't exist.
+*/
+static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, int player,
+                                                const char* flatPath, int64_t flatActualBytes)
+{
+    RSFReader* flatReader = RSFOpen(flatPath);
+    if (!flatReader) return 0;
+
+    POthelloRingMasterState  pSt       = pCtx->pState;
+    POthelloRingMasterConfig pCfg      = pCtx->pConfig;
+    int                      boardSize = (int)pCfg->boardSize;
+
+    char cellsInUsePath[MAX_FULL_PATH_NAME];
+    char ring1Path[MAX_FULL_PATH_NAME];
+    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring34Path[MAX_FULL_PATH_NAME];
+    RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+
+    FILE* fpCellsInUse = fopen(cellsInUsePath, "wb");
+    FILE* fpRing1      = fopen(ring1Path,      "wb");
+    FILE* fpRing2      = fopen(ring2Path,      "wb");
+    FILE* fpRing34     = fopen(ring34Path,     "wb");
+    if (!fpCellsInUse || !fpRing1 || !fpRing2 || !fpRing34)
+        Fatal(FATAL_FILE_OPEN, "ConvertLevelOutputToNestedIndex: cannot create nested-index files for level %d %s",
+              level, RSFPlayerStr(player));
+
+    RingNestedIndexBuilder builder;
+    builder.Init(fpCellsInUse, fpRing1, fpRing2, fpRing34);
+
+    UINT64_PAIR rec;
+    while (RSFRead(flatReader, &rec, 1) == 1)
+    {
+        BOARD_KEY key;
+        key.ullCellsInUse = rec.hi;
+        key.ullCellColors = rec.lo;
+        builder.Process(key);
+    }
+    builder.Finish();
+    RSFClose(&flatReader);
+
+    fclose(fpCellsInUse);
+    fclose(fpRing1);
+    fclose(fpRing2);
+    fclose(fpRing34);
+
+    int64_t nestedBytes = 0;
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        const char* parts[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+        for (int i = 0; i < 4; i++)
+            if (GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
+                nestedBytes += ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+    }
+
+    /* Only delete the flat intermediate once every nested-index file is
+    ** fully written and closed -- see @details above for why this ordering matters.
+    */
+    DeleteFileA(flatPath);
+
+    /* flatActualBytes were already charged against the store-drive
+    ** reservation by the caller; give those back (the flat file is gone)
+    ** and charge for the nested files that replaced it.
+    */
+    DriveReclaim(pSt, pCfg->storeDrive, flatActualBytes - nestedBytes);
+
+    LoggerLog("ConvertLevelOutputToNestedIndex: level %d %s -> nested index (%.2f GB, was %.2f GB flat)\n",
+              level, RSFPlayerStr(player),
+              nestedBytes     / (1024.0 * 1024.0 * 1024.0),
+              flatActualBytes / (1024.0 * 1024.0 * 1024.0));
+
+    return nestedBytes;
+}
+
+/*
 ** ============================================================
 ** DoEndOfLevelMerge
 **
 ** Runs two independent cascading merges: one for black-turn files, one for
-** white-turn files. Each produces a single sorted store file for level+1.
+** white-turn files. Each produces a single sorted store file for level+1,
+** then converts that store file into the ring nested-index format.
 ** ============================================================
 */
 
@@ -1754,6 +1861,30 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     std::thread whiteThread([&] { mergePlayer(RSF_PLAYER_WHITE); pSt->mergeEndTickMs[RSF_PLAYER_WHITE] = GetTickCount64(); });
     blackThread.join();
     whiteThread.join();
+
+    /* Convert each player's flat merged output into the ring nested-index
+    ** format -- see ConvertLevelOutputToNestedIndex's own comment for why
+    ** this is a separate pass rather than fused into the merge itself.
+    */
+    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    {
+        PlayerData& pd = data[player];
+        if (pd.actualBytes <= 0) continue;   /* nothing was written for this player */
+
+        char flatPath[MAX_FULL_PATH_NAME];
+        bool storeLZ4 = compressOutput && pCfg->lz4Drives[0]
+                     && (strchr(pCfg->lz4Drives, pCfg->storeDrive) != nullptr);
+        if (storeLZ4)
+            RSFZLNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
+        else if (compressOutput)
+            RSFZNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
+        else
+            RSFNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
+
+        int64_t nestedBytes = ConvertLevelOutputToNestedIndex(pCtx, level + 1, player, flatPath, pd.actualBytes);
+        if (nestedBytes > 0)
+            pd.actualBytes = nestedBytes;
+    }
 
     /* Delete "merging" sentinel on clean finish. The "complete" sentinel
     ** (with full LevelStats payload) is written by the main loop after all

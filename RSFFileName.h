@@ -122,6 +122,63 @@ static inline void RSFPatternAnyStoreFiles(char* out, size_t outSize,
 
 /*
 ** ============================================================
+** Ring nested-index store files (the actual final per-level store format --
+** see OthelloBasics/RingNestedIndex.h). Four files per level/player, always
+** fileIdx 0 -- sharding into multiple files per level/player was never
+** actually used by any caller of the plain .rsf naming above either.
+** ============================================================
+*/
+
+/*
+** Function: RSFNameCellsInUseFile
+** @brief    Builds the CellsInUse nested-index file path for one level/player.
+*/
+static inline void RSFNameCellsInUseFile(char* out, size_t outSize,
+                                          const char* dir, int boardSize,
+                                          int level, int player, int fileIdx)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.cellsinuse",
+             dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
+}
+
+/*
+** Function: RSFNameRing1File
+** @brief    Builds the Ring_1 nested-index file path for one level/player.
+*/
+static inline void RSFNameRing1File(char* out, size_t outSize,
+                                     const char* dir, int boardSize,
+                                     int level, int player, int fileIdx)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring1",
+             dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
+}
+
+/*
+** Function: RSFNameRing2File
+** @brief    Builds the Ring_2 nested-index file path for one level/player.
+*/
+static inline void RSFNameRing2File(char* out, size_t outSize,
+                                     const char* dir, int boardSize,
+                                     int level, int player, int fileIdx)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring2",
+             dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
+}
+
+/*
+** Function: RSFNameRing34File
+** @brief    Builds the Ring_3_4 nested-index file path for one level/player.
+*/
+static inline void RSFNameRing34File(char* out, size_t outSize,
+                                      const char* dir, int boardSize,
+                                      int level, int player, int fileIdx)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring34",
+             dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
+}
+
+/*
+** ============================================================
 ** Writer files (NVMe MW buffers)
 ** ============================================================
 */
