@@ -4,6 +4,66 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.16.0] - 2026-07-07
+
+### Make the nested-index compression actually streaming, fix the resume scan, and clean up stale comments
+
+- **Closes the compression gap flagged right after v0.15.0/v0.15.1**:
+  `RingNestedIndexBuilder` was writing `Ring_1`/`Ring_2`/`Ring_3_4` fully
+  uncompressed, and `CellsInUse` through a compression tier that never
+  actually engaged -- meaning the nested-index format could plausibly land
+  larger on disk than the flat format it replaced, undermining the point of
+  the whole ring-ordering effort.
+- Added `Utility/Lz4Stream.h`/`.cpp`: a generic streaming LZ4-frame
+  compressor/decompressor (`Lz4StreamWriter`/`Lz4StreamReader`) for byte
+  streams that don't fit `RingStoreFile.h`'s two-`uint64_t`-field shape.
+  Buffers up to 256KB before compressing/flushing a chunk (write side) or
+  decompressing on demand (read side) -- bounded memory regardless of
+  total stream length, with no raw intermediate file ever written. `Ring_1`/
+  `Ring_2`/`Ring_3_4` now go through this.
+- `CellsInUse`'s `(pattern, offset)` shape is bit-identical to
+  `Utility/RingStoreFile.h`'s `UINT64_PAIR`, so it goes through the
+  existing `RSFWriter`/`RSFReader` machinery instead of a second bespoke
+  format -- but doing so exposed a second bug: `RSFWriterOpenZ` only turns
+  on its LZ4 layer when the path contains `.rsfzl`, and `CellsInUse`'s
+  fixed `.cellsinuse` extension never matches that. Added
+  `RSFWriterOpenZL` (`Utility/RingStoreFile.h`/`.cpp`): forces the LZ4
+  layer on regardless of the path's extension, for callers like this one
+  whose naming convention doesn't -- and can't -- use `.rsfzl`.
+- `RingNestedIndexBuilder::Init`'s signature changed from four raw `FILE*`
+  to `(RSFWriter*, Lz4StreamWriter*, Lz4StreamWriter*, Lz4StreamWriter*)`;
+  updated all three call sites (`MergeFiles.cpp`'s
+  `ConvertLevelOutputToNestedIndex`, `CreateSeedFile.cpp`) to open/close
+  through the new writer types. `LevelSolverThread.cpp`'s read side needed
+  no change -- it only calls `RingNestedIndexReader::Load`, whose external
+  signature was already unchanged.
+- **Fixed a real resume-scan bug**: `InitSolver.cpp`'s `checkLevelFile`/
+  `deletePlayerOutputFile` only ever looked for the legacy flat
+  `.rsf`/`.rsfz`/`.rsfzl` extensions -- meaning every level completed since
+  v0.15.0 (which are all written as the 4-file nested index) would show up
+  as absent on restart, forcing a full re-solve from that level every time.
+  Both functions now check the nested-index four-file set first
+  (validating via `RingNestedIndexReader::Load`), falling back to the
+  legacy flat check for stores produced before the nested-index format
+  existed.
+- Removed every remaining live-source-comment reference naming deleted or
+  external files/tools by name (an offline ring-split validation tool, an
+  older on-disk record format, and an unrelated external consumer that
+  briefly showed up in one file's Notes) -- replaced with generic
+  descriptions ("an earlier solver implementation", "an earlier offline
+  analysis tool") so nothing in this codebase sends a future reader
+  looking for something that isn't here. `CHANGELOG.md` (historical) and
+  `README.md`'s still-accurate reference to the sibling analysis tool are
+  unaffected.
+- C-style verification pass on `OthelloBasics`/`OthelloBasicsForCUDA`
+  (flagged since Phase 0, never done until now): fixed three off-by-one
+  field/constant alignment bugs (`RingNestedIndex.h`'s
+  `RingNestedIndexStats` and `RingNestedIndexBuilder` fields,
+  `RingConversion.cu`'s starting-position constants, and a wrapped-comment
+  continuation in `OthelloBasicsForCUDA.h`'s `BOARD` struct), and added
+  the missing file banner/Doxygen header to `OthelloBasicsForCUDA.cu`
+  (previously just two bare lines with no documentation at all).
+
 ## [0.15.1] - 2026-07-07
 
 ### Fix v0.15.0 build: forward-declare FlushAccumulator

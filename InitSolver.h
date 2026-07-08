@@ -7,9 +7,8 @@
 **   ledgers -> thread pools) and matching teardown for the live solver.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's InitSolver.h; only the config/state
-**   type names change (OthelloLevelBlasterConfig/State ->
-**   OthelloRingMasterConfig/State).
+**   Adapted from an earlier solver implementation; only the config/state
+**   type names change (-> OthelloRingMasterConfig/State).
 */
 
 #pragma once

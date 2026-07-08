@@ -10,14 +10,13 @@
 **   level up to the board's max is complete.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's OthelloLevelBlaster.cpp (the main
-**   entry point file, not the executable name -- this solution's own
-**   OthelloRingMaster.exe plays that same role). Renamed
-**   OthelloLevelBlasterConfig/State -> OthelloRingMasterConfig/State,
-**   BlasterFileName.h -> RSFFileName.h, SENTINEL_STATS_MAGIC ->
-**   RSF_SENTINEL_STATS_MAGIC, default statsPort 17432 -> 17532, default
+**   Adapted from an earlier solver implementation's own main entry point
+**   file (not the executable name -- this solution's own
+**   OthelloRingMaster.exe plays that same role). Renamed onto this
+**   solution's own types (-> OthelloRingMasterConfig/State, RSFFileName.h,
+**   RSF_SENTINEL_STATS_MAGIC), default statsPort changed to 17532, default
 **   cache/store directory names, and file-extension mentions in usage text
-**   (.blf/.blfz/.blfzl -> .rsf/.rsfz/.rsfzl). Loop choreography unchanged.
+**   updated to .rsf/.rsfz/.rsfzl. Loop choreography unchanged.
 */
 
 /* Includes */

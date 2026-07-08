@@ -9,7 +9,7 @@
 **   create/destroy/process/flush API.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's GpuKernels.cu. Renamed
+**   Adapted from an earlier solver implementation, renamed onto
 **   BOARD_KEY_DISK -> UINT64_PAIR throughout (see Utility/RingStoreFile.h) --
 **   every kernel except ExpandKernel treats boards as opaque 16-byte sort
 **   keys and needed no logic change at all, only the type rename.

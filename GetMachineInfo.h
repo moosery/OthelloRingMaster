@@ -7,7 +7,7 @@
 **   populates all three at startup.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's GetMachineInfo.h unchanged -- no
+**   Adapted from an earlier solver implementation, unchanged -- no
 **   Othello-specific coupling.
 */
 

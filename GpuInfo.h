@@ -8,7 +8,7 @@
 **   the live solver's GPU batches and CPU worker-thread counts.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's GpuInfo.h/.cu unchanged -- pure
+**   Adapted from an earlier solver implementation, unchanged -- pure
 **   CUDA-runtime-API capability query, no Othello-specific coupling at all.
 */
 

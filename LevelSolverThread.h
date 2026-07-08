@@ -10,11 +10,12 @@
 **   passed everywhere instead of touching globals directly).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's LevelSolverThread.h/.cpp. Renamed
-**   BOARD_KEY_DISK -> UINT64_PAIR, BLF* -> RSF*,
-**   OthelloLevelBlasterConfig/State -> OthelloRingMasterConfig/State.
-**   FlushDescriptor/SolveContext/PSolveContext keep their original names --
-**   nothing about them referenced Blaster to begin with.
+**   Adapted from an earlier solver implementation, renamed onto this
+**   solution's own types: BOARD_KEY_DISK -> UINT64_PAIR, the old
+**   record-file prefix -> RSF*, the old config/state names ->
+**   OthelloRingMasterConfig/State. FlushDescriptor/SolveContext/
+**   PSolveContext keep their original names -- nothing about them was
+**   solution-specific to begin with.
 */
 
 #pragma once

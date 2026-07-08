@@ -10,13 +10,12 @@
 **   ReleaseInstanceLock).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's InitSolver.cpp. Renamed
-**   BOARD_KEY_DISK -> UINT64_PAIR, BLF* -> RSF*, BlasterFileName.h ->
-**   RSFFileName.h, OthelloLevelBlasterConfig/State -> OthelloRingMasterConfig/
-**   State, file extensions .blf/.blfz/.blfzl -> .rsf/.rsfz/.rsfzl. The
-**   single-instance mutex name changed from "Local\OLB_SingleInstance" to
-**   "Local\OthelloRingMaster_SingleInstance" -- nothing in this project
-**   should reference Blaster naming going forward, even in an OS-level name
+**   Adapted from an earlier solver implementation, renamed onto this
+**   solution's own types (BOARD_KEY_DISK -> UINT64_PAIR, the old
+**   record-file prefix -> RSF*, RSFFileName.h, -> OthelloRingMasterConfig/
+**   State, file extensions -> .rsf/.rsfz/.rsfzl). The single-instance mutex
+**   uses its own name, "Local\OthelloRingMaster_SingleInstance" -- nothing
+**   in this project should name another solution, even in an OS-level name
 **   nobody but this process ever reads.
 */
 
@@ -25,6 +24,7 @@
 #include "RSFFileName.h"
 #include "DriveLedger.h"
 #include "OthelloBasicsForCUDA.h"
+#include "RingNestedIndex.h"
 #include "Utility.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -319,52 +319,13 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
 }
 
 /*
-** Function: checkLevelFile
-** @brief    Probes for Level_NNNN_WxH_<player>_0000.rsf[z][l] for the EXACT
-**           board size being run (not a wildcard -- a storeDir must never
-**           have another board size's files touched), validates the
-**           trailer, and reports which state it found.
-** @param    storeDir    - store directory to probe
-** @param    level       - level to probe
-** @param    boardSize   - exact board size (never a wildcard)
-** @param    player      - "black" or "white"
-** @param    outPath     - out: set when the file is found (valid or corrupt)
-** @param    outPathSize - capacity of outPath
-** @return   LFS_VALID / LFS_CORRUPT (file existed but was deleted) / LFS_ABSENT.
-*/
-static LevelFileStatus checkLevelFile(const char* storeDir, int level, int boardSize, const char* player,
-                                      char* outPath, size_t outPathSize)
-{
-    static const char* exts[] = { "rsf", "rsfz", "rsfzl" };
-    for (int e = 0; e < 3; e++)
-    {
-        char pattern[MAX_FULL_PATH_NAME];
-        snprintf(pattern, sizeof(pattern), "%s\\Level_%04d_%dx%d_%s_0000.%s",
-                 storeDir, level, boardSize, boardSize, player, exts[e]);
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern, &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        FindClose(h);
-        snprintf(outPath, outPathSize, "%s\\%s", storeDir, fd.cFileName);
-        RSFReader* r = RSFOpen(outPath);
-        if (!r)
-        {
-            LoggerLog("ScanForResumeLevel: corrupt level %d %s file, deleting '%s'\n",
-                      level, player, outPath);
-            DeleteFileA(outPath);
-            return LFS_CORRUPT;
-        }
-        RSFClose(&r);
-        return LFS_VALID;
-    }
-    return LFS_ABSENT;
-}
-
-/*
 ** Function: deletePlayerOutputFile
-** @brief    Finds and deletes a player output file for a level without
-**           validating it -- used after finding a "merging" sentinel when
-**           we want to purge partial output.
+** @brief    Deletes every on-disk form of one level/player's output -- the
+**           ring nested-index four-file set (.cellsinuse/.ring1/.ring2/
+**           .ring34, the current store format) and any legacy flat file
+**           (.rsf/.rsfz/.rsfzl, from a store produced before the
+**           nested-index format existed) -- without validating any of it
+**           first.
 ** @details  Exact board size only (not a wildcard) -- must never touch
 **           another board size's files sharing the same storeDir.
 ** @param    storeDir  - store directory to search
@@ -374,6 +335,27 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
 */
 static void deletePlayerOutputFile(const char* storeDir, int level, int boardSize, const char* player)
 {
+    int playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+
+    char cellsInUsePath[MAX_FULL_PATH_NAME];
+    char ring1Path[MAX_FULL_PATH_NAME];
+    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring34Path[MAX_FULL_PATH_NAME];
+    RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     storeDir, boardSize, level, playerCode, 0);
+
+    const char* nestedPaths[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+    for (int i = 0; i < 4; i++)
+    {
+        if (GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
+        {
+            LoggerLog("  Deleting partial output '%s'\n", nestedPaths[i]);
+            DeleteFileA(nestedPaths[i]);
+        }
+    }
+
     static const char* exts[] = { "rsf", "rsfz", "rsfzl" };
     for (int e = 0; e < 3; e++)
     {
@@ -390,6 +372,79 @@ static void deletePlayerOutputFile(const char* storeDir, int level, int boardSiz
         DeleteFileA(fullPath);
         break;
     }
+}
+
+/*
+** Function: checkLevelFile
+** @brief    Probes for one level/player's output, checking the ring
+**           nested-index four-file set (.cellsinuse/.ring1/.ring2/.ring34,
+**           the current store format) first, falling back to a legacy flat
+**           Level_NNNN_WxH_<player>_0000.rsf[z][l] (from a store produced
+**           before the nested-index format existed). Exact board size only
+**           (not a wildcard -- a storeDir must never have another board
+**           size's files touched). Any corrupt/partial find is deleted in
+**           place via deletePlayerOutputFile.
+** @param    storeDir  - store directory to probe
+** @param    level     - level to probe
+** @param    boardSize - exact board size (never a wildcard)
+** @param    player    - "black" or "white"
+** @return   LFS_VALID / LFS_CORRUPT (file(s) existed but were deleted) / LFS_ABSENT.
+*/
+static LevelFileStatus checkLevelFile(const char* storeDir, int level, int boardSize, const char* player)
+{
+    int playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+
+    char cellsInUsePath[MAX_FULL_PATH_NAME];
+    char ring1Path[MAX_FULL_PATH_NAME];
+    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring34Path[MAX_FULL_PATH_NAME];
+    RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     storeDir, boardSize, level, playerCode, 0);
+
+    const char* nestedPaths[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+    int nestedFoundCount = 0;
+    for (int i = 0; i < 4; i++)
+        if (GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
+            nestedFoundCount++;
+
+    if (nestedFoundCount > 0)
+    {
+        RingNestedIndexReader reader;
+        if (nestedFoundCount == 4 && reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+            return LFS_VALID;
+
+        LoggerLog("ScanForResumeLevel: corrupt/partial level %d %s nested-index files, deleting\n",
+                  level, player);
+        deletePlayerOutputFile(storeDir, level, boardSize, player);
+        return LFS_CORRUPT;
+    }
+
+    static const char* exts[] = { "rsf", "rsfz", "rsfzl" };
+    for (int e = 0; e < 3; e++)
+    {
+        char pattern[MAX_FULL_PATH_NAME];
+        snprintf(pattern, sizeof(pattern), "%s\\Level_%04d_%dx%d_%s_0000.%s",
+                 storeDir, level, boardSize, boardSize, player, exts[e]);
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        FindClose(h);
+        char flatPath[MAX_FULL_PATH_NAME];
+        snprintf(flatPath, sizeof(flatPath), "%s\\%s", storeDir, fd.cFileName);
+        RSFReader* r = RSFOpen(flatPath);
+        if (!r)
+        {
+            LoggerLog("ScanForResumeLevel: corrupt level %d %s file, deleting '%s'\n",
+                      level, player, flatPath);
+            DeleteFileA(flatPath);
+            return LFS_CORRUPT;
+        }
+        RSFClose(&r);
+        return LFS_VALID;
+    }
+    return LFS_ABSENT;
 }
 
 /*
@@ -467,20 +522,16 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
         }
 
         /* No sentinels: check for player files. */
-        char blackPath[MAX_FULL_PATH_NAME] = {};
-        char whitePath[MAX_FULL_PATH_NAME] = {};
-        LevelFileStatus bs = checkLevelFile(pState->storeDirectory, level, boardSize, "black",
-                                            blackPath, sizeof(blackPath));
-        LevelFileStatus ws = checkLevelFile(pState->storeDirectory, level, boardSize, "white",
-                                            whitePath, sizeof(whitePath));
+        LevelFileStatus bs = checkLevelFile(pState->storeDirectory, level, boardSize, "black");
+        LevelFileStatus ws = checkLevelFile(pState->storeDirectory, level, boardSize, "white");
 
         if (bs == LFS_ABSENT && ws == LFS_ABSENT)
             return level;
 
         if (bs == LFS_CORRUPT || ws == LFS_CORRUPT)
         {
-            if (bs == LFS_VALID) { LoggerLog("  Deleting valid level %d black alongside corrupt white\n", level); DeleteFileA(blackPath); }
-            if (ws == LFS_VALID) { LoggerLog("  Deleting valid level %d white alongside corrupt black\n", level); DeleteFileA(whitePath); }
+            if (bs == LFS_VALID) { LoggerLog("  Deleting valid level %d black alongside corrupt white\n", level); deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "black"); }
+            if (ws == LFS_VALID) { LoggerLog("  Deleting valid level %d white alongside corrupt black\n", level); deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "white"); }
             return level;
         }
 

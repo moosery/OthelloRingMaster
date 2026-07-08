@@ -9,12 +9,12 @@
 **   per-drive and per-level bookkeeping records each hold).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's OthelloTypes.h, renamed away from
-**   Blaster naming (OthelloLevelBlasterConfig/State -> OthelloRingMasterConfig/
-**   State) and updated to reference the RSF record-file format (see
-**   Utility/RingStoreFile.h) instead of BLF. Field shapes are otherwise kept
-**   as-is -- the multi-drive/multi-writer machinery is real functionality
-**   this project intends to keep, not architectural cruft to trim.
+**   Adapted from an earlier solver implementation, renamed onto this
+**   solution's own types (-> OthelloRingMasterConfig/State) and updated to
+**   reference the RSF record-file format (see Utility/RingStoreFile.h).
+**   Field shapes are otherwise kept as-is -- the multi-drive/multi-writer
+**   machinery is real functionality this project intends to keep, not
+**   architectural cruft to trim.
 */
 
 #pragma once
@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.15.1"
+#define VERSION "0.16.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */

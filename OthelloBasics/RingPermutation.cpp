@@ -3,9 +3,9 @@
 **
 ** Purpose:
 **   Implements the ring-order permutation table builders declared in
-**   RingPermutation.h, promoted out of OthelloRingSplitAnalyzer.cpp's
-**   original analysis-only static functions so both CPU-organizing code and
-**   GPU boundary-conversion kernels can share one validated source of truth
+**   RingPermutation.h, promoted out of an earlier offline analysis tool's
+**   original static functions so both CPU-organizing code and GPU
+**   boundary-conversion kernels can share one validated source of truth
 **   for the ring layout.
 */
 

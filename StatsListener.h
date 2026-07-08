@@ -6,8 +6,8 @@
 **   listens for STATUS and STOP commands on pConfig->statsPort and returns immediately.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's StatsListener.h; only the config/
-**   state type it operates through changed (via LevelSolverThread.h's
+**   Adapted from an earlier solver implementation; only the config/state
+**   type it operates through changed (via LevelSolverThread.h's
 **   PSolveContext, already renamed).
 */
 

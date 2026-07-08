@@ -12,9 +12,9 @@
 **
 **   Player-to-move and board size are external context (which file/batch a
 **   key belongs to), not a per-record field -- matching the on-disk
-**   convention BlasterFile.h already used for BOARD_KEY_DISK (now merged
-**   into this single BOARD_KEY, so the whole solution has one board-key
-**   type instead of two near-identical ones).
+**   convention an earlier disk-key format already used (now merged into
+**   this single BOARD_KEY, so the whole solution has one board-key type
+**   instead of two near-identical ones).
 */
 
 #pragma once

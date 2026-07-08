@@ -57,6 +57,9 @@
     <ClInclude Include="RingStoreFile.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Lz4Stream.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BinSearchLE.cpp">
@@ -96,6 +99,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="RingStoreFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Lz4Stream.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -6,9 +6,8 @@
 **   process-wide logger before any other startup work happens.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's InitLogger.h; logic unchanged, only
-**   the config/state types are renamed (OthelloLevelBlasterConfig/State ->
-**   OthelloRingMasterConfig/State).
+**   Adapted from an earlier solver implementation; logic unchanged, only
+**   the config/state types are renamed (-> OthelloRingMasterConfig/State).
 */
 
 #pragma once

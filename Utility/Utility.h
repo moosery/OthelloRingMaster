@@ -22,6 +22,7 @@
 #include "Error.h"
 #include "FileAndDirUtils.h"
 #include "Logger.h"
+#include "Lz4Stream.h"
 #include "Mem.h"
 #include "RingStoreFile.h"
 #include "RWLock.h"

@@ -11,14 +11,14 @@
 **   FlushAccumulator are private helpers used only by these two jobs.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's LevelSolverThread.cpp. Renamed
-**   BOARD_KEY_DISK -> UINT64_PAIR, BLF* -> RSF*, BlasterFileTrailer ->
-**   RSFTrailer, BlasterFileName.h -> RSFFileName.h. Merge-writer job logic
-**   and choreography unchanged -- it never interprets board bits, it only
-**   moves opaque UINT64_PAIR records between GPU/pool buffer.
+**   Adapted from an earlier solver implementation, renamed onto this
+**   solution's own types (BOARD_KEY_DISK -> UINT64_PAIR, the old
+**   record-file prefix -> RSF*, RSFTrailer, RSFFileName.h). Merge-writer
+**   job logic and choreography unchanged -- it never interprets board
+**   bits, it only moves opaque UINT64_PAIR records between GPU/pool buffer.
 **
-**   RunGpuFeederJob's read side is NOT a straight port: Blaster (and this
-**   project until now) read a level's input as flat RSF store files.
+**   RunGpuFeederJob's read side is NOT a straight port: earlier revisions
+**   of this project read a level's input as flat RSF store files.
 **   FeedNestedIndexLevel/FeedBoardIntoBatch are new, replacing the old
 **   EnumerateStoreFilesForLevel + RSFOpen/RSFRead loop with
 **   RingNestedIndexReader::Load/ExpandAll, since the store format is now

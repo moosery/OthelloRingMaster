@@ -8,7 +8,7 @@
 **   results available for the CPU-side merge writer to read back.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's GpuKernels.h/.cu. Renamed
+**   Adapted from an earlier solver implementation, renamed onto
 **   BOARD_KEY_DISK -> UINT64_PAIR (see Utility/RingStoreFile.h) throughout;
 **   playerBit values are 1=black, 0=white (see RSFFileName.h's
 **   RSF_PLAYER_BLACK/RSF_PLAYER_WHITE). The one real adaptation beyond

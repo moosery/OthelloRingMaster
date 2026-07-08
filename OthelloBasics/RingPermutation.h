@@ -2,8 +2,8 @@
 ** Filename:  RingPermutation.h
 **
 ** Purpose:
-**   Declares the ring-order permutation table builders promoted out of
-**   OthelloRingSplitAnalyzer's original analysis-only code: GenerateRingOrder
+**   Declares the ring-order permutation table builders, promoted out of an
+**   earlier offline analysis tool's original code: GenerateRingOrder
 **   produces the (row,col) visiting order for an NxN ring walk (outermost
 **   perimeter first, innermost last); BuildRingPermutation turns that into a
 **   forward table (ring-position -> row-major absolute bit index);

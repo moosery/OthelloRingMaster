@@ -187,13 +187,15 @@ RSFWriter* RSFWriterOpen(const char* path)
 }
 
 /*
-** Function: RSFWriterOpenZ
-** @brief    Opens path for streaming, delta+varint compressed output.
-**           Adds an LZ4 frame layer on top automatically if path ends in ".rsfzl".
-** @param    path - file path to create (overwritten if it exists)
+** Function: RSFWriterOpenZImpl
+** @brief    Shared implementation for RSFWriterOpenZ/RSFWriterOpenZL: opens
+**           path for streaming, delta+varint compressed output, adding an
+**           LZ4 frame layer on top if forceLZ4 is set or path ends in ".rsfzl".
+** @param    path     - file path to create (overwritten if it exists)
+** @param    forceLZ4 - add the LZ4 layer regardless of path's extension
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpenZ(const char* path)
+static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4)
 {
     FILE* f = fopen(path, "wb");
     if (!f)
@@ -214,8 +216,8 @@ RSFWriter* RSFWriterOpenZ(const char* path)
         Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZ: cannot allocate write buffer");
     }
 
-    /* .rsfzl: add LZ4 frame layer on top of varint */
-    if (strstr(path, ".rsfzl"))
+    /* .rsfzl (or forceLZ4): add LZ4 frame layer on top of varint */
+    if (forceLZ4 || strstr(path, ".rsfzl"))
     {
         pw->isLZ4 = true;
         LZ4F_errorCode_t lz4Err = LZ4F_createCompressionContext(&pw->lz4Cctx, LZ4F_VERSION);
@@ -257,6 +259,33 @@ RSFWriter* RSFWriterOpenZ(const char* path)
     }
 
     return pw;
+}
+
+/*
+** Function: RSFWriterOpenZ
+** @brief    Opens path for streaming, delta+varint compressed output.
+**           Adds an LZ4 frame layer on top automatically if path ends in ".rsfzl".
+** @param    path - file path to create (overwritten if it exists)
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZ(const char* path)
+{
+    return RSFWriterOpenZImpl(path, false);
+}
+
+/*
+** Function: RSFWriterOpenZL
+** @brief    Opens path for streaming, delta+varint+LZ4 compressed output,
+**           regardless of path's extension -- for callers whose naming
+**           convention doesn't use ".rsfzl" but still want the full
+**           compression tier (e.g. OthelloBasics/RingNestedIndex.h's
+**           CellsInUse output).
+** @param    path - file path to create (overwritten if it exists)
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZL(const char* path)
+{
+    return RSFWriterOpenZImpl(path, true);
 }
 
 /*

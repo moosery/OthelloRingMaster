@@ -65,23 +65,20 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
         if (!pRoot)
             Fatal(FATAL_ALLOCATION_FAILED, "CreateSeedFile: BoardKeyAllocateFirstBoard failed");
 
-        FILE* fpCellsInUse = fopen(cellsInUsePath, "wb");
-        FILE* fpRing1      = fopen(ring1Path,      "wb");
-        FILE* fpRing2      = fopen(ring2Path,      "wb");
-        FILE* fpRing34     = fopen(ring34Path,     "wb");
-        if (!fpCellsInUse || !fpRing1 || !fpRing2 || !fpRing34)
-            Fatal(FATAL_FILE_OPEN, "CreateSeedFile: cannot create nested-index files under '%s'",
-                  pState->storeDirectory);
+        RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
+        Lz4StreamWriter* pRing1Writer      = Lz4StreamWriterOpen(ring1Path);
+        Lz4StreamWriter* pRing2Writer      = Lz4StreamWriterOpen(ring2Path);
+        Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
 
         RingNestedIndexBuilder builder;
-        builder.Init(fpCellsInUse, fpRing1, fpRing2, fpRing34);
+        builder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
         builder.Process(*pRoot);
         builder.Finish();
 
-        fclose(fpCellsInUse);
-        fclose(fpRing1);
-        fclose(fpRing2);
-        fclose(fpRing34);
+        RSFWriterClose(pCellsInUseWriter);
+        Lz4StreamWriterClose(pRing1Writer);
+        Lz4StreamWriterClose(pRing2Writer);
+        Lz4StreamWriterClose(pRing34Writer);
 
         MemFree(pRoot);
 

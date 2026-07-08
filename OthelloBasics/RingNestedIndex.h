@@ -3,11 +3,12 @@
 **
 ** Purpose:
 **   Declares the ring-split nested-index format (CellsInUse -> Ring_1 ->
-**   Ring_2 -> Ring_3_4) promoted out of OthelloRingSplitAnalyzer.cpp's
-**   original analysis-only Aggregator: RingNestedIndexBuilder consumes a
-**   sorted, deduped stream of ring-ordered BOARD_KEYs and writes the four
-**   nested files; RingNestedIndexReader does the reverse, expanding the
-**   four files back into the original sorted stream of BOARD_KEYs.
+**   Ring_2 -> Ring_3_4), promoted out of the offline analysis tool that
+**   originally validated this design (see project_ring_split_validated_
+**   findings memory): RingNestedIndexBuilder consumes a sorted, deduped
+**   stream of ring-ordered BOARD_KEYs and writes the four nested files;
+**   RingNestedIndexReader does the reverse, expanding the four files back
+**   into the original sorted stream of BOARD_KEYs.
 **
 **   This is CPU-organizing work, not solving -- pure counting/comparison/
 **   offset bookkeeping over already-ring-ordered numeric keys, per the
@@ -23,12 +24,25 @@
 **   Ring_1 + Ring_2 + Ring_3_4 together reconstruct one board exactly, and
 **   the source store has no duplicates), which is why Ring34Rec carries no
 **   count field.
+**
+**   Compression matches the intent behind what the original validation
+**   measured, adapted to stay fully streaming (no raw intermediate file,
+**   no whole-level-in-memory step, ever -- this matters at real data
+**   volumes): CellsInUse's (pattern, offset) shape is bit-identical to
+**   UINT64_PAIR, so it goes straight through Utility's RSFWriter/RSFReader
+**   (delta+varint+LZ4), the same compression the flat store format uses.
+**   Ring_1/Ring_2/Ring_3_4 don't fit that two-field shape; those go through
+**   Utility/Lz4Stream.h's Lz4StreamWriter/Reader instead -- LZ4-only
+**   framing (no delta/varint), with each record compressed as Process()
+**   produces it, so no raw file ever touches disk.
 */
 
 #pragma once
 
 /* Includes */
 #include "OthelloBasics.h"
+#include "RingStoreFile.h"
+#include "Lz4Stream.h"
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -101,12 +115,12 @@ static_assert(sizeof(Ring34Rec)     ==  2, "Ring34Rec must be 2 bytes");
 */
 struct RingNestedIndexStats
 {
-    uint64_t cellsInUseRecords          = 0;
-    uint64_t ring1Records                = 0;
-    uint64_t ring2Records                = 0;
-    uint64_t ring34Records               = 0;
-    uint64_t ring34GroupsWithCountNot1   = 0;
-    uint64_t totalBoards                 = 0;
+    uint64_t cellsInUseRecords         = 0;
+    uint64_t ring1Records              = 0;
+    uint64_t ring2Records              = 0;
+    uint64_t ring34Records             = 0;
+    uint64_t ring34GroupsWithCountNot1 = 0;
+    uint64_t totalBoards               = 0;
 };
 
 /*
@@ -118,12 +132,12 @@ struct RingNestedIndexStats
 */
 struct RingNestedIndexBuilder
 {
-    FILE* fpCellsInUse = nullptr;
-    FILE* fpRing1       = nullptr;
-    FILE* fpRing2       = nullptr;
-    FILE* fpRing34      = nullptr;
+    RSFWriter*        pCellsInUseWriter = nullptr;   /* compressed via RSF, see file Notes            */
+    Lz4StreamWriter*  pRing1Writer      = nullptr;   /* compressed via Lz4Stream, see file Notes       */
+    Lz4StreamWriter*  pRing2Writer      = nullptr;
+    Lz4StreamWriter*  pRing34Writer     = nullptr;
 
-    bool      havePattern           = false;
+    bool      havePattern            = false;
     uint64_t  curPattern             = 0;
 
     bool      haveRing1Group         = false;
@@ -142,19 +156,20 @@ struct RingNestedIndexBuilder
 
     /*
     ** Method: Init
-    ** @brief  Attaches the four already-open output files this builder writes to.
-    ** @param  fpCellsInUseIn - CellsInUse output file
-    ** @param  fpRing1In      - Ring_1 output file
-    ** @param  fpRing2In      - Ring_2 output file
-    ** @param  fpRing34In     - Ring_3_4 output file
+    ** @brief  Attaches the four already-open outputs this builder writes to.
+    ** @param  pCellsInUseWriterIn - already-open RSFWriter for the CellsInUse output (via RSFWriterOpenZL)
+    ** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output
+    ** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output
+    ** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output
     */
-    void Init(FILE* fpCellsInUseIn, FILE* fpRing1In, FILE* fpRing2In, FILE* fpRing34In);
+    void Init(RSFWriter* pCellsInUseWriterIn, Lz4StreamWriter* pRing1WriterIn,
+              Lz4StreamWriter* pRing2WriterIn, Lz4StreamWriter* pRing34WriterIn);
 
     /*
     ** Method: Process
     ** @brief  Feeds one ring-ordered BOARD_KEY into the builder. Keys must
     **         arrive already sorted (ullCellsInUse then ullCellColors) and
-    **         deduped -- the same order BLFOpen/BLFRead's stream is already in.
+    **         deduped -- the same order RSFOpen/RSFRead's stream is already in.
     ** @param  key - the next ring-ordered BOARD_KEY in sorted order
     */
     void Process(const BOARD_KEY& key);

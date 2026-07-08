@@ -8,12 +8,11 @@
 **   standalone OthelloRingMasterStatus client.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's StatsListener.cpp. Only the
-**   config/state type names changed (OthelloLevelBlasterConfig/State ->
-**   OthelloRingMasterConfig/State) and the version banner text
-**   ("OthelloLevelBlaster v%s" -> "OthelloRingMaster v%s") -- everything
-**   else here formats already-generically-named LevelStats/WriterDriveStats
-**   fields, so nothing else needed to change.
+**   Adapted from an earlier solver implementation. Only the config/state
+**   type names changed (-> OthelloRingMasterConfig/State) and the version
+**   banner text (-> "OthelloRingMaster v%s") -- everything else here
+**   formats already-generically-named LevelStats/WriterDriveStats fields,
+**   so nothing else needed to change.
 */
 
 /* Includes */

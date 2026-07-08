@@ -17,9 +17,8 @@
 **     DriveAvailable  -- read current value (display / threshold checks)
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's DriveLedger.h; logic unchanged, only
-**   the state type it operates on is renamed (OthelloLevelBlasterState ->
-**   OthelloRingMasterState).
+**   Adapted from an earlier solver implementation; logic unchanged, only
+**   the state type it operates on is renamed (-> OthelloRingMasterState).
 */
 
 #pragma once

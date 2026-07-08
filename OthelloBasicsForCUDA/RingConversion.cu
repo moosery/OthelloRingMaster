@@ -26,8 +26,8 @@
 */
 static const unsigned long long kStartRowMajorCellsInUse = 0x0000001818000000ULL;
 static const unsigned long long kStartRowMajorCellColors = 0x0000000810000000ULL;
-static const unsigned long long kStartRingCellsInUse      = 0x000000000000000FULL;
-static const unsigned long long kStartRingCellColors      = 0x0000000000000005ULL;
+static const unsigned long long kStartRingCellsInUse     = 0x000000000000000FULL;
+static const unsigned long long kStartRingCellColors     = 0x0000000000000005ULL;
 
 /* Functions */
 

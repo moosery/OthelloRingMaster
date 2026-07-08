@@ -18,9 +18,9 @@
 **   dev_canonicalize_key, etc.) operated directly on BOARD_KEY and read a
 **   next-player bit from it. That bit no longer exists on BOARD_KEY --
 **   next-player is tracked externally now (which file/batch a key belongs
-**   to), matching BlasterFile.h's on-disk convention. That family was for a
-**   different, external consumer (OLE) not part of this solution anyway, so
-**   it was dropped rather than reworked.
+**   to), matching the on-disk record format's own convention. That family
+**   served a use case not part of this solution, so it was dropped rather
+**   than reworked.
 */
 
 #pragma once
@@ -43,14 +43,14 @@ typedef struct _Board
     unsigned long long  ullCellsInUse;      /* 0-> Not used      1-> Used             */
     unsigned long long  ullCellColors;      /* 0-> White         1-> Black            */
     unsigned short      usBoardInfo;        /* 0b0000000X        Next Player 1->Black */
-                                             /*                               0->White */
+                                            /*                               0->White */
     unsigned short      _pad1[3];           /* explicit alignment padding             */
     unsigned long long  ullPossibleMoves;   /* 0-> No move       1-> Can play          */
     unsigned long long  ullBlackWins;       /* Number of potential black wins          */
     unsigned long long  ullWhiteWins;       /* Number of potential white wins          */
     unsigned long long  ullTies;            /* Number of tie boards                    */
     unsigned short      usBoardState;       /* 0=not played, 1=played/non-terminal,    */
-                                             /* 2=played/terminal, 3=played/no moves    */
+                                            /* 2=played/terminal, 3=played/no moves    */
     unsigned short      _pad2[3];           /* explicit trailing padding               */
 } BOARD, * PBOARD;
 

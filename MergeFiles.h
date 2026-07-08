@@ -10,9 +10,8 @@
 **   single sorted, deduped store file per player).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's MergeFiles.h. Declarations only here
-**   -- the implementation (MergeFiles.cpp) lands in a later Phase 4 step; see
-**   project_ring_layout_implementation_plan memory.
+**   Adapted from an earlier solver implementation. Declarations only here
+**   -- see MergeFiles.cpp for the implementation.
 */
 
 #pragma once

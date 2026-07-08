@@ -7,11 +7,11 @@
 **   completed-level history (or sends a STOP command for graceful shutdown).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's OthelloLevelBlasterStatus.cpp.
-**   Default port changed from 17432 to 17532 so both solutions' status
-**   listeners can run concurrently on the same dev machine without a bind
-**   conflict. Otherwise unchanged -- this file has zero dependency on the
-**   rest of the solution, matching Blaster's own precedent.
+**   Adapted from an earlier solver implementation's own status client.
+**   Default port changed to 17532 so this and any other status listener
+**   on the same dev machine can run concurrently without a bind conflict.
+**   Otherwise unchanged -- this file has zero dependency on the rest of
+**   the solution.
 */
 
 /* Includes */

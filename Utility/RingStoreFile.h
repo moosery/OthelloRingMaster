@@ -21,8 +21,8 @@
 **   in-memory array (always uncompressed).
 **
 ** Notes:
-**   Promoted out of the OthelloRingSplitAnalyzer-only BlasterFile.h/.cpp
-**   (now deleted -- its job of proving the ring-split theory is done) and
+**   Promoted from an earlier analysis-only version of this format (now
+**   deleted -- its job of proving the ring-split theory is done) and
 **   genericized: no more Othello-specific naming or types, so any project
 **   in this solution can depend on it without pulling in board semantics.
 */
@@ -120,6 +120,17 @@ RSFWriter* RSFWriterOpen(const char* path);
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
 RSFWriter* RSFWriterOpenZ(const char* path);
+
+/*
+** Function: RSFWriterOpenZL
+** @brief    Opens path for streaming, delta+varint+LZ4 compressed output,
+**           regardless of path's extension -- for callers whose naming
+**           convention doesn't use ".rsfzl" but still want the full
+**           compression tier.
+** @param    path - file path to create (overwritten if it exists)
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZL(const char* path);
 
 /*
 ** Function: RSFWriterOpenZMem

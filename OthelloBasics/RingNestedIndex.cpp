@@ -14,18 +14,19 @@
 
 /*
 ** Method: RingNestedIndexBuilder::Init
-** @brief  Attaches the four already-open output files this builder writes to.
-** @param  fpCellsInUseIn - CellsInUse output file
-** @param  fpRing1In      - Ring_1 output file
-** @param  fpRing2In      - Ring_2 output file
-** @param  fpRing34In     - Ring_3_4 output file
+** @brief  Attaches the four already-open outputs this builder writes to.
+** @param  pCellsInUseWriterIn - already-open RSFWriter for the CellsInUse output
+** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output
+** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output
+** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output
 */
-void RingNestedIndexBuilder::Init(FILE* fpCellsInUseIn, FILE* fpRing1In, FILE* fpRing2In, FILE* fpRing34In)
+void RingNestedIndexBuilder::Init(RSFWriter* pCellsInUseWriterIn, Lz4StreamWriter* pRing1WriterIn,
+                                   Lz4StreamWriter* pRing2WriterIn, Lz4StreamWriter* pRing34WriterIn)
 {
-    fpCellsInUse = fpCellsInUseIn;
-    fpRing1      = fpRing1In;
-    fpRing2      = fpRing2In;
-    fpRing34     = fpRing34In;
+    pCellsInUseWriter = pCellsInUseWriterIn;
+    pRing1Writer      = pRing1WriterIn;
+    pRing2Writer      = pRing2WriterIn;
+    pRing34Writer     = pRing34WriterIn;
 }
 
 /*
@@ -42,7 +43,7 @@ void RingNestedIndexBuilder::CloseRing34Group()
     ** instead of silently losing data.
     */
     Ring34Rec rec{ curRing34Pattern };
-    fwrite(&rec, sizeof(rec), 1, fpRing34);
+    Lz4StreamWriterWrite(pRing34Writer, &rec, sizeof(rec));
     if (ring34GroupCount != 1)
         stats.ring34GroupsWithCountNot1++;
     stats.ring34Records++;
@@ -61,7 +62,7 @@ void RingNestedIndexBuilder::CloseRing2Group()
 
     uint64_t      count = stats.ring34Records - ring2GroupRing34Start;
     RingLevelRec  rec{ count, curRing2Pattern, ring2GroupRing34Start };
-    fwrite(&rec, sizeof(rec), 1, fpRing2);
+    Lz4StreamWriterWrite(pRing2Writer, &rec, sizeof(rec));
     stats.ring2Records++;
     haveRing2Group = false;
 }
@@ -78,7 +79,7 @@ void RingNestedIndexBuilder::CloseRing1Group()
 
     uint64_t      count = stats.ring2Records - ring1GroupRing2Start;
     RingLevelRec  rec{ count, curRing1Pattern, ring1GroupRing2Start };
-    fwrite(&rec, sizeof(rec), 1, fpRing1);
+    Lz4StreamWriterWrite(pRing1Writer, &rec, sizeof(rec));
     stats.ring1Records++;
     haveRing1Group = false;
 }
@@ -102,8 +103,12 @@ void RingNestedIndexBuilder::Process(const BOARD_KEY& key)
     {
         CloseRing1Group();
 
-        CellsInUseRec rec{ key.ullCellsInUse, stats.ring1Records };
-        fwrite(&rec, sizeof(rec), 1, fpCellsInUse);
+        /* CellsInUseRec's (pattern, offset) shape is bit-identical to
+        ** UINT64_PAIR, so this goes through the same compressed RSFWriter
+        ** the flat store format uses -- see file Notes.
+        */
+        UINT64_PAIR rec{ key.ullCellsInUse, stats.ring1Records };
+        RSFWriterRecord(pCellsInUseWriter, &rec);
         stats.cellsInUseRecords++;
 
         curPattern  = key.ullCellsInUse;
@@ -147,34 +152,59 @@ void RingNestedIndexBuilder::Finish()
 }
 
 /*
-** Function: readWholeFile
-** @brief    Reads path fully into pOut, resizing to the file's element count.
+** Function: readStreamedRecords
+** @brief    Reads every fixed-size T record from an Lz4Stream-compressed
+**           file into pOut, appending until end of stream.
 ** @param    path - file path to read
 ** @param    pOut - out: filled with every record in the file
-** @return   true if the file opened and read successfully.
+** @return   true if the file opened and every record was whole (no
+**           truncated/corrupt trailing partial record).
 */
 template <typename T>
-static bool readWholeFile(const char* path, std::vector<T>* pOut)
+static bool readStreamedRecords(const char* path, std::vector<T>* pOut)
 {
-    FILE* fp = fopen(path, "rb");
-    if (!fp)
-        return false;
+    Lz4StreamReader* r = Lz4StreamReaderOpen(path);
+    if (!r) return false;
 
-    _fseeki64(fp, 0, SEEK_END);
-    int64_t sizeBytes = _ftelli64(fp);
-    _fseeki64(fp, 0, SEEK_SET);
-
-    if (sizeBytes < 0 || (sizeBytes % (int64_t)sizeof(T)) != 0)
+    bool ok = true;
+    for (;;)
     {
-        fclose(fp);
-        return false;
+        T      rec;
+        size_t got = Lz4StreamReaderRead(r, &rec, sizeof(rec));
+        if (got == 0) break;                       /* clean end of stream */
+        if (got != sizeof(rec)) { ok = false; break; }   /* truncated mid-record */
+        pOut->push_back(rec);
     }
 
-    pOut->resize((size_t)(sizeBytes / (int64_t)sizeof(T)));
-    bool ok = pOut->empty() || fread(pOut->data(), sizeof(T), pOut->size(), fp) == pOut->size();
-
-    fclose(fp);
+    Lz4StreamReaderClose(&r);
     return ok;
+}
+
+/*
+** Function: readCellsInUseViaRSF
+** @brief    Reads the CellsInUse file (compressed via RSFWriter/RSFReader --
+**           see file Notes) fully into pOut.
+** @param    path - path to the CellsInUse file
+** @param    pOut - out: filled with every CellsInUseRec in the file
+** @return   true if the file opened and read successfully.
+*/
+static bool readCellsInUseViaRSF(const char* path, std::vector<CellsInUseRec>* pOut)
+{
+    RSFReader* r = RSFOpen(path);
+    if (!r) return false;
+
+    pOut->resize((size_t)RSFReaderTrailer(r)->recordCount);
+
+    UINT64_PAIR rec;
+    size_t      i = 0;
+    while (i < pOut->size() && RSFRead(r, &rec, 1) == 1)
+    {
+        (*pOut)[i].pattern = rec.hi;
+        (*pOut)[i].offset  = rec.lo;
+        i++;
+    }
+    RSFClose(&r);
+    return i == pOut->size();
 }
 
 /*
@@ -188,10 +218,10 @@ static bool readWholeFile(const char* path, std::vector<T>* pOut)
 */
 bool RingNestedIndexReader::Load(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path, const char* ring34Path)
 {
-    return readWholeFile(cellsInUsePath, &cellsInUse)
-        && readWholeFile(ring1Path, &ring1)
-        && readWholeFile(ring2Path, &ring2)
-        && readWholeFile(ring34Path, &ring34);
+    return readCellsInUseViaRSF(cellsInUsePath, &cellsInUse)
+        && readStreamedRecords(ring1Path, &ring1)
+        && readStreamedRecords(ring2Path, &ring2)
+        && readStreamedRecords(ring34Path, &ring34);
 }
 
 /*

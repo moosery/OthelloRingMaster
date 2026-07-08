@@ -7,11 +7,11 @@
 **   very first pass.
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's CreateSeedFile.h/.cpp. The one real
-**   change: uses OthelloBasics's BoardKeyAllocateFirstBoard (a precomputed
-**   ring-ordered constant) instead of Blaster's row-major
-**   BoardAllocateFirstBoard -- this is the one necessary CPU-side exception
-**   to the CPU-organizes/GPU-solves boundary (see project memory), and the
+**   Adapted from an earlier solver implementation. The one real change:
+**   uses OthelloBasics's BoardKeyAllocateFirstBoard (a precomputed
+**   ring-ordered constant) instead of a row-major starting-position
+**   builder -- this is the one necessary CPU-side exception to the
+**   CPU-organizes/GPU-solves boundary (see project memory), and the
 **   ring-ordered constant it returns is already validated in OthelloBasics.
 **   Everything else (RSF I/O, sentinel write) is otherwise unchanged.
 */

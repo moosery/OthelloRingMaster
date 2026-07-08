@@ -51,7 +51,7 @@ typedef enum {
 **          FAST/MEDIUM/SLOW categorization. There is no concurrency sweep,
 **          no "how many directories/threads" concept here -- that question
 **          (if a drive needs N parallel compressor threads to keep up) is
-**          answered by OthelloLevelBlaster itself, not Utility, since
+**          answered by the solver project itself, not Utility, since
 **          answering it needs the real compression pipeline, which Utility
 **          must not depend on.
 */

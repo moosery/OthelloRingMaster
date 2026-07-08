@@ -18,10 +18,10 @@
 **                                        cascade_temp_L017_white_0042.rsf
 **
 ** Notes:
-**   Promoted out of OthelloLevelBlaster's BlasterFileName.h, renamed away
-**   from Blaster/BLF naming throughout (new prefix RSF, extensions
-**   .rsf/.rsfz/.rsfzl replace .blf/.blfz/.blfzl). Stays in OthelloRingMaster
-**   itself (not Utility) since it's level/player/drive-directory-aware, not
+**   Adapted from an earlier solver implementation's own file-naming
+**   module, renamed throughout onto this solution's own naming (prefix
+**   RSF, extensions .rsf/.rsfz/.rsfzl). Stays in OthelloRingMaster itself
+**   (not Utility) since it's level/player/drive-directory-aware, not
 **   generic. The counts-file naming helper is intentionally not ported --
 **   the win/tie/loss stats format itself is a separate, not-yet-started
 **   future phase.

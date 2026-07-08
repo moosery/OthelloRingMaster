@@ -13,23 +13,26 @@
 **   nested-index format via ConvertLevelOutputToNestedIndex).
 **
 ** Notes:
-**   Promoted from OthelloLevelBlaster's MergeFiles.cpp. Renamed
-**   BOARD_KEY_DISK -> UINT64_PAIR (.ullCellsInUse/.ullCellColors -> .hi/.lo),
-**   BLF-prefixed names and BlasterFileTrailer -> RSF-prefixed names and
-**   RSFTrailer, BlasterFileName.h -> RSFFileName.h. Logic and choreography unchanged -- every merge
-**   comparator here does a plain numeric (hi, lo) comparison; it never
-**   interprets board bits, so the merge is correct whether the underlying
-**   encoding is row-major or ring-ordered, as long as every input stream
-**   uses the same encoding (see project_gpu_reorder_integration_design
-**   memory for the one real risk this implies).
+**   Adapted from an earlier solver implementation, renamed onto this
+**   solution's own types (BOARD_KEY_DISK -> UINT64_PAIR,
+**   .ullCellsInUse/.ullCellColors -> .hi/.lo, the old record-file prefix
+**   -> RSF-prefixed names and RSFTrailer, RSFFileName.h). Logic and
+**   choreography unchanged -- every merge comparator here does a plain
+**   numeric (hi, lo) comparison; it never interprets board bits, so the
+**   merge is correct whether the underlying encoding is row-major or
+**   ring-ordered, as long as every input stream uses the same encoding
+**   (see project_gpu_reorder_integration_design memory for the one real
+**   risk this implies).
 **
-**   InMemDiskHead/InMemDiskHeadGreater from the original file were dropped
-**   -- confirmed dead code there (declared, never used anywhere).
+**   InMemDiskHead/InMemDiskHeadGreater from the earlier implementation
+**   were dropped -- confirmed dead code there (declared, never used
+**   anywhere).
 **
-**   ConvertLevelOutputToNestedIndex is new, not ported from Blaster -- it's
-**   the piece that actually realizes the ring-ordered storage scheme's
-**   validated space savings (Blaster has no equivalent; it only ever wrote
-**   flat files). See that function's own header comment for the design.
+**   ConvertLevelOutputToNestedIndex is new -- it's the piece that actually
+**   realizes the ring-ordered storage scheme's validated space savings; no
+**   earlier implementation had an equivalent, since none of them wrote
+**   anything but flat files. See that function's own header comment for
+**   the design.
 */
 
 /* Includes */
@@ -1271,13 +1274,16 @@ static void CollectPoolReadersForPlayer(POthelloRingMasterState pSt, int player,
 **           flat intermediate once the nested files are fully written.
 ** @details  This is the actual point of the ring-ordered storage scheme --
 **           the flat RSF file alone only carries the same delta+varint+LZ4
-**           compression Blaster already had; the nested index is what
-**           realizes the additional validated savings (see
-**           project_ring_split_validated_findings memory). Implemented as a
-**           straightforward re-read-and-rebuild pass rather than fused into
-**           the merge's own output step, to keep this addition isolated
-**           from the already-delicate CascadingMerge/KWayMergeFiles machinery.
-**           If interrupted before the flat file is deleted (the last step),
+**           compression an earlier implementation already had; the nested
+**           index is what realizes the additional validated savings (see
+**           project_ring_split_validated_findings memory). Streams directly
+**           from the flat reader into the nested-index writers (CellsInUse
+**           via RSFWriterOpenZ, Ring_1/Ring_2/Ring_3_4 via
+**           Lz4StreamWriterOpen) -- no raw intermediate ever touches disk,
+**           and nothing beyond one flat-store-sized read pass is ever held
+**           at once, matching the flat store's own streaming discipline
+**           rather than requiring a whole level to fit in memory. If
+**           interrupted before the flat file is deleted (the last step),
 **           the flat file is still intact and the existing resume-scan
 **           recovery (re-solve the level from scratch) covers it exactly
 **           like any other interrupted merge -- no new failure mode.
@@ -1307,16 +1313,13 @@ static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, in
     RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
     RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
 
-    FILE* fpCellsInUse = fopen(cellsInUsePath, "wb");
-    FILE* fpRing1      = fopen(ring1Path,      "wb");
-    FILE* fpRing2      = fopen(ring2Path,      "wb");
-    FILE* fpRing34     = fopen(ring34Path,     "wb");
-    if (!fpCellsInUse || !fpRing1 || !fpRing2 || !fpRing34)
-        Fatal(FATAL_FILE_OPEN, "ConvertLevelOutputToNestedIndex: cannot create nested-index files for level %d %s",
-              level, RSFPlayerStr(player));
+    RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
+    Lz4StreamWriter* pRing1Writer      = Lz4StreamWriterOpen(ring1Path);
+    Lz4StreamWriter* pRing2Writer      = Lz4StreamWriterOpen(ring2Path);
+    Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
 
     RingNestedIndexBuilder builder;
-    builder.Init(fpCellsInUse, fpRing1, fpRing2, fpRing34);
+    builder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
 
     UINT64_PAIR rec;
     while (RSFRead(flatReader, &rec, 1) == 1)
@@ -1329,10 +1332,10 @@ static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, in
     builder.Finish();
     RSFClose(&flatReader);
 
-    fclose(fpCellsInUse);
-    fclose(fpRing1);
-    fclose(fpRing2);
-    fclose(fpRing34);
+    RSFWriterClose(pCellsInUseWriter);
+    Lz4StreamWriterClose(pRing1Writer);
+    Lz4StreamWriterClose(pRing2Writer);
+    Lz4StreamWriterClose(pRing34Writer);
 
     int64_t nestedBytes = 0;
     {

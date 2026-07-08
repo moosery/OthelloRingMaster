@@ -149,6 +149,7 @@
     <ClInclude Include="ClockTick.h" />
     <ClInclude Include="Error.h" />
     <ClInclude Include="FileAndDirUtils.h" />
+    <ClInclude Include="Lz4Stream.h" />
     <ClInclude Include="Mem.h" />
     <ClInclude Include="RingStoreFile.h" />
     <ClInclude Include="RWLock.h" />
@@ -166,6 +167,7 @@
     <ClCompile Include="ClockTick.cpp" />
     <ClCompile Include="Error.cpp" />
     <ClCompile Include="FileAndDirUtils.cpp" />
+    <ClCompile Include="Lz4Stream.cpp" />
     <ClCompile Include="Mem.cpp" />
     <ClCompile Include="RingStoreFile.cpp" />
     <ClCompile Include="RWLock.cpp">
