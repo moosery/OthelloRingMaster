@@ -4,6 +4,28 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.13.0] - 2026-07-07
+
+### Port StatsListener; add new OthelloRingMasterStatus client project (Phase 4 Step 7)
+
+- Added `StatsListener.h`/`.cpp`: the status thread -- a TCP server on
+  `pConfig->statsPort` that responds to STATUS (full human-readable
+  progress report: current level, per-drive breakdown, active merge/flush/
+  cascade progress, level history table) and STOP (graceful shutdown).
+  Near-verbatim port; only the config/state type names and the version
+  banner text changed.
+- Added the new **`OthelloRingMasterStatus`** project: a tiny standalone TCP
+  client (connect, send STATUS/STOP, print response), promoted from
+  `OthelloLevelBlasterStatus`. Default port **17532** (distinct from
+  Blaster's 17432, so both solutions' status listeners can run concurrently
+  on the same dev machine). Zero dependency on the rest of the solution,
+  matching Blaster's own precedent. Follows this solution's house
+  `.vcxproj` conventions (Unicode charset, 4 configs) rather than copying
+  Blaster's older minimal project format, since this is new-to-RingMaster
+  project scaffolding, not ported logic.
+- Only Step 8 remains: wiring `OthelloRingMaster.cpp`'s `main()` into the
+  real per-level loop (replacing the current round-trip self-test).
+
 ## [0.12.0] - 2026-07-07
 
 ### Port InitSolver: startup sequence and teardown (Phase 4 Step 6)

@@ -6,6 +6,7 @@
   <Project Path="OthelloBasics/OthelloBasics.vcxproj" Id="2cc52c70-80f3-4700-9e46-0f6b1c077667" />
   <Project Path="OthelloBasicsForCUDA/OthelloBasicsForCUDA.vcxproj" Id="375f3354-bf89-48cd-8405-d660fa4a3983" />
   <Project Path="OthelloRingMaster.vcxproj" Id="315f59e9-3126-47c8-a292-a60ef2004ff7" />
+  <Project Path="OthelloRingMasterStatus/OthelloRingMasterStatus.vcxproj" Id="4455d203-58b3-450e-93c2-16b627ad12b8" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
   <Project Path="lz4/lz4.vcxproj" Id="1ffdb617-7315-47e7-8359-ce3f75e4ec8f" />
 </Solution>
