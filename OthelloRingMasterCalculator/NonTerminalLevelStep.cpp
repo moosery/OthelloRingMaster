@@ -138,8 +138,7 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
         return result;
     }
 
-    RingNestedIndexReader reader;
-    if (foundCount != expectedCount || !reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+    if (foundCount != expectedCount)
         Fatal(FATAL_MERGE_LOGIC_ERROR,
               "ProcessNonTerminalLevel: level %d %s-to-move nested-index files are corrupt/partial (found %d of %d expected files)",
               level, RSFPlayerStr(player), foundCount, expectedCount);
@@ -148,7 +147,7 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
     snprintf(baseName, sizeof(baseName), "L%04d_%s_out", level, RSFPlayerStr(player));
 
     ScratchCountsWriter writer;
-    writer.Init(pState, pConfig->storeDrive, pConfig->countsDrive, reader.GetBoardCount(), byteWidth,
+    writer.Init(pState, pConfig->storeDrive, pConfig->countsDrive, byteWidth,
                 pConfig->scratchDirNameNoDrive, baseName);
 
     std::vector<UINT64_PAIR> batch;
@@ -285,13 +284,18 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
     };
 
     bool aborted = false;
-    reader.ExpandAll([&](const BOARD_KEY& key)
+    bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                             [&](const BOARD_KEY& key)
     {
         if (aborted) return;
         batch.push_back(UINT64_PAIR{ key.ullCellsInUse, key.ullCellColors });
         if ((int)batch.size() >= gpuBatchSize && !flushBatch())
             aborted = true;
     });
+    if (!streamOk)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "ProcessNonTerminalLevel: level %d %s-to-move nested-index files failed to stream",
+              level, RSFPlayerStr(player));
     if (!aborted)
         flushBatch();
 

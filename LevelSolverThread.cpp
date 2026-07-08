@@ -21,9 +21,12 @@
 **   of this project read a level's input as flat RSF store files.
 **   FeedNestedIndexLevel/FeedBoardIntoBatch are new, replacing the old
 **   EnumerateStoreFilesForLevel + RSFOpen/RSFRead loop with
-**   RingNestedIndexReader::Load/ExpandAll, since the store format is now
-**   the ring nested index (see MergeFiles.cpp's
-**   ConvertLevelOutputToNestedIndex, which is what produces it).
+**   RingNestedIndexStreamAll, since the store format is now the ring
+**   nested index (see MergeFiles.cpp's ConvertLevelOutputToNestedIndex,
+**   which is what produces it). StreamAll -- not RingNestedIndexReader::
+**   Load()/ExpandAll() -- is deliberate: it never holds a whole level's
+**   board-key data resident, regardless of board count (see
+**   RingNestedIndex.h's own Notes).
 */
 
 /* Includes */
@@ -219,7 +222,7 @@ void FlushAllMergeWriterBuffers(PSolveContext pCtx)
 /*
 ** Type:    FeedBatchState
 ** @brief   Ping-pong batching state threaded through FeedBoardIntoBatch as
-**          RingNestedIndexReader::ExpandAll walks one player's boards.
+**          RingNestedIndexStreamAll walks one player's boards.
 */
 struct FeedBatchState
 {
@@ -311,16 +314,6 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
         return;
     }
 
-    RingNestedIndexReader reader;
-    if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
-        Fatal(FATAL_MERGE_LOGIC_ERROR,
-              "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "
-              "failed to load -- corrupt or truncated data. Files:\n"
-              "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
-              existCount, expectedCount, level, RSFPlayerStr(player),
-              cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
-              hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
-
     FeedBatchState st;
     for (int i = 0; i < PING_PONG_SLOTS; i++) st.slots[i] = slots[i];
     st.slotIdx   = *pSlotIdx;
@@ -330,7 +323,19 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
     st.pAccum    = pAccum;
     st.pCtx      = pCtx;
 
-    reader.ExpandAll([&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); });
+    /* Streams directly from disk -- never holds the whole level's board-key
+    ** data resident, regardless of board count (see RingNestedIndex.h's
+    ** own Notes on RingNestedIndexStreamAll vs. Load()/ExpandAll()). */
+    bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                              [&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); });
+    if (!streamOk)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "
+              "failed to stream -- corrupt or truncated data. Files:\n"
+              "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
+              existCount, expectedCount, level, RSFPlayerStr(player),
+              cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
+              hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
 
     /* Flush whatever's left in the current partially-filled slot. */
     if (st.count > 0 && !pSt->terminateThreads)
@@ -435,9 +440,13 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
 
     GpuAccumulator* pAccum = GpuAccumulatorCreate(optBatch, maxMoves, totalGpuMem);
 
-    /* Pre-scan for StatsListener solve-phase % progress -- GetBoardCount()
-    ** reads straight off the already-loaded index, no extra I/O beyond the
-    ** Load() FeedNestedIndexLevel does anyway below.
+    /* Pre-scan for StatsListener solve-phase % progress -- streams and
+    ** counts rather than loading the whole index just to call
+    ** GetBoardCount(), so this never holds a whole level resident either
+    ** (see RingNestedIndex.h's RingNestedIndexStreamAll). Reads the level
+    ** twice overall (once here, once in FeedNestedIndexLevel below) --
+    ** an acceptable trade of sequential I/O time for never needing the
+    ** whole level in memory, which matters far more at real scale.
     */
     {
         uint64_t total = 0;
@@ -464,16 +473,18 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
             int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
             if (existCount == 0) continue;
 
-            RingNestedIndexReader reader;
-            if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+            uint64_t count  = 0;
+            bool     streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                                          [&count](const BOARD_KEY&) { count++; });
+            if (!streamOk)
                 Fatal(FATAL_MERGE_LOGIC_ERROR,
                       "RunGpuFeederJob: nested-index files exist (%d/%d) for level %d %s but "
-                      "failed to load -- corrupt or truncated data. Files:\n"
+                      "failed to stream -- corrupt or truncated data. Files:\n"
                       "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
                       existCount, expectedCount, level, RSFPlayerStr(player),
                       cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
                       hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
-            total += reader.GetBoardCount();
+            total += count;
         }
         pSt->currentLevelTotalBoards = total;
     }

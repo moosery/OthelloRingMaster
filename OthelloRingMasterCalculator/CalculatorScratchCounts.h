@@ -52,18 +52,18 @@ struct ScratchCountsWriter
 
     /*
     ** Method: Init
-    ** @brief  Plans scratch drives for count boards at officialByteWidthIn,
-    **         and opens the segmented writer.
+    ** @brief  Opens the underlying segmented writer at officialByteWidthIn's
+    **         scratch record size. Drives are reserved on demand, one at a
+    **         time, as records are actually written -- no upfront count needed.
     ** @param  pState              - calculator state (driveInfo, driveLedger)
     ** @param  excludeDrive1       - drive to never use as scratch (RingMaster's store drive)
     ** @param  excludeDrive2       - a second drive to exclude (the counts drive)
-    ** @param  count               - number of boards (records) this writer will receive
     ** @param  officialByteWidthIn - this level's CounterWidthConfig tier width
     ** @param  scratchDirNoDrive   - sub-path (on whichever drive) segments are written under
     ** @param  baseName            - filename prefix identifying this dataset (level/color)
     */
     void Init(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
-              uint64_t count, int officialByteWidthIn,
+              int officialByteWidthIn,
               const char* scratchDirNoDrive, const char* baseName);
 
     /*

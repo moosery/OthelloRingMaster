@@ -29,7 +29,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.24.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.25.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 
@@ -60,12 +60,12 @@ typedef struct __CalculatorLevelStats
     uint64_t  boardsProcessedBlack;
     uint64_t  boardsProcessedWhite;
 
-    /* Total boards to process this level, per color -- set once
-    ** (from RingNestedIndexReader::GetBoardCount()) as soon as that
-    ** color's board store is loaded, before processing starts, so the
-    ** live status display has a denominator for "% done" while a level
-    ** is still in progress. 0 until then (and permanently 0 for a color
-    ** genuinely absent at this level).
+    /* Total boards to process this level, per color -- set once (from a
+    ** streaming RingNestedIndexStreamAll count-only pre-pass, never a
+    ** wholesale load) before processing starts, so the live status
+    ** display has a denominator for "% done" while a level is still in
+    ** progress. 0 until then (and permanently 0 for a color genuinely
+    ** absent at this level).
     */
     uint64_t  totalBoardsBlack;
     uint64_t  totalBoardsWhite;

@@ -2,8 +2,9 @@
 ** Filename:  SegmentedStore.cpp
 **
 ** Purpose:
-**   Implements PlanScratchDrives/ReleaseScratchPlan/SegmentedStoreWriter/
-**   SegmentedStoreReader/DeleteSegments, declared in SegmentedStore.h.
+**   Implements ReserveNextScratchDrive/ReleaseScratchPlan/
+**   SegmentedStoreWriter/SegmentedStoreReader/DeleteSegments, declared in
+**   SegmentedStore.h.
 */
 
 /* Includes */
@@ -17,23 +18,30 @@
 
 /*
 ** Function: OpenNextSegment
-** @brief    Opens the next planned drive's segment file for writing,
-**           resetting the writer's per-segment tracking fields.
+** @brief    Reserves the next available drive on demand and opens its
+**           segment file for writing, resetting the writer's per-segment
+**           tracking fields. Fatals if every available drive is
+**           already fully claimed.
 ** @param    pWriter - the writer to advance
 */
 static void OpenNextSegment(SegmentedStoreWriter* pWriter)
 {
-    if (pWriter->planIdx >= pWriter->plan.size())
-        Fatal(FATAL_MERGE_LOGIC_ERROR, "SegmentedStoreWriter: ran out of planned drives for '%s' -- PlanScratchDrives should have Fataled first", pWriter->baseName);
+    char    driveLetter;
+    int64_t budgetBytes;
+    if (!ReserveNextScratchDrive(pWriter->pState, pWriter->excludeDrive1, pWriter->excludeDrive2,
+                                 &driveLetter, &budgetBytes))
+        Fatal(FATAL_DRIVE_SPACE, "SegmentedStoreWriter: every available scratch drive is full for '%s'", pWriter->baseName);
 
-    char driveLetter = pWriter->plan[pWriter->planIdx].first;
+    pWriter->plan.push_back({ driveLetter, budgetBytes });
+    pWriter->currentBudgetBytes = budgetBytes;
+
     char dir[MAX_FULL_PATH_NAME];
     snprintf(dir, sizeof(dir), "%c:%s", driveLetter, pWriter->scratchDirNoDrive);
     if (!CreateFullPath(dir))
         Fatal(FATAL_CREATE_DIR_FAILED, "SegmentedStoreWriter: cannot create scratch directory '%s'", dir);
 
     snprintf(pWriter->currentPath, sizeof(pWriter->currentPath), "%s\\%s_seg%04zu.dat",
-             dir, pWriter->baseName, pWriter->planIdx);
+             dir, pWriter->baseName, pWriter->plan.size() - 1);
     pWriter->currentDriveLetter = driveLetter;
 
     pWriter->pCurrentFile = fopen(pWriter->currentPath, "wb");
@@ -61,8 +69,9 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
 
     if (pWriter->currentRecordCount == 0)
     {
-        /* The plan had more drives allotted than turned out to be needed --
-        ** discard the empty file rather than recording a zero-record segment.
+        /* Nothing was ever written (Finish() called with no Write() at
+        ** all) -- discard the empty file rather than recording a
+        ** zero-record segment.
         */
         DeleteFileA(pWriter->currentPath);
         return;
@@ -99,25 +108,21 @@ static int CompareUint64PairRecord(void* /*pContext*/, const void* pEntry, const
 /* Functions */
 
 /*
-** Function: PlanScratchDrives
+** Function: ReserveNextScratchDrive
 ** @brief    See SegmentedStore.h.
 */
-void PlanScratchDrives(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
-                       int64_t totalBytes, const char* purpose,
-                       std::vector<std::pair<char, int64_t>>* pOutPlan)
+bool ReserveNextScratchDrive(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
+                             char* pOutDriveLetter, int64_t* pOutBudgetBytes)
 {
-    pOutPlan->clear();
-    int64_t remaining = totalBytes;
-
     /* FAST first; MEDIUM only once every FAST drive is fully claimed;
     ** SLOW only once MEDIUM is too -- strict tier fallback, never
     ** proportional spread across tiers.
     */
     static const DriveCategory kTiers[3] = { DRIVE_CAT_FAST, DRIVE_CAT_MEDIUM, DRIVE_CAT_SLOW };
 
-    for (int pass = 0; pass < 3 && remaining > 0; pass++)
+    for (int pass = 0; pass < 3; pass++)
     {
-        for (int i = 0; i < pState->driveInfo.numDrives && remaining > 0; i++)
+        for (int i = 0; i < pState->driveInfo.numDrives; i++)
         {
             const DriveInformation* d = &pState->driveInfo.drives[i];
             if (!d->available) continue;
@@ -128,29 +133,23 @@ void PlanScratchDrives(POthelloRingMasterCalculatorState pState, char excludeDri
             int64_t avail = CalcDriveAvailable(pState, d->driveLetter);
             if (avail <= 0) continue;
 
-            int64_t take = (avail < remaining) ? avail : remaining;
-            if (!CalcDriveReserve(pState, d->driveLetter, take))
-                continue;   /* lost a race to another concurrent plan -- try the next drive */
+            if (!CalcDriveReserve(pState, d->driveLetter, avail))
+                continue;   /* lost a race to another concurrent reservation -- try the next drive */
 
-            pOutPlan->push_back({ d->driveLetter, take });
-            remaining -= take;
+            *pOutDriveLetter = d->driveLetter;
+            *pOutBudgetBytes = avail;
+            return true;
         }
     }
 
-    if (remaining > 0)
-    {
-        ReleaseScratchPlan(pState, *pOutPlan);
-        Fatal(FATAL_DRIVE_SPACE,
-              "PlanScratchDrives: not enough scratch space for %s (%lld bytes needed, %lld bytes short across all available drives)",
-              purpose, (long long)totalBytes, (long long)remaining);
-    }
+    return false;
 }
 
 /*
 ** Function: ReleaseScratchPlan
 ** @brief    See SegmentedStore.h.
 */
-void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const std::vector<std::pair<char, int64_t>>& plan)
+void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const ScratchPlan& plan)
 {
     for (const auto& entry : plan)
         CalcDriveReclaim(pState, entry.first, entry.second);
@@ -160,13 +159,15 @@ void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const std::vec
 ** Method: SegmentedStoreWriter::Init
 ** @brief  See SegmentedStore.h.
 */
-void SegmentedStoreWriter::Init(std::vector<std::pair<char, int64_t>> planIn, int recordSizeIn, bool isKeySortedIn,
+void SegmentedStoreWriter::Init(POthelloRingMasterCalculatorState pStateIn, char excludeDrive1In, char excludeDrive2In,
+                                 int recordSizeIn, bool isKeySortedIn,
                                  const char* scratchDirNoDriveIn, const char* baseNameIn)
 {
-    plan        = std::move(planIn);
-    planIdx     = 0;
-    recordSize  = recordSizeIn;
-    isKeySorted = isKeySortedIn;
+    pState        = pStateIn;
+    excludeDrive1 = excludeDrive1In;
+    excludeDrive2 = excludeDrive2In;
+    recordSize    = recordSizeIn;
+    isKeySorted   = isKeySortedIn;
     strncpy(scratchDirNoDrive, scratchDirNoDriveIn, sizeof(scratchDirNoDrive) - 1);
     strncpy(baseName, baseNameIn, sizeof(baseName) - 1);
 
@@ -174,10 +175,7 @@ void SegmentedStoreWriter::Init(std::vector<std::pair<char, int64_t>> planIn, in
         Fatal(FATAL_MERGE_LOGIC_ERROR, "SegmentedStoreWriter::Init: isKeySorted requires recordSize==%d, got %d",
               (int)sizeof(UINT64_PAIR), recordSize);
 
-    if (plan.empty())
-        Fatal(FATAL_MERGE_LOGIC_ERROR, "SegmentedStoreWriter::Init: empty drive plan for '%s'", baseName);
-
-    OpenNextSegment(this);
+    /* No segment opened yet -- the first Write() reserves a drive on demand. */
 }
 
 /*
@@ -186,10 +184,9 @@ void SegmentedStoreWriter::Init(std::vector<std::pair<char, int64_t>> planIn, in
 */
 void SegmentedStoreWriter::Write(const void* pRecord)
 {
-    if (currentRecordCount > 0 && currentBytesUsed + recordSize > plan[planIdx].second)
+    if (!pCurrentFile || (currentRecordCount > 0 && currentBytesUsed + recordSize > currentBudgetBytes))
     {
         CloseCurrentSegment(this);
-        planIdx++;
         OpenNextSegment(this);
     }
 
@@ -318,7 +315,7 @@ bool SegmentedStoreReader::FindByKey(uint64_t keyHi, uint64_t keyLo, uint64_t* p
 ** @brief    See SegmentedStore.h.
 */
 void DeleteSegments(POthelloRingMasterCalculatorState pState, const SegmentList& segments,
-                    const std::vector<std::pair<char, int64_t>>& plan)
+                    const ScratchPlan& plan)
 {
     for (const auto& seg : segments)
         DeleteFileA(seg.path);

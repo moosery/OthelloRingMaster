@@ -19,19 +19,14 @@
 ** @brief  See CalculatorScratchCounts.h.
 */
 void ScratchCountsWriter::Init(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
-                                uint64_t count, int officialByteWidthIn,
+                                int officialByteWidthIn,
                                 const char* scratchDirNoDrive, const char* baseName)
 {
     officialByteWidth = officialByteWidthIn;
     scratchByteWidth  = (officialByteWidth == COUNTER_WIDTH_NIBBLE) ? 1 : officialByteWidth;
 
-    int      recordSize = 3 * scratchByteWidth;
-    int64_t  totalBytes = (int64_t)count * (int64_t)recordSize;
-
-    std::vector<std::pair<char, int64_t>> plan;
-    PlanScratchDrives(pState, excludeDrive1, excludeDrive2, totalBytes, baseName, &plan);
-
-    store.Init(std::move(plan), recordSize, /*isKeySorted=*/false, scratchDirNoDrive, baseName);
+    int recordSize = 3 * scratchByteWidth;
+    store.Init(pState, excludeDrive1, excludeDrive2, recordSize, /*isKeySorted=*/false, scratchDirNoDrive, baseName);
 }
 
 /*

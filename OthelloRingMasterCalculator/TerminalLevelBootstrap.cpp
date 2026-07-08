@@ -86,14 +86,23 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
         return result;
     }
 
-    RingNestedIndexReader reader;
-    if (foundCount != expectedCount || !reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+    if (foundCount != expectedCount)
         Fatal(FATAL_MERGE_LOGIC_ERROR,
               "ProcessTerminalLevel: level %d %s-to-move nested-index files are corrupt/partial (found %d of %d expected files)",
               level, RSFPlayerStr(player), foundCount, expectedCount);
 
+    /* A streaming count-only pre-pass -- the only reason this is needed at
+    ** all is the status listener's "% done" denominator (pStats->totalBoards*),
+    ** which must be known before processing starts. Never holds a level
+    ** resident; it just walks the same lockstep stream twice.
+    */
     CalculatorLevelStats* pStats = &pState->levelStats[level];
-    uint64_t              totalBoards = reader.GetBoardCount();
+    uint64_t              totalBoards = 0;
+    if (!RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                  [&totalBoards](const BOARD_KEY&) { totalBoards++; }))
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "ProcessTerminalLevel: level %d %s-to-move nested-index files failed to stream (count pass)",
+              level, RSFPlayerStr(player));
     if (player == RSF_PLAYER_BLACK) pStats->totalBoardsBlack = totalBoards;
     else                            pStats->totalBoardsWhite = totalBoards;
 
@@ -101,10 +110,11 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
     snprintf(baseName, sizeof(baseName), "L%04d_%s_out", level, RSFPlayerStr(player));
 
     ScratchCountsWriter writer;
-    writer.Init(pState, pConfig->storeDrive, pConfig->countsDrive, totalBoards, COUNTER_WIDTH_NIBBLE,
+    writer.Init(pState, pConfig->storeDrive, pConfig->countsDrive, COUNTER_WIDTH_NIBBLE,
                 pConfig->scratchDirNameNoDrive, baseName);
 
-    reader.ExpandAll([&](const BOARD_KEY& key)
+    bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                             [&](const BOARD_KEY& key)
     {
         /* Terminal classification needs no legal-move check here -- the
         ** deepest completed level's boards are terminal by construction
@@ -132,6 +142,15 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
         if (player == RSF_PLAYER_BLACK) pStats->boardsProcessedBlack = result.boardsProcessed;
         else                            pStats->boardsProcessedWhite = result.boardsProcessed;
     });
+    if (!streamOk)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "ProcessTerminalLevel: level %d %s-to-move nested-index files failed to stream (process pass)",
+              level, RSFPlayerStr(player));
+
+    if (result.boardsProcessed != totalBoards)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "ProcessTerminalLevel: level %d %s-to-move: process pass saw %llu boards, count pass saw %llu",
+              level, RSFPlayerStr(player), (unsigned long long)result.boardsProcessed, (unsigned long long)totalBoards);
 
     writer.Finish();
     result.scratchSegments = writer.store.segments;

@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.0] - 2026-07-08
+
+### Streaming nested-index reads everywhere, and on-demand (no-upfront-count) scratch drive reservation
+
+- **The problem this closes**: caught directly by the user ("Oh my goodness no. No file will ever fit fully in memory (except for very small board levels). You shouldn't be doing that ANYWHERE.") -- v0.24.0's board-key scratch build still went through `RingNestedIndexReader::Load()`/`ExpandAll()`, which buffers every record of a level into `std::vector`s before handing any of it back. That's the same wholesale-load problem the scratch-storage system was built to eliminate, just moved one layer down.
+- New `OthelloBasics/RingNestedIndex.h`/`.cpp`: `RingNestedIndexStreamAll` -- walks `CellsInUse`/`Ring_1`/`Ring_2`/`Ring_3_4` in lockstep and calls back once per board, genuinely O(1) memory regardless of level size (at most a 1-record `CellsInUseRec` lookahead plus one record each of whichever ring levels apply -- `RingLevelRec` already carries its own child count, so only the very last `CellsInUse` group needs "consume until EOF" instead of a total count). Replaces `Load()`/`ExpandAll()`/`GetBoardCount()` at every call site that reads a level for processing -- both in the Calculator (`CalculatorLookupSource.cpp`, `TerminalLevelBootstrap.cpp`, `NonTerminalLevelStep.cpp`) and in RingMaster's own production forward solver (`LevelSolverThread.cpp`'s `FeedNestedIndexLevel` and its `RunGpuFeederJob` pre-scan), plus a resume-scan validation pass in `InitSolver.cpp` that was calling `Load()` purely to check the files read cleanly -- found during this same audit, not previously flagged.
+- `RingNestedIndexReader::Load()`/`ExpandAll()`/`GetBoardCount()` remain, used only where a level is provably tiny by construction (`CreateSeedFile.cpp`'s level-0 single-board seed).
+- **`SegmentedStore.h`/`.cpp` redesigned around on-demand drive reservation**: `PlanScratchDrives` (which needed a dataset's total byte count up front) is gone, replaced by `ReserveNextScratchDrive` -- picks and reserves one drive's entire remaining budget at a time, called internally by `SegmentedStoreWriter` the first time it needs a segment and again whenever the current one fills. `SegmentedStoreWriter::Init` no longer takes a plan or a count at all. This was a self-motivated follow-on to the user's memory-efficiency mandate: requiring a count up front had been forcing awkward two-pass (count-then-write) workarounds at several call sites, which is now unnecessary.
+- `CalculatorScratchCounts.h`/`.cpp` (`ScratchCountsWriter::Init`) and every writer call site (`CalculatorLookupSource.cpp`, `TerminalLevelBootstrap.cpp`, `NonTerminalLevelStep.cpp`) updated to the no-count `Init` signature. `CalculatorLookupSource.cpp`'s board-key scratch build collapsed from two streaming passes (count, then write) to one, now that no count is needed up front. `TerminalLevelBootstrap.cpp` keeps its own streaming count-only pre-pass -- the one legitimate remaining exception, needed only for the status listener's "% done" denominator (`pStats->totalBoardsBlack/White`), not for drive planning.
+
 ## [0.24.0] - 2026-07-08
 
 ### Drive-spanning segmented scratch storage: level+1 lookups and level output no longer need to fit in memory

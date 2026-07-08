@@ -7,20 +7,21 @@
 **   pieces -- no hashing, just "the next chunk of the already-sorted
 **   stream goes here" -- each piece a plain, uncompressed, fixed-size-
 **   record file on one drive. Lets a lookup against level+1's data never
-**   need the whole level resident in memory: PlanScratchDrives picks
-**   which drives to use (fastest first) and how big a piece each one
-**   gets; SegmentedStoreWriter streams records out across that plan;
-**   SegmentedStoreReader holds only the tiny per-segment index in memory
-**   and does real seek+read against whichever one segment a given
-**   lookup actually needs.
+**   need the whole level resident in memory, AND never requires knowing
+**   the total record count up front: ReserveNextScratchDrive picks one
+**   drive at a time (fastest available first) as SegmentedStoreWriter
+**   actually needs a new segment, rather than planning the whole dataset
+**   before the first record is even written. SegmentedStoreReader holds
+**   only the tiny per-segment index in memory and does real seek+read
+**   against whichever one segment a given lookup actually needs.
 **
 ** Notes:
 **   Deliberately uncompressed, unlike every other on-disk format in this
 **   solution (RSF/Lz4Stream) -- this is fast scratch, not permanent
 **   storage, so trading disk space for direct fseek-able random access
 **   is the right call here specifically (see CalculatorFileName.h's
-**   CalcNameCountsFile / the join step in BackwardWalkDriver.cpp for
-**   where the permanent, compressed representation still lives).
+**   CalcNameCountsFile / CalculatorScratchCounts.h's join step for where
+**   the permanent, compressed representation still lives).
 **   FindByKey rides Utility/BinarySearchFile.h's existing
 **   BinarySearchFile (seek+read one record at a time, no bulk load)
 **   for the within-segment search.
@@ -61,54 +62,68 @@ struct SegmentInfo
 
 typedef std::vector<SegmentInfo> SegmentList;
 
+/* A drive plan grows incrementally as segments are created (one entry
+** per segment actually written), rather than being computed up front --
+** kept around purely so DeleteSegments/ReleaseScratchPlan know how much
+** to reclaim from pState->driveLedger later.
+*/
+typedef std::vector<std::pair<char, int64_t>> ScratchPlan;
+
 /* Functions */
 
 /*
-** Function: PlanScratchDrives
-** @brief    Builds a priority-ordered list of (drive letter, byte budget)
-**           to cover totalBytes of scratch data: every DRIVE_CAT_FAST
-**           drive first (excluding excludeDrive1/2), then DRIVE_CAT_MEDIUM
-**           drives only once every fast drive is fully claimed, then
-**           DRIVE_CAT_SLOW only once medium is too. Reserves each
-**           contributed chunk from pState->driveLedger as it plans, so a
-**           second concurrent call correctly sees less room left.
+** Function: ReserveNextScratchDrive
+** @brief    Picks ONE drive to host the next scratch segment and reserves
+**           its entire remaining ledger budget for it: every
+**           DRIVE_CAT_FAST drive is tried first (excluding excludeDrive1/2),
+**           then DRIVE_CAT_MEDIUM only once no FAST drive has any room
+**           left, then DRIVE_CAT_SLOW only once MEDIUM doesn't either.
+**           Reserving a whole drive's remaining budget per segment (not
+**           just "enough for this one record") is deliberate -- a
+**           segment simply rolls to the next drive once this one fills,
+**           so there's no reason to under-reserve.
 ** @param    pState        - calculator state (driveInfo, driveLedger)
 ** @param    excludeDrive1 - a drive letter to never use as scratch (e.g. RingMaster's store drive), or 0 for none
 ** @param    excludeDrive2 - a second drive letter to exclude (e.g. the counts drive), or 0 for none
-** @param    totalBytes    - total size to plan for
-** @param    purpose       - short description for the Fatal message if space runs out
-** @param    pOutPlan      - out: ordered (driveLetter, budgetBytes) pairs, already ledger-reserved
+** @param    pOutDriveLetter - out: the reserved drive's letter
+** @param    pOutBudgetBytes - out: bytes reserved on that drive
+** @return   true if a drive with any room was found and reserved; false
+**           if every available drive (across all three tiers) is
+**           already fully claimed.
 */
-void PlanScratchDrives(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
-                       int64_t totalBytes, const char* purpose,
-                       std::vector<std::pair<char, int64_t>>* pOutPlan);
+bool ReserveNextScratchDrive(POthelloRingMasterCalculatorState pState, char excludeDrive1, char excludeDrive2,
+                             char* pOutDriveLetter, int64_t* pOutBudgetBytes);
 
 /*
 ** Function: ReleaseScratchPlan
 ** @brief    Reclaims every drive budget in plan back to pState->driveLedger
 **           (call after a segmented store built from this plan is deleted).
 ** @param    pState - calculator state (driveLedger)
-** @param    plan   - the plan previously returned by PlanScratchDrives
+** @param    plan   - the plan a writer accumulated (its own .plan field)
 */
-void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const std::vector<std::pair<char, int64_t>>& plan);
+void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const ScratchPlan& plan);
 
 /*
 ** Type:    SegmentedStoreWriter
-** @brief   Streams fixed-size records out across a drive plan, rolling to
-**          the next drive once the current one's budget is used up.
+** @brief   Streams fixed-size records out, reserving one drive at a time
+**          on demand (via ReserveNextScratchDrive) as each segment fills
+**          up -- never needs to know the total record count in advance.
 **          Never holds more than one segment's worth of data resident --
 **          each Write() call goes straight to disk.
 */
 struct SegmentedStoreWriter
 {
-    std::vector<std::pair<char, int64_t>> plan;
-    size_t   planIdx = 0;
+    POthelloRingMasterCalculatorState pState = nullptr;
+    char     excludeDrive1 = 0, excludeDrive2 = 0;
     int      recordSize = 0;
     bool     isKeySorted = false;   /* true only for board-key (16-byte UINT64_PAIR) stores */
     char     scratchDirNoDrive[MAX_FULL_PATH_NAME] = {};
     char     baseName[MAX_FULL_PATH_NAME] = {};
 
+    ScratchPlan plan;   /* grows by one entry each time a new segment is opened */
+
     FILE*    pCurrentFile        = nullptr;
+    int64_t  currentBudgetBytes  = 0;
     int64_t  currentBytesUsed    = 0;
     uint64_t currentRecordCount  = 0;
     char     currentPath[MAX_FULL_PATH_NAME] = {};
@@ -120,23 +135,26 @@ struct SegmentedStoreWriter
 
     /*
     ** Method: Init
-    ** @brief  Prepares the writer to stream records across planIn.
-    ** @param  planIn            - drive plan from PlanScratchDrives (already ledger-reserved)
-    ** @param  recordSizeIn      - size in bytes of one record
-    ** @param  isKeySortedIn     - true if records are 16-byte UINT64_PAIR board keys in sorted order
+    ** @brief  Prepares the writer. No segment is opened yet -- the first
+    **         Write() call reserves the first drive on demand.
+    ** @param  pStateIn            - calculator state (driveInfo, driveLedger)
+    ** @param  excludeDrive1In     - drive to never use as scratch (RingMaster's store drive), or 0
+    ** @param  excludeDrive2In     - a second drive to exclude (the counts drive), or 0
+    ** @param  recordSizeIn        - size in bytes of one record
+    ** @param  isKeySortedIn       - true if records are 16-byte UINT64_PAIR board keys in sorted order
     ** @param  scratchDirNoDriveIn - sub-path (on whichever drive) segments are written under
-    ** @param  baseNameIn        - filename prefix identifying this dataset (level/color/purpose)
+    ** @param  baseNameIn          - filename prefix identifying this dataset (level/color/purpose)
     */
-    void Init(std::vector<std::pair<char, int64_t>> planIn, int recordSizeIn, bool isKeySortedIn,
+    void Init(POthelloRingMasterCalculatorState pStateIn, char excludeDrive1In, char excludeDrive2In,
+              int recordSizeIn, bool isKeySortedIn,
               const char* scratchDirNoDriveIn, const char* baseNameIn);
 
     /*
     ** Method: Write
-    ** @brief  Appends one record, rolling to the next drive in the plan if
-    **         the current segment's budget is exhausted. Fatals if the
-    **         plan runs out before all records are written (a planning
-    **         bug, since PlanScratchDrives already Fatals if the plan
-    **         couldn't cover the requested total).
+    ** @brief  Appends one record, reserving a new drive on demand (via
+    **         ReserveNextScratchDrive) whenever the current segment's
+    **         budget is exhausted or no segment is open yet. Fatals if
+    **         every available drive is already fully claimed.
     ** @param  pRecord - recordSize bytes to append
     */
     void Write(const void* pRecord);
@@ -212,4 +230,4 @@ struct SegmentedStoreReader
 ** @param    plan     - the drive plan those segments were written under
 */
 void DeleteSegments(POthelloRingMasterCalculatorState pState, const SegmentList& segments,
-                    const std::vector<std::pair<char, int64_t>>& plan);
+                    const ScratchPlan& plan);

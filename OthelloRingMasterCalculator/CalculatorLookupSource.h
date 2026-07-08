@@ -8,20 +8,17 @@
 **   generated child to its already-computed OutcomeTriple against it.
 **
 ** Notes:
-**   Real, disclosed limitation: building a color's board-key scratch
-**   still requires one transient pass through
-**   RingNestedIndexReader::Load()/ExpandAll() (the existing nested-index
-**   reader, which is NOT itself streaming -- it loads the CellsInUse/
-**   Ring_1/Ring_2/Ring_3_4 vectors wholesale) to decompress and reshard
-**   the ring files into flat, segmented board-key scratch. That transient
-**   peak is freed the moment resharding finishes (the RingNestedIndexReader
-**   is a local variable, gone once LoadLookupSource returns), so it does
-**   not persist for the rest of the level's processing -- but it is not
-**   eliminated for that one pass. Fully closing that gap would need
-**   OthelloBasics/RingNestedIndex.h's reader itself rewritten to stream
-**   rather than load wholesale -- a separate, larger change, not done here.
-**   The counts side has no such gap: the permanent counts file is already
-**   read sequentially, one record at a time, straight into scratch.
+**   Board-key scratch is built via a single RingNestedIndexStreamAll pass
+**   instead of RingNestedIndexReader::Load()/ExpandAll() -- the pass never
+**   holds a whole level resident, regardless of board count (see
+**   RingNestedIndex.h's own Notes on why StreamAll replaced the
+**   wholesale-load reader everywhere it's used to read a level for
+**   processing, including RingMaster's own forward solve). One pass is
+**   enough because SegmentedStoreWriter reserves scratch drives on demand
+**   (ReserveNextScratchDrive), one at a time, as it actually needs a new
+**   segment -- no total record/byte count has to be known up front. The
+**   counts side never needed a count either: the permanent counts file is
+**   already read sequentially, one record at a time, straight into scratch.
 */
 
 #pragma once

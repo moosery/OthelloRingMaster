@@ -7,9 +7,10 @@
 **   boards are not (all) terminal. Given that level+1 has already been
 **   fully processed (its counts files exist on disk), regenerates each
 **   board's children via the GPU (RetrogradeKernels.h), looks each child
-**   up by position in level+1's already-computed counts (via
-**   OthelloBasics/RingNestedIndex.h's FindBoardPosition), sums them
-**   (overflow-checked, abort-and-retry-wider on overflow -- see
+**   up in level+1's staged lookup source (CalculatorLookupSource.h's
+**   LookupChildTriple, against drive-spanning segmented scratch -- see
+**   SegmentedStore.h), sums them (overflow-checked, abort-and-retry-wider
+**   on overflow -- see
 **   project_adaptive_counter_width_design memory), and writes the result
 **   back out in the same order this level's own boards are stored in.
 **

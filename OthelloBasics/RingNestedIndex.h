@@ -291,6 +291,36 @@ struct RingNestedIndexReader
 };
 
 /*
+** Function: RingNestedIndexStreamAll
+** @brief    Streams every board directly from the four nested-index files
+**           on disk, in original sorted order, calling onBoard once per
+**           board -- never holding a whole level resident, regardless of
+**           board count (unlike RingNestedIndexReader::Load()/ExpandAll(),
+**           which load all four files into memory first).
+** @details  Reads CellsInUse (via RSFReader), Ring_1/Ring_2 (if
+**           applicable) and Ring_3_4 (via Lz4StreamReader) in lockstep,
+**           one record at a time from each. Only CellsInUse needs a
+**           one-record lookahead (to know where its current group ends);
+**           Ring_1/Ring_2 records each carry their own explicit child
+**           count (RingLevelRec::count), so no lookahead is needed at
+**           those levels -- and the LAST CellsInUse group's span is
+**           simply "keep consuming from the next stored level until it
+**           hits EOF," which needs no upfront total count either. Total
+**           memory held at any moment is a small, fixed handful of
+**           records (2 CellsInUse + 1 each of whichever of Ring_1/Ring_2/
+**           Ring_3_4 apply), never proportional to the level's board count.
+** @param    cellsInUsePath - path to the CellsInUse file
+** @param    ring1Path      - path to the Ring_1 file, or nullptr if not applicable
+** @param    ring2Path      - path to the Ring_2 file, or nullptr if not applicable
+** @param    ring34Path     - path to the Ring_3_4 file (always required)
+** @param    onBoard        - called once per board with the reconstructed ring-ordered BOARD_KEY
+** @return   true if every applicable file opened and was read to a clean
+**           completion (no truncation/corruption partway through).
+*/
+bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
+                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard);
+
+/*
 ** Function: RingNestedIndexFileCount
 ** @brief    Counts how many of the applicable nested-index files exist on
 **           disk, without validating their contents. Callers use this to

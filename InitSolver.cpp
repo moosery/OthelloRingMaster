@@ -411,8 +411,14 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
 
     if (nestedFoundCount > 0)
     {
-        RingNestedIndexReader reader;
-        if (nestedFoundCount == expectedCount && reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+        /* Streamed validation only -- a resume scan runs at solver startup
+        ** and must never hold a whole level resident just to check the
+        ** files read cleanly (RingNestedIndexReader::Load() would buffer
+        ** every record; RingNestedIndexStreamAll walks the same lockstep
+        ** structure with a no-op callback instead).
+        */
+        if (nestedFoundCount == expectedCount &&
+            RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path, [](const BOARD_KEY&) {}))
             return LFS_VALID;
 
         LoggerLog("ScanForResumeLevel: corrupt/partial level %d %s nested-index files, deleting\n",

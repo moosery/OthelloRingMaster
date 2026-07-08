@@ -18,8 +18,8 @@
 /*
 ** Function: LoadLookupSourceForColor
 ** @brief    Stages one color's board-key and counts data at nextLevel as
-**           segmented scratch. See file Notes for the one remaining
-**           transient-memory caveat on the board-key side.
+**           segmented scratch (see file Notes for how neither side ever
+**           holds a whole level resident).
 ** @param    pConfig      - run configuration
 ** @param    pState       - calculator state
 ** @param    pWidthConfig - width table (nextLevel's width is read)
@@ -54,34 +54,35 @@ static void LoadLookupSourceForColor(POthelloRingMasterCalculatorConfig pConfig,
     if (foundCount == 0)
         return;   /* genuinely no boards of this color at nextLevel -- legitimate */
 
-    RingNestedIndexReader reader;
-    if (foundCount != expectedCount || !reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+    if (foundCount != expectedCount)
         Fatal(FATAL_MERGE_LOGIC_ERROR,
               "LoadLookupSource: level %d %s-to-move nested-index files are corrupt/partial (found %d of %d expected files)",
               nextLevel, RSFPlayerStr(player), foundCount, expectedCount);
 
-    uint64_t boardCount = reader.GetBoardCount();
-
-    /* ---- Board-key scratch: decompress+reshard once, then this
-    ** RingNestedIndexReader (and its wholesale-loaded vectors) is freed
-    ** the moment this function returns -- see file Notes.
+    /* ---- Board-key scratch: a single streaming pass -- see
+    ** RingNestedIndex.h's RingNestedIndexStreamAll. No count-first pass
+    ** needed any more: SegmentedStoreWriter reserves drives on demand as
+    ** it goes, so the ring files are read exactly once, never held resident.
     */
     char baseName[MAX_FULL_PATH_NAME];
     snprintf(baseName, sizeof(baseName), "L%04d_%s_keys", nextLevel, RSFPlayerStr(player));
 
-    std::vector<std::pair<char, int64_t>> keyPlan;
-    PlanScratchDrives(pState, pConfig->storeDrive, pConfig->countsDrive,
-                       (int64_t)boardCount * (int64_t)sizeof(UINT64_PAIR), baseName, &keyPlan);
-
     SegmentedStoreWriter keyWriter;
-    keyWriter.Init(std::move(keyPlan), sizeof(UINT64_PAIR), /*isKeySorted=*/true,
+    keyWriter.Init(pState, pConfig->storeDrive, pConfig->countsDrive, sizeof(UINT64_PAIR), /*isKeySorted=*/true,
                    pConfig->scratchDirNameNoDrive, baseName);
 
-    reader.ExpandAll([&](const BOARD_KEY& key)
+    uint64_t boardCount = 0;
+    bool writeOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                            [&](const BOARD_KEY& key)
     {
         UINT64_PAIR rec{ key.ullCellsInUse, key.ullCellColors };
         keyWriter.Write(&rec);
+        boardCount++;
     });
+    if (!writeOk)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "LoadLookupSource: level %d %s-to-move nested-index files failed to stream",
+              nextLevel, RSFPlayerStr(player));
 
     keyWriter.Finish();
     pOut->boardKeyPlan = keyWriter.plan;
@@ -102,7 +103,7 @@ static void LoadLookupSourceForColor(POthelloRingMasterCalculatorConfig pConfig,
     snprintf(countsBaseName, sizeof(countsBaseName), "L%04d_%s_counts", nextLevel, RSFPlayerStr(player));
 
     ScratchCountsWriter countsWriter;
-    countsWriter.Init(pState, pConfig->storeDrive, pConfig->countsDrive, boardCount, officialByteWidth,
+    countsWriter.Init(pState, pConfig->storeDrive, pConfig->countsDrive, officialByteWidth,
                       pConfig->scratchDirNameNoDrive, countsBaseName);
 
     if (officialByteWidth == COUNTER_WIDTH_NIBBLE)

@@ -367,6 +367,152 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
 }
 
 /*
+** Function: RingNestedIndexStreamAll
+** @brief    See RingNestedIndex.h.
+*/
+bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
+                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard)
+{
+    bool hasRing1 = (ring1Path != nullptr);
+    bool hasRing2 = (ring2Path != nullptr);
+
+    RSFReader* pCellsInUse = RSFOpen(cellsInUsePath);
+    if (!pCellsInUse) return false;
+
+    Lz4StreamReader* pRing1  = hasRing1 ? Lz4StreamReaderOpen(ring1Path) : nullptr;
+    Lz4StreamReader* pRing2  = hasRing2 ? Lz4StreamReaderOpen(ring2Path) : nullptr;
+    Lz4StreamReader* pRing34 = Lz4StreamReaderOpen(ring34Path);
+
+    if ((hasRing1 && !pRing1) || (hasRing2 && !pRing2) || !pRing34)
+    {
+        RSFClose(&pCellsInUse);
+        if (pRing1)  Lz4StreamReaderClose(&pRing1);
+        if (pRing2)  Lz4StreamReaderClose(&pRing2);
+        if (pRing34) Lz4StreamReaderClose(&pRing34);
+        return false;
+    }
+
+    bool ok = true;
+
+    /* One-record lookahead on CellsInUse -- see function Notes on why
+    ** nothing else in the walk needs one.
+    */
+    UINT64_PAIR curCells{}, nextCells{};
+    bool haveCur  = (RSFRead(pCellsInUse, &curCells, 1) == 1);
+    bool haveNext = haveCur && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+
+    while (haveCur && ok)
+    {
+        uint64_t pattern = curCells.hi;
+
+        /* This group's span in the next stored level: an exact count when
+        ** a next CellsInUse record exists (nextCells.lo - curCells.lo);
+        ** for the LAST group, "consume until that level's stream hits
+        ** EOF" -- UINT64_MAX as a loop bound lets the EOF check do the work.
+        */
+        uint64_t groupSpan = haveNext ? (nextCells.lo - curCells.lo) : UINT64_MAX;
+
+        if (hasRing1)
+        {
+            for (uint64_t r1 = 0; ok && r1 < groupSpan; r1++)
+            {
+                RingLevelRec ring1Rec;
+                size_t got = Lz4StreamReaderRead(pRing1, &ring1Rec, sizeof(ring1Rec));
+                if (got == 0) { if (haveNext) ok = false; break; }
+                if (got != sizeof(ring1Rec)) { ok = false; break; }
+
+                for (uint64_t r2 = 0; ok && r2 < ring1Rec.count; r2++)
+                {
+                    if (hasRing2)
+                    {
+                        RingLevelRec ring2Rec;
+                        if (Lz4StreamReaderRead(pRing2, &ring2Rec, sizeof(ring2Rec)) != sizeof(ring2Rec)) { ok = false; break; }
+
+                        for (uint64_t r34 = 0; ok && r34 < ring2Rec.count; r34++)
+                        {
+                            Ring34Rec ring34Rec;
+                            if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+
+                            BOARD_KEY key;
+                            key.ullCellsInUse = pattern;
+                            key.ullCellColors = ((uint64_t)ring1Rec.pattern << RING1_SHIFT)
+                                              | ((uint64_t)ring2Rec.pattern << RING2_SHIFT)
+                                              | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
+                            onBoard(key);
+                        }
+                    }
+                    else
+                    {
+                        /* hasRing1 true but hasRing2 false never occurs for
+                        ** any board size this project supports (8x8 implies
+                        ** 6x6's Ring_2 too), but handled correctly anyway:
+                        ** Ring_1's own offset/count would point directly
+                        ** into Ring_3_4.
+                        */
+                        Ring34Rec ring34Rec;
+                        if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+
+                        BOARD_KEY key;
+                        key.ullCellsInUse = pattern;
+                        key.ullCellColors = ((uint64_t)ring1Rec.pattern << RING1_SHIFT)
+                                          | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
+                        onBoard(key);
+                    }
+                }
+            }
+        }
+        else if (hasRing2)
+        {
+            for (uint64_t r2 = 0; ok && r2 < groupSpan; r2++)
+            {
+                RingLevelRec ring2Rec;
+                size_t got = Lz4StreamReaderRead(pRing2, &ring2Rec, sizeof(ring2Rec));
+                if (got == 0) { if (haveNext) ok = false; break; }
+                if (got != sizeof(ring2Rec)) { ok = false; break; }
+
+                for (uint64_t r34 = 0; ok && r34 < ring2Rec.count; r34++)
+                {
+                    Ring34Rec ring34Rec;
+                    if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+
+                    BOARD_KEY key;
+                    key.ullCellsInUse = pattern;
+                    key.ullCellColors = ((uint64_t)ring2Rec.pattern << RING2_SHIFT)
+                                      | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
+                    onBoard(key);
+                }
+            }
+        }
+        else
+        {
+            for (uint64_t r34 = 0; ok && r34 < groupSpan; r34++)
+            {
+                Ring34Rec ring34Rec;
+                size_t got = Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec));
+                if (got == 0) { if (haveNext) ok = false; break; }
+                if (got != sizeof(ring34Rec)) { ok = false; break; }
+
+                BOARD_KEY key;
+                key.ullCellsInUse = pattern;
+                key.ullCellColors = (uint64_t)ring34Rec.pattern << RING34_SHIFT;
+                onBoard(key);
+            }
+        }
+
+        curCells  = nextCells;
+        haveCur   = haveNext;
+        haveNext  = haveCur && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+    }
+
+    RSFClose(&pCellsInUse);
+    if (pRing1) Lz4StreamReaderClose(&pRing1);
+    if (pRing2) Lz4StreamReaderClose(&pRing2);
+    Lz4StreamReaderClose(&pRing34);
+
+    return ok;
+}
+
+/*
 ** Function: BinarySearchPattern
 ** @brief    Binary searches vec[lo, hi) for an element whose pattern field
 **           equals target.
