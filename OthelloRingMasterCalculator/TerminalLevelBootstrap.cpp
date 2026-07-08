@@ -8,29 +8,52 @@
 /* Includes */
 #include "TerminalLevelBootstrap.h"
 #include "CalculatorFileName.h"
+#include "CalculatorScratchCounts.h"
 #include "OutcomeTriple.h"
-#include "CalculatorCountsFile.h"
 #include "TerminalClassify.h"
 #include "RSFFileName.h"
 #include "OthelloBasics.h"
 #include "RingNestedIndex.h"
 #include <windows.h>
 
+/* Structures and Types */
+
+/*
+** Type:    TerminalPlayerResult
+** @brief   One color's outcome from ProcessTerminalLevelForPlayer: board/
+**          outcome bookkeeping plus the scratch segments holding the
+**          result, not yet joined to the permanent counts directory.
+*/
+struct TerminalPlayerResult
+{
+    uint64_t         boardsProcessed = 0;
+    WinTieLossTriple totals          = {};
+
+    SegmentList                           scratchSegments;
+    std::vector<std::pair<char, int64_t>> scratchPlan;
+};
+
 /* Internal Helpers */
 
 /*
 ** Function: ProcessTerminalLevelForPlayer
 ** @brief    Classifies and writes out every board at level for one player
-**           (whichever color is to move at this level), accumulating that
-**           color's own running totals into pState->levelStats[level].
+**           (whichever color is to move at this level) to SCRATCH -- the
+**           caller joins scratch to the permanent counts directory once
+**           both colors are done, same as the non-terminal step, for
+**           consistency across every level regardless of kind.
 ** @param    pConfig - run configuration (boardSize)
-** @param    pState  - calculator state (storeDirectory, countsDirectory, levelStats)
+** @param    pState  - calculator state (storeDirectory, driveInfo, driveLedger, levelStats)
 ** @param    level   - the level to process
 ** @param    player  - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @return   This color's result (board count, best-effort totals, and --
+**           if this color has any boards -- the scratch segments holding the result).
 */
-static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMasterCalculatorState pState,
-                                           int level, int player)
+static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMasterCalculatorState pState,
+                                                            int level, int player)
 {
+    TerminalPlayerResult result;
+
     int  boardSize = (int)pConfig->boardSize;
     bool hasRing1  = RingNestedIndexHasRing1(boardSize);
     bool hasRing2  = RingNestedIndexHasRing2(boardSize);
@@ -60,7 +83,7 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
     if (foundCount == 0)
     {
         LoggerLog("ProcessTerminalLevel: level %d has no %s-to-move boards, skipping\n", level, RSFPlayerStr(player));
-        return;
+        return result;
     }
 
     RingNestedIndexReader reader;
@@ -69,18 +92,17 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
               "ProcessTerminalLevel: level %d %s-to-move nested-index files are corrupt/partial (found %d of %d expected files)",
               level, RSFPlayerStr(player), foundCount, expectedCount);
 
-    char countsPath[MAX_FULL_PATH_NAME];
-    CalcNameCountsFile(countsPath, sizeof(countsPath), pState->countsDirectory, boardSize, level, player);
-
-    NibbleCountsWriter* pWriter = NibbleCountsWriterOpen(countsPath);
-
     CalculatorLevelStats* pStats = &pState->levelStats[level];
     uint64_t              totalBoards = reader.GetBoardCount();
     if (player == RSF_PLAYER_BLACK) pStats->totalBoardsBlack = totalBoards;
     else                            pStats->totalBoardsWhite = totalBoards;
 
-    WinTieLossTriple totals          = {};
-    uint64_t         boardsProcessed = 0;
+    char baseName[MAX_FULL_PATH_NAME];
+    snprintf(baseName, sizeof(baseName), "L%04d_%s_out", level, RSFPlayerStr(player));
+
+    ScratchCountsWriter writer;
+    writer.Init(pState, pConfig->storeDrive, pConfig->countsDrive, totalBoards, COUNTER_WIDTH_NIBBLE,
+                pConfig->scratchDirNameNoDrive, baseName);
 
     reader.ExpandAll([&](const BOARD_KEY& key)
     {
@@ -92,33 +114,37 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
         ** decides the outcome.
         */
         int outcome = ClassifyTerminalOutcome(key);
-        if (outcome == OUTCOME_BLACK_WIN)      totals.blackWins++;
-        else if (outcome == OUTCOME_WHITE_WIN) totals.whiteWins++;
-        else                                   totals.ties++;
+        if (outcome == OUTCOME_BLACK_WIN)      result.totals.blackWins++;
+        else if (outcome == OUTCOME_WHITE_WIN) result.totals.whiteWins++;
+        else                                   result.totals.ties++;
 
         NibbleOutcomeTriple triple;
         NibbleOutcomeTripleSetOneHot(&triple, outcome);
-        NibbleCountsWriterWrite(pWriter, &triple);
+        writer.WriteNibbleTriple(triple);
 
-        boardsProcessed++;
+        result.boardsProcessed++;
 
         /* Live progress for the status listener -- updated per board since
         ** classification/write here is cheap; a plain (non-atomic) field
         ** read concurrently by the stats thread, same established pattern
         ** as OthelloRingMaster's own LevelStats.boardsReadFromStore.
         */
-        if (player == RSF_PLAYER_BLACK) pStats->boardsProcessedBlack = boardsProcessed;
-        else                            pStats->boardsProcessedWhite = boardsProcessed;
+        if (player == RSF_PLAYER_BLACK) pStats->boardsProcessedBlack = result.boardsProcessed;
+        else                            pStats->boardsProcessedWhite = result.boardsProcessed;
     });
 
-    NibbleCountsWriterClose(pWriter);
+    writer.Finish();
+    result.scratchSegments = writer.store.segments;
+    result.scratchPlan     = writer.store.plan;
 
-    if (player == RSF_PLAYER_BLACK) pStats->blackToMoveTotals = totals;
-    else                            pStats->whiteToMoveTotals = totals;
+    if (player == RSF_PLAYER_BLACK) pStats->blackToMoveTotals = result.totals;
+    else                            pStats->whiteToMoveTotals = result.totals;
 
     LoggerLog("ProcessTerminalLevel: level %d %s-to-move: %llu boards (blackWins=%llu whiteWins=%llu ties=%llu)\n",
-              level, RSFPlayerStr(player), (unsigned long long)boardsProcessed,
-              (unsigned long long)totals.blackWins, (unsigned long long)totals.whiteWins, (unsigned long long)totals.ties);
+              level, RSFPlayerStr(player), (unsigned long long)result.boardsProcessed,
+              (unsigned long long)result.totals.blackWins, (unsigned long long)result.totals.whiteWins, (unsigned long long)result.totals.ties);
+
+    return result;
 }
 
 /*
@@ -136,10 +162,27 @@ void ProcessTerminalLevel(POthelloRingMasterCalculatorConfig pConfig, POthelloRi
     pState->currentLevel = (uint8_t)level;
 
     pState->currentPlayer = RSF_PLAYER_BLACK;
-    ProcessTerminalLevelForPlayer(pConfig, pState, level, RSF_PLAYER_BLACK);
+    TerminalPlayerResult blackResult = ProcessTerminalLevelForPlayer(pConfig, pState, level, RSF_PLAYER_BLACK);
 
     pState->currentPlayer = RSF_PLAYER_WHITE;
-    ProcessTerminalLevelForPlayer(pConfig, pState, level, RSF_PLAYER_WHITE);
+    TerminalPlayerResult whiteResult = ProcessTerminalLevelForPlayer(pConfig, pState, level, RSF_PLAYER_WHITE);
+
+    /* Join scratch to the permanent counts directory -- "read the first
+    ** drive, write it out, read the next drive, etc.," no sort needed.
+    ** A color with no boards at this level gets no file at all, matching
+    ** the established absent-color behavior.
+    */
+    int boardSize = (int)pConfig->boardSize;
+    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    {
+        TerminalPlayerResult& r = (player == RSF_PLAYER_BLACK) ? blackResult : whiteResult;
+        if (r.scratchSegments.empty()) continue;
+
+        char finalPath[MAX_FULL_PATH_NAME];
+        CalcNameCountsFile(finalPath, sizeof(finalPath), pState->countsDirectory, boardSize, level, player);
+        JoinScratchCountsToFinal(r.scratchSegments, /*scratchByteWidth=*/1, COUNTER_WIDTH_NIBBLE, finalPath);
+        DeleteSegments(pState, r.scratchSegments, r.scratchPlan);
+    }
 
     CalculatorLevelStats* pStats = &pState->levelStats[level];
     pStats->combinedTotals.blackWins = pStats->blackToMoveTotals.blackWins + pStats->whiteToMoveTotals.blackWins;

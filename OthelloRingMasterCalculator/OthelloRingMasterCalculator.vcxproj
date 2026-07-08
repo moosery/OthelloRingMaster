@@ -160,6 +160,9 @@
     <ClCompile Include="NonTerminalLevelStep.cpp" />
     <ClCompile Include="BackwardWalkDriver.cpp" />
     <ClCompile Include="CalculatorStatsListener.cpp" />
+    <ClCompile Include="SegmentedStore.cpp" />
+    <ClCompile Include="CalculatorScratchCounts.cpp" />
+    <ClCompile Include="CalculatorLookupSource.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="RetrogradeKernels.cu" />
@@ -178,6 +181,10 @@
     <ClInclude Include="RetrogradeKernels.h" />
     <ClInclude Include="BackwardWalkDriver.h" />
     <ClInclude Include="CalculatorStatsListener.h" />
+    <ClInclude Include="CalcDriveLedger.h" />
+    <ClInclude Include="SegmentedStore.h" />
+    <ClInclude Include="CalculatorScratchCounts.h" />
+    <ClInclude Include="CalculatorLookupSource.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">

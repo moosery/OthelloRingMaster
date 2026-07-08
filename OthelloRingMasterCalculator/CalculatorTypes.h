@@ -11,14 +11,16 @@
 **   per-level bookkeeping each history-table row holds).
 **
 ** Notes:
-**   Deliberately much smaller than OthelloTypes.h's
-**   OthelloRingMasterConfig/State -- the calculator has none of the
-**   forward solver's multi-drive/multi-writer machinery (no NVMe writer
-**   pool, no cascading merge, no drive ledger for a dozen drives); it only
-**   ever reads one already-finished level at a time from RingMaster's
-**   existing store and writes one counts file back out. Reuses everything
-**   Utility already provides (MAX_FULL_PATH_NAME, ClockTick, ThreadPool)
-**   rather than redefining any of it.
+**   Smaller than OthelloTypes.h's OthelloRingMasterConfig/State -- no
+**   cascading merge, no MW segment-pool bookkeeping -- but it DOES carry
+**   its own drive ledger now (see CalcDriveLedger.h): while processing
+**   level N, level N+1's board/counts data is staged as segmented,
+**   drive-spread scratch (fastest drives first, falling back to medium
+**   then slow) so a lookup never needs the whole level resident in
+**   memory, and level N's own output is written the same way before
+**   being joined and compressed back to the permanent counts directory.
+**   Reuses everything Utility already provides (MAX_FULL_PATH_NAME,
+**   ClockTick, ThreadPool, DriveInfo) rather than redefining any of it.
 */
 
 #pragma once
@@ -27,7 +29,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.23.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.24.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 
@@ -99,6 +101,8 @@ typedef struct __OthelloRingMasterCalculatorConfig
     char      countsDirNameNoDrive[MAX_FULL_PATH_NAME]; /* sub-path on countsDrive for counts output */
     char      cacheDirName[MAX_FULL_PATH_NAME];        /* logs + the single per-level width-config file live here */
     uint16_t  statsPort;                              /* default 17632 -- distinct from RingMaster's 17532 */
+    char      useDrives[64];                          /* drive letters available for segmented scratch (e.g. "DEFG"); empty = auto-enumerate all fixed local drives */
+    char      scratchDirNameNoDrive[MAX_FULL_PATH_NAME]; /* sub-path (on whichever scratch drive) segments are written under */
 } OthelloRingMasterCalculatorConfig, * POthelloRingMasterCalculatorConfig;
 
 /*
@@ -123,5 +127,16 @@ typedef struct __OthelloRingMasterCalculatorState
     /* Per-level stats history -- one entry per level, indexed by level number. */
     CalculatorLevelStats  levelStats[CALC_MAX_LEVELS];
 
+    /* Drive-aware segmented scratch storage (see CalcDriveLedger.h,
+    ** SegmentedStore.h): driveInfo is probed once at startup;
+    ** driveLedger tracks each drive's remaining scratch budget as both
+    ** level+1's lookup-source segments and level N's own output segments
+    ** draw from the same pool. Same shape as OthelloTypes.h's own
+    ** driveLedger[26] (indexed by letter - 'A').
+    */
+    MachineDriveInfo   driveInfo;
+    volatile int64_t   driveLedger[26];
+
     ThreadPool* pStatsThreadPool;
+    ThreadPool* pLookupThreadPool;   /* parallelizes per-parent child lookups -- see NonTerminalLevelStep.cpp */
 } OthelloRingMasterCalculatorState, * POthelloRingMasterCalculatorState;

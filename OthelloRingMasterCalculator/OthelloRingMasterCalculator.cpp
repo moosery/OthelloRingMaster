@@ -22,10 +22,12 @@
 #include "StoreLevelScan.h"
 #include "BackwardWalkDriver.h"
 #include "CalculatorStatsListener.h"
+#include "CalcDriveLedger.h"
 #include "CounterWidthConfig.h"
 #include <windows.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <thread>
 
 /* Globals */
 OthelloRingMasterCalculatorConfig g_config = {};
@@ -47,6 +49,8 @@ static void PrintUsage(const char* prog)
     printf("  --counts-drive L  Drive letter this calculator writes its own counts files to [default: Y]\n");
     printf("  --counts-dir PATH Sub-path on counts drive (no drive letter) [default: \\OthelloRingMasterCalculator\\Counts]\n");
     printf("  --cache-dir PATH  Full path for logs and the width-config file [default: C:\\OthelloRingMasterCalculator\\Cache]\n");
+    printf("  --use-drives STR  Drive letters available for segmented scratch (e.g. DEFG) [default: auto-enumerate all fixed local drives]\n");
+    printf("  --scratch-dir PATH Sub-path (on whichever scratch drive) segments are written under [default: \\OthelloRingMasterCalculator\\Scratch]\n");
     printf("  --port N          Stats listener TCP port                    [default: 17632]\n");
     printf("  --help            Show this help\n\n");
 }
@@ -65,6 +69,8 @@ static void ParseArgs(int argc, char* argv[])
     g_config.countsDrive = 'Y';
     strncpy(g_config.countsDirNameNoDrive, "\\OthelloRingMasterCalculator\\Counts", sizeof(g_config.countsDirNameNoDrive) - 1);
     strncpy(g_config.cacheDirName, "C:\\OthelloRingMasterCalculator\\Cache", sizeof(g_config.cacheDirName) - 1);
+    g_config.useDrives[0] = '\0';
+    strncpy(g_config.scratchDirNameNoDrive, "\\OthelloRingMasterCalculator\\Scratch", sizeof(g_config.scratchDirNameNoDrive) - 1);
     g_config.statsPort = 17632;
 
     for (int i = 1; i < argc; i++)
@@ -90,6 +96,10 @@ static void ParseArgs(int argc, char* argv[])
             strncpy(g_config.countsDirNameNoDrive, argv[++i], sizeof(g_config.countsDirNameNoDrive) - 1);
         else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc)
             strncpy(g_config.cacheDirName, argv[++i], sizeof(g_config.cacheDirName) - 1);
+        else if (strcmp(argv[i], "--use-drives") == 0 && i + 1 < argc)
+            strncpy(g_config.useDrives, argv[++i], sizeof(g_config.useDrives) - 1);
+        else if (strcmp(argv[i], "--scratch-dir") == 0 && i + 1 < argc)
+            strncpy(g_config.scratchDirNameNoDrive, argv[++i], sizeof(g_config.scratchDirNameNoDrive) - 1);
         else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             g_config.statsPort = (uint16_t)atoi(argv[++i]);
         else
@@ -140,11 +150,38 @@ int main(int argc, char* argv[])
     CounterWidthConfig widthConfig;
     CounterWidthConfigLoad(&widthConfig, g_state.cacheDirectory, g_config.boardSize);
 
+    /* Probe/benchmark drives once at startup (cached in cacheDirectory,
+    ** same as RingMaster's own driveinfo.json) and seed the scratch
+    ** ledger for every drive it found -- both level+1's lookup-source
+    ** segments and this level's own output segments draw reservations
+    ** from this same ledger for the rest of the run.
+    */
+    GetDriveInformation(&g_state.driveInfo, g_state.cacheDirectory,
+                        g_config.useDrives[0] ? g_config.useDrives : nullptr);
+    for (int i = 0; i < g_state.driveInfo.numDrives; i++)
+    {
+        const DriveInformation* d = &g_state.driveInfo.drives[i];
+        if (d->available)
+            CalcDriveInitLedger(&g_state, d->driveLetter);
+    }
+
     g_state.pStatsThreadPool = new ThreadPool(1, "CalculatorStatsThreadPool");
     if (!g_state.pStatsThreadPool)
         Fatal(FATAL_ALLOCATION_FAILED, "main: cannot create stats thread pool");
     g_state.pStatsThreadPool->Start();
     g_state.pStatsThreadPool->WaitUntilReady();
+
+    /* Parallelizes per-parent child lookups (real disk seeks against
+    ** segmented scratch now, not just vector indexing) -- see
+    ** NonTerminalLevelStep.cpp's flushBatch.
+    */
+    uint32_t lookupThreads = std::thread::hardware_concurrency();
+    if (lookupThreads < 4) lookupThreads = 4;
+    g_state.pLookupThreadPool = new ThreadPool(lookupThreads, "CalculatorLookupThreadPool");
+    if (!g_state.pLookupThreadPool)
+        Fatal(FATAL_ALLOCATION_FAILED, "main: cannot create lookup thread pool");
+    g_state.pLookupThreadPool->Start();
+    g_state.pLookupThreadPool->WaitUntilReady();
 
     CalculatorContext ctx = { &g_config, &g_state };
     SubmitCalculatorStatsListenerJob(&ctx);
@@ -154,6 +191,9 @@ int main(int argc, char* argv[])
     g_state.terminateStatsListener = true;
     g_state.pStatsThreadPool->Stop();
     delete g_state.pStatsThreadPool;
+
+    g_state.pLookupThreadPool->Stop();
+    delete g_state.pLookupThreadPool;
 
     return 0;
 }

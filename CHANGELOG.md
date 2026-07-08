@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.24.0] - 2026-07-08
+
+### Drive-spanning segmented scratch storage: level+1 lookups and level output no longer need to fit in memory
+
+- **The problem this closes**: `LoadNextLevelLookupData`/`CalculatorCountsFile` (Phases 1-3) loaded an entire level's board-key index and counts array wholesale into `std::vector`s. Fine at 4x4 scale, but genuinely impossible at real 6x6 scale -- caught directly by the user ("you can't read the whole N+1 ring information into memory. That's terabytes of information").
+- New `CalcDriveLedger.h`: per-drive scratch-space ledger (reserve/reclaim/available), mirroring `OthelloTypes.h`'s own `DriveLedger.h` exactly, sized with the same ~20 GB safety margin RingMaster uses for solving (not `Utility/DriveInfo.h`'s larger 200 GB margin, which serves a different purpose).
+- New `SegmentedStore.h`/`.cpp`: a drive-spanning segmented store -- one logical sorted/ordered dataset split into contiguous pieces (no hashing) across drives, fastest tier first (`DRIVE_CAT_FAST`, then `MEDIUM` only once FAST is full, then `SLOW` only once `MEDIUM` is too, reusing `Utility/DriveInfo.h`'s existing classification). Segments are plain, uncompressed, fixed-size-record files -- unlike every other on-disk format in this solution, trading disk space for direct `fseek`-able random access, since this is fast scratch, not permanent storage. Key-searchable lookups ride `Utility/BinarySearchFile` (already existed, previously unused) for the within-segment search; positional lookups are a direct seek. Reader is thread-safe by construction (each call opens/reads/closes its own file handle, touching only the small read-only in-memory segment index otherwise).
+- New `CalculatorScratchCounts.h`/`.cpp`: the output-side wrapper -- `ScratchCountsWriter` writes a level's own result to scratch (promoting nibble-tier data to a lossless 1-byte-per-counter scratch record, since scratch is never compressed); `JoinScratchCountsToFinal` reads every segment back in original order -- "read the first drive, write it out, read the next drive, etc.," no sort needed -- and writes the permanent, compressed `CalculatorCountsFile`/`NibbleCountsFile` to the counts directory on Y:, exactly as before.
+- New `CalculatorLookupSource.h`/`.cpp`: the read-side wrapper -- stages level+1's board-key and counts data as segmented scratch instead of loading either wholesale. Disclosed, not-yet-closed limitation: building the board-key scratch still requires one transient pass through `RingNestedIndexReader::Load()`/`ExpandAll()` (itself not streaming) to decompress and reshard the ring files; that peak is freed the moment resharding finishes, but not eliminated. The counts side has no such gap -- the permanent counts file is already read sequentially, one record at a time, straight into scratch.
+- `TerminalLevelBootstrap.cpp`/`NonTerminalLevelStep.cpp` reworked to write via `ScratchCountsWriter`/join instead of directly to the permanent counts file, for every level regardless of kind (deliberately, per the user: "a consistent way for all boards").
+- **Parallelized per-parent lookups**: previously fully serialized (a single for-loop doing in-memory vector lookups); now each parent's full set of child lookups+color-swap+sum is dispatched as its own thread-pool job (new `pState->pLookupThreadPool`, sized to CPU core count), since each parent's accumulator is naturally thread-local and lookups now involve real disk seeks where serializing would squander the entire point of spreading data across drives.
+- `CalculatorTypes.h`: added `useDrives`/`scratchDirNameNoDrive` config (new `--use-drives`/`--scratch-dir` CLI options) and `driveInfo`/`driveLedger`/`pLookupThreadPool` state, initialized in `main()` via `GetDriveInformation` (same probe/benchmark/cache RingMaster itself uses).
+- New `FATAL_DRIVE_SPACE`-based Fatal in `PlanScratchDrives` if all available drives combined can't cover a level's scratch requirement -- never a silent shortfall.
+
 ## [0.23.0] - 2026-07-08
 
 ### Calculator Phase 5: status/monitoring
