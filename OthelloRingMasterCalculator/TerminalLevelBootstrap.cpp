@@ -74,6 +74,11 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
 
     NibbleCountsWriter* pWriter = NibbleCountsWriterOpen(countsPath);
 
+    CalculatorLevelStats* pStats = &pState->levelStats[level];
+    uint64_t              totalBoards = reader.GetBoardCount();
+    if (player == RSF_PLAYER_BLACK) pStats->totalBoardsBlack = totalBoards;
+    else                            pStats->totalBoardsWhite = totalBoards;
+
     WinTieLossTriple totals          = {};
     uint64_t         boardsProcessed = 0;
 
@@ -96,21 +101,20 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
         NibbleCountsWriterWrite(pWriter, &triple);
 
         boardsProcessed++;
+
+        /* Live progress for the status listener -- updated per board since
+        ** classification/write here is cheap; a plain (non-atomic) field
+        ** read concurrently by the stats thread, same established pattern
+        ** as OthelloRingMaster's own LevelStats.boardsReadFromStore.
+        */
+        if (player == RSF_PLAYER_BLACK) pStats->boardsProcessedBlack = boardsProcessed;
+        else                            pStats->boardsProcessedWhite = boardsProcessed;
     });
 
     NibbleCountsWriterClose(pWriter);
 
-    CalculatorLevelStats* pStats = &pState->levelStats[level];
-    if (player == RSF_PLAYER_BLACK)
-    {
-        pStats->boardsProcessedBlack = boardsProcessed;
-        pStats->blackToMoveTotals    = totals;
-    }
-    else
-    {
-        pStats->boardsProcessedWhite = boardsProcessed;
-        pStats->whiteToMoveTotals    = totals;
-    }
+    if (player == RSF_PLAYER_BLACK) pStats->blackToMoveTotals = totals;
+    else                            pStats->whiteToMoveTotals = totals;
 
     LoggerLog("ProcessTerminalLevel: level %d %s-to-move: %llu boards (blackWins=%llu whiteWins=%llu ties=%llu)\n",
               level, RSFPlayerStr(player), (unsigned long long)boardsProcessed,

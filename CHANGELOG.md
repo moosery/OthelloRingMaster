@@ -4,6 +4,41 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.23.0] - 2026-07-08
+
+### Calculator Phase 5: status/monitoring
+
+- New `OthelloRingMasterCalculator/CalculatorStatsListener.h`/`.cpp`:
+  a TCP status thread mirroring `StatsListener.cpp`'s query-on-demand
+  shape exactly -- same protocol the already-scaffolded (Phase 0)
+  `OthelloRingMasterCalculatorStatus` client expects (connect, send
+  `STATUS\n` or `STOP\n`, read the response until the connection
+  closes). Response shows the current level's live progress (per color
+  and combined win/tie/loss totals, % done, ETA) plus a history table of
+  completed levels walked in processing order (deepest level first, the
+  opposite of `OthelloRingMaster`'s own 0-first table, since that's the
+  direction this calculator actually works in). `STOP` sets
+  `terminateThreads`; `BackwardWalkDriver.cpp` now checks it between
+  levels (never mid-level, matching the project's whole-level-granularity
+  resumability model -- there's no finer-grained stopping point to offer).
+- `CalculatorTypes.h`: added `totalBoardsBlack`/`totalBoardsWhite` to
+  `CalculatorLevelStats` (the live "% done" denominator, set as soon as a
+  color's board count is known) and `deepestLevel` to
+  `OthelloRingMasterCalculatorState` (the walk's starting point, for
+  display). `TerminalLevelBootstrap.cpp`/`NonTerminalLevelStep.cpp`
+  updated to populate these fields, and to update `boardsProcessedBlack`/
+  `boardsProcessedWhite` incrementally (per board in Phase 2, per GPU
+  batch in Phase 3) rather than only once at the end -- the same
+  plain-field-read-concurrently pattern `OthelloRingMaster`'s own
+  `LevelStats.boardsReadFromStore` already uses, not `std::atomic`.
+- `main()` now creates a 1-thread stats pool, submits the listener job,
+  runs the backward walk, then stops the pool -- mirroring
+  `InitSolver.cpp`'s own thread-pool lifecycle pattern.
+- Per-level completion log lines and width-overflow abort/retry logging
+  were already in place from Phases 2-4 (`LoggerLog` calls in
+  `ProcessTerminalLevel`/`ProcessNonTerminalLevel`/`CounterWidthConfigBumpLevel`) --
+  no changes needed there.
+
 ## [0.22.0] - 2026-07-08
 
 ### Calculator Phase 4: the full backward walk driver

@@ -56,9 +56,21 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
                       CounterWidthConfig* pWidthConfig, int deepestLevel)
 {
     int boardSize = (int)pConfig->boardSize;
+    pState->deepestLevel = (uint8_t)deepestLevel;
 
     for (int level = deepestLevel; level >= 0; level--)
     {
+        /* A STOP request via the stats listener is checked between levels
+        ** only -- matching the project's whole-level-granularity
+        ** resumability model, this never interrupts a level partway
+        ** through (see CalculatorStatsListener.h's own Notes).
+        */
+        if (pState->terminateThreads)
+        {
+            LoggerLog("RunBackwardWalk: stop requested, halting before level %d\n", level);
+            break;
+        }
+
         if (IsLevelComplete(pState->countsDirectory, boardSize, level))
         {
             LoggerLog("RunBackwardWalk: level %d already complete, skipping\n", level);

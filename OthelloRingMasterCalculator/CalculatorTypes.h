@@ -27,7 +27,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.22.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.23.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 
@@ -57,6 +57,16 @@ typedef struct __CalculatorLevelStats
 {
     uint64_t  boardsProcessedBlack;
     uint64_t  boardsProcessedWhite;
+
+    /* Total boards to process this level, per color -- set once
+    ** (from RingNestedIndexReader::GetBoardCount()) as soon as that
+    ** color's board store is loaded, before processing starts, so the
+    ** live status display has a denominator for "% done" while a level
+    ** is still in progress. 0 until then (and permanently 0 for a color
+    ** genuinely absent at this level).
+    */
+    uint64_t  totalBoardsBlack;
+    uint64_t  totalBoardsWhite;
 
     /*
     ** blackToMoveTotals/whiteToMoveTotals: the aggregate outcome census
@@ -100,6 +110,7 @@ typedef struct __OthelloRingMasterCalculatorState
 {
     uint8_t              currentLevel;
     uint8_t              currentPlayer;              /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE -- which color is in progress right now */
+    uint8_t              deepestLevel;                /* set once at walk start -- the walk's starting point, for status display */
     volatile bool         terminateThreads;
     volatile bool         terminateStatsListener;
     const char* volatile  currentPhase;               /* points to a string literal; set by main thread at each phase transition */

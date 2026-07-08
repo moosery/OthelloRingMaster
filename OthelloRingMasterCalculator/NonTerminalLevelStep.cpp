@@ -285,6 +285,15 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
     if (byteWidth == COUNTER_WIDTH_NIBBLE) pNibbleWriter = NibbleCountsWriterOpen(countsPath);
     else                                    pWideWriter   = CalculatorCountsWriterOpen(countsPath, byteWidth);
 
+    /* Live progress for the status listener -- total is known up front;
+    ** boardsProcessed (below) updates per batch, a plain field read
+    ** concurrently by the stats thread, same pattern as
+    ** OthelloRingMaster's own LevelStats fields.
+    */
+    CalculatorLevelStats* pStats = &pState->levelStats[level];
+    if (player == RSF_PLAYER_BLACK) pStats->totalBoardsBlack = reader.GetBoardCount();
+    else                            pStats->totalBoardsWhite = reader.GetBoardCount();
+
     std::vector<UINT64_PAIR> batch;
     batch.reserve(gpuBatchSize);
     uint8_t playerBit = (uint8_t)player;
@@ -390,6 +399,9 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
 
             result.boardsProcessed++;
         }
+
+        if (player == RSF_PLAYER_BLACK) pStats->boardsProcessedBlack = result.boardsProcessed;
+        else                            pStats->boardsProcessedWhite = result.boardsProcessed;
 
         batch.clear();
         return true;

@@ -4,11 +4,11 @@
 ** Purpose:
 **   Entry point for OthelloRingMasterCalculator: parses CLI args, opens
 **   the logger, finds the deepest completed level in RingMaster's
-**   finished store, and runs the full Phase 4 backward walk (deepest
-**   level down to 0, sentinel-based resumability) against it -- see
-**   project_retrograde_calculator_implementation_plan memory for the
-**   phase breakdown this completes through Phase 4. Phase 5+
-**   (status/monitoring, 4x4 validation, real 6x6 run) are not implemented yet.
+**   finished store, starts the status listener, and runs the full
+**   backward walk (deepest level down to 0, sentinel-based resumability)
+**   against it -- see project_retrograde_calculator_implementation_plan
+**   memory for the phase breakdown this completes through Phase 5.
+**   Phase 6+ (4x4 validation, real 6x6 run) are not implemented yet.
 **
 ** Notes:
 **   Mirrors OthelloRingMaster.cpp's CLI-parsing shape (same option style,
@@ -21,6 +21,7 @@
 #include "CalculatorInitLogger.h"
 #include "StoreLevelScan.h"
 #include "BackwardWalkDriver.h"
+#include "CalculatorStatsListener.h"
 #include "CounterWidthConfig.h"
 #include <windows.h>
 #include <ctype.h>
@@ -103,8 +104,8 @@ static void ParseArgs(int argc, char* argv[])
 /*
 ** Function: main
 ** @brief    Parses CLI args, opens the logger, finds the deepest completed
-**           level in RingMaster's store, and runs the full backward walk
-**           (deepest level down to 0) against it.
+**           level in RingMaster's store, starts the status listener, and
+**           runs the full backward walk (deepest level down to 0) against it.
 ** @param    argc - argument count
 ** @param    argv - argument values
 ** @return   0 on success, 1 on argument or precondition error.
@@ -139,7 +140,20 @@ int main(int argc, char* argv[])
     CounterWidthConfig widthConfig;
     CounterWidthConfigLoad(&widthConfig, g_state.cacheDirectory, g_config.boardSize);
 
+    g_state.pStatsThreadPool = new ThreadPool(1, "CalculatorStatsThreadPool");
+    if (!g_state.pStatsThreadPool)
+        Fatal(FATAL_ALLOCATION_FAILED, "main: cannot create stats thread pool");
+    g_state.pStatsThreadPool->Start();
+    g_state.pStatsThreadPool->WaitUntilReady();
+
+    CalculatorContext ctx = { &g_config, &g_state };
+    SubmitCalculatorStatsListenerJob(&ctx);
+
     RunBackwardWalk(&g_config, &g_state, &widthConfig, deepestLevel);
+
+    g_state.terminateStatsListener = true;
+    g_state.pStatsThreadPool->Stop();
+    delete g_state.pStatsThreadPool;
 
     return 0;
 }
