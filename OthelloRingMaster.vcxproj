@@ -112,7 +112,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>Utility;OthelloBasics;OthelloBasicsForCUDA;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>Utility;OthelloBasics;OthelloBasicsForCUDA;%(AdditionalIncludeDirectories);$(CudaToolkitIncludeDir)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -121,6 +121,10 @@
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -131,7 +135,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>Utility;OthelloBasics;OthelloBasicsForCUDA;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>Utility;OthelloBasics;OthelloBasicsForCUDA;%(AdditionalIncludeDirectories);$(CudaToolkitIncludeDir)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -140,13 +144,33 @@
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="OthelloRingMaster.cpp" />
+    <ClCompile Include="GetMachineInfo.cpp" />
+    <ClCompile Include="InitLogger.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="GpuInfo.cu" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="OthelloTypes.h" />
+    <ClInclude Include="DriveLedger.h" />
+    <ClInclude Include="RSFFileName.h" />
+    <ClInclude Include="GetMachineInfo.h" />
+    <ClInclude Include="GpuInfo.h" />
+    <ClInclude Include="InitLogger.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
       <Project>{375f3354-bf89-48cd-8405-d660fa4a3983}</Project>
+    </ProjectReference>
+    <ProjectReference Include="Utility\Utility.vcxproj">
+      <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -23,6 +23,7 @@
 #include "FileAndDirUtils.h"
 #include "Logger.h"
 #include "Mem.h"
+#include "RingStoreFile.h"
 #include "RWLock.h"
 #include "SysMemInfo.h"
 #include "ThreadPool.h"

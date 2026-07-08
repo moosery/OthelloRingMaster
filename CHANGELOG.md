@@ -4,6 +4,30 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.7.0] - 2026-07-07
+
+### Port foundation config/state types and standalone utilities (Phase 4 Step 1)
+
+- Added `OthelloTypes.h` (config/state/stats structs, renamed
+  `OthelloLevelBlasterConfig/State` -> `OthelloRingMasterConfig/State`; field
+  shapes kept as-is since the multi-drive/multi-writer machinery is real
+  functionality this project intends to keep), `DriveLedger.h` (per-drive
+  space ledger, logic unchanged), `RSFFileName.h` (file-naming helpers,
+  renamed from `BlasterFileName.h`/`BLF*` to `RSFFileName.h`/`RSF*`,
+  extensions `.rsf`/`.rsfz`/`.rsfzl`; counts-file naming intentionally not
+  ported -- out of scope until the win/tie/loss stats phase), and
+  `GetMachineInfo.h`/`.cpp` + `GpuInfo.h`/`.cu` + `InitLogger.h`/`.cpp`
+  (machine/GPU capability probes and logger setup, near-verbatim -- none of
+  these had any Othello- or Blaster-specific coupling to begin with).
+- `OthelloRingMaster.vcxproj` gained a direct `Utility` `ProjectReference`
+  (these new files use `Logger`/`Error`/`ThreadPool`/`ClockTick`/
+  `FileAndDirUtils`/`DriveInfo`/`SysMemInfo` directly, not just
+  transitively) and CUDA build settings for compiling `.cu` files directly
+  in this project for the first time (`GpuInfo.cu`).
+- `Utility.h`'s umbrella include gained `RingStoreFile.h` (added in Step 0
+  but not yet wired into the umbrella header).
+- No live-solve logic yet -- this is pure scaffolding for Steps 2-8.
+
 ## [0.6.0] - 2026-07-07
 
 ### Genericize the record-file format into Utility as RSF; delete OthelloRingSplitAnalyzer
