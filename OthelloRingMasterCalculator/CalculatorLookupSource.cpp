@@ -9,6 +9,7 @@
 /* Includes */
 #include "CalculatorLookupSource.h"
 #include "CalculatorFileName.h"
+#include "CalculatorCountsFile.h"
 #include "RSFFileName.h"
 #include "RingNestedIndex.h"
 #include <string.h>
