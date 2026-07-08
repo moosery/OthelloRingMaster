@@ -34,16 +34,26 @@
 void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState)
 {
     int boardSize = (int)pConfig->boardSize;
+    bool hasRing1 = RingNestedIndexHasRing1(boardSize);
+    bool hasRing2 = RingNestedIndexHasRing2(boardSize);
 
-    /* Level 0 seed is always a single black-turn board. */
+    /* Level 0 seed is always a single black-turn board. Ring_1/Ring_2 paths
+    ** are only built (and the corresponding files only ever created) when
+    ** this board size actually uses that level -- see RingNestedIndex.h Notes.
+    */
     char cellsInUsePath[MAX_FULL_PATH_NAME];
-    char ring1Path[MAX_FULL_PATH_NAME];
-    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring1PathBuf[MAX_FULL_PATH_NAME];
+    char ring2PathBuf[MAX_FULL_PATH_NAME];
     char ring34Path[MAX_FULL_PATH_NAME];
     RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
-    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
-    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
-    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
+    if (hasRing1)
+        RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
+    if (hasRing2)
+        RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
+    RSFNameRing34File(ring34Path, sizeof(ring34Path), pState->storeDirectory, boardSize, 0, RSF_PLAYER_BLACK, 0);
+
+    const char* ring1Path = hasRing1 ? ring1PathBuf : nullptr;
+    const char* ring2Path = hasRing2 ? ring2PathBuf : nullptr;
 
     /* Already exists and is valid -- resume scenario, nothing to write
     ** except ensure the complete sentinel is present (idempotent).
@@ -66,8 +76,8 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
             Fatal(FATAL_ALLOCATION_FAILED, "CreateSeedFile: BoardKeyAllocateFirstBoard failed");
 
         RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
-        Lz4StreamWriter* pRing1Writer      = Lz4StreamWriterOpen(ring1Path);
-        Lz4StreamWriter* pRing2Writer      = Lz4StreamWriterOpen(ring2Path);
+        Lz4StreamWriter* pRing1Writer      = hasRing1 ? Lz4StreamWriterOpen(ring1Path) : nullptr;
+        Lz4StreamWriter* pRing2Writer      = hasRing2 ? Lz4StreamWriterOpen(ring2Path) : nullptr;
         Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
 
         RingNestedIndexBuilder builder;
@@ -76,8 +86,8 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
         builder.Finish();
 
         RSFWriterClose(pCellsInUseWriter);
-        Lz4StreamWriterClose(pRing1Writer);
-        Lz4StreamWriterClose(pRing2Writer);
+        if (pRing1Writer) Lz4StreamWriterClose(pRing1Writer);
+        if (pRing2Writer) Lz4StreamWriterClose(pRing2Writer);
         Lz4StreamWriterClose(pRing34Writer);
 
         MemFree(pRoot);

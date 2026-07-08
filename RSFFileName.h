@@ -123,9 +123,11 @@ static inline void RSFPatternAnyStoreFiles(char* out, size_t outSize,
 /*
 ** ============================================================
 ** Ring nested-index store files (the actual final per-level store format --
-** see OthelloBasics/RingNestedIndex.h). Four files per level/player, always
-** fileIdx 0 -- sharding into multiple files per level/player was never
-** actually used by any caller of the plain .rsf naming above either.
+** see OthelloBasics/RingNestedIndex.h). Up to four files per level/player
+** (Ring_1/Ring_2 only exist for board sizes that use them -- see
+** RingNestedIndexHasRing1/HasRing2), always fileIdx 0 -- sharding into
+** multiple files per level/player was never actually used by any caller of
+** the plain .rsf naming above either.
 ** ============================================================
 */
 

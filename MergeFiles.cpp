@@ -1315,16 +1315,17 @@ static void CollectPoolReadersForPlayer(POthelloRingMasterState pSt, int player,
 /*
 ** Function: ConvertLevelOutputToNestedIndex
 ** @brief    Converts one player's flat, sorted+deduped RSF store output into
-**           the 4-file ring nested-index format (CellsInUse/Ring_1/Ring_2/
-**           Ring_3_4 -- see OthelloBasics/RingNestedIndex.h), deleting the
-**           flat intermediate once the nested files are fully written.
+**           the ring nested-index format (CellsInUse/Ring_1/Ring_2/
+**           Ring_3_4 -- see OthelloBasics/RingNestedIndex.h; Ring_1/Ring_2
+**           only exist for board sizes that use them), deleting the flat
+**           intermediate once the nested files are fully written.
 ** @details  This is the actual point of the ring-ordered storage scheme --
 **           the flat RSF file alone only carries the same delta+varint+LZ4
 **           compression an earlier implementation already had; the nested
 **           index is what realizes the additional validated savings (see
 **           project_ring_split_validated_findings memory). Streams directly
 **           from the flat reader into the nested-index writers (CellsInUse
-**           via RSFWriterOpenZ, Ring_1/Ring_2/Ring_3_4 via
+**           via RSFWriterOpenZL, Ring_1/Ring_2/Ring_3_4 via
 **           Lz4StreamWriterOpen) -- no raw intermediate ever touches disk,
 **           and nothing beyond one flat-store-sized read pass is ever held
 **           at once, matching the flat store's own streaming discipline
@@ -1349,19 +1350,26 @@ static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, in
     POthelloRingMasterState  pSt       = pCtx->pState;
     POthelloRingMasterConfig pCfg      = pCtx->pConfig;
     int                      boardSize = (int)pCfg->boardSize;
+    bool                     hasRing1  = RingNestedIndexHasRing1(boardSize);
+    bool                     hasRing2  = RingNestedIndexHasRing2(boardSize);
 
     char cellsInUsePath[MAX_FULL_PATH_NAME];
-    char ring1Path[MAX_FULL_PATH_NAME];
-    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring1PathBuf[MAX_FULL_PATH_NAME];
+    char ring2PathBuf[MAX_FULL_PATH_NAME];
     char ring34Path[MAX_FULL_PATH_NAME];
     RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+    if (hasRing1)
+        RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+    if (hasRing2)
+        RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing34File(ring34Path, sizeof(ring34Path), pSt->storeDirectory, boardSize, level, player, 0);
+
+    const char* ring1Path = hasRing1 ? ring1PathBuf : nullptr;
+    const char* ring2Path = hasRing2 ? ring2PathBuf : nullptr;
 
     RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
-    Lz4StreamWriter* pRing1Writer      = Lz4StreamWriterOpen(ring1Path);
-    Lz4StreamWriter* pRing2Writer      = Lz4StreamWriterOpen(ring2Path);
+    Lz4StreamWriter* pRing1Writer      = hasRing1 ? Lz4StreamWriterOpen(ring1Path) : nullptr;
+    Lz4StreamWriter* pRing2Writer      = hasRing2 ? Lz4StreamWriterOpen(ring2Path) : nullptr;
     Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
 
     RingNestedIndexBuilder builder;
@@ -1379,8 +1387,8 @@ static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, in
     RSFClose(&flatReader);
 
     RSFWriterClose(pCellsInUseWriter);
-    Lz4StreamWriterClose(pRing1Writer);
-    Lz4StreamWriterClose(pRing2Writer);
+    if (pRing1Writer) Lz4StreamWriterClose(pRing1Writer);
+    if (pRing2Writer) Lz4StreamWriterClose(pRing2Writer);
     Lz4StreamWriterClose(pRing34Writer);
 
     int64_t nestedBytes = 0;
@@ -1388,7 +1396,7 @@ static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, in
         WIN32_FILE_ATTRIBUTE_DATA fad = {};
         const char* parts[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
         for (int i = 0; i < 4; i++)
-            if (GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
+            if (parts[i] && GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
                 nestedBytes += ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
     }
 

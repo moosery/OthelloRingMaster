@@ -22,7 +22,7 @@
 **   FeedNestedIndexLevel/FeedBoardIntoBatch are new, replacing the old
 **   EnumerateStoreFilesForLevel + RSFOpen/RSFRead loop with
 **   RingNestedIndexReader::Load/ExpandAll, since the store format is now
-**   the 4-file ring nested index (see MergeFiles.cpp's
+**   the ring nested index (see MergeFiles.cpp's
 **   ConvertLevelOutputToNestedIndex, which is what produces it).
 */
 
@@ -284,16 +284,24 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
                                   UINT64_PAIR* const slots[PING_PONG_SLOTS], int* pSlotIdx,
                                   int optBatch, int boardSize, int level, int player, uint8_t playerBit)
 {
-    POthelloRingMasterState pSt = pCtx->pState;
+    POthelloRingMasterState pSt      = pCtx->pState;
+    bool                    hasRing1 = RingNestedIndexHasRing1(boardSize);
+    bool                    hasRing2 = RingNestedIndexHasRing2(boardSize);
 
     char cellsInUsePath[MAX_FULL_PATH_NAME];
-    char ring1Path[MAX_FULL_PATH_NAME];
-    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring1PathBuf[MAX_FULL_PATH_NAME];
+    char ring2PathBuf[MAX_FULL_PATH_NAME];
     char ring34Path[MAX_FULL_PATH_NAME];
     RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+    if (hasRing1)
+        RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+    if (hasRing2)
+        RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+    RSFNameRing34File(ring34Path, sizeof(ring34Path), pSt->storeDirectory, boardSize, level, player, 0);
+
+    const char* ring1Path     = hasRing1 ? ring1PathBuf : nullptr;
+    const char* ring2Path     = hasRing2 ? ring2PathBuf : nullptr;
+    int         expectedCount = 2 + (hasRing1 ? 1 : 0) + (hasRing2 ? 1 : 0);   /* CellsInUse + Ring_3_4 always, plus whichever of Ring_1/Ring_2 apply */
 
     int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
     if (existCount == 0)
@@ -306,11 +314,12 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
     RingNestedIndexReader reader;
     if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
         Fatal(FATAL_MERGE_LOGIC_ERROR,
-              "FeedNestedIndexLevel: nested-index files exist (%d/4) for level %d %s but "
+              "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "
               "failed to load -- corrupt or truncated data. Files:\n"
               "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
-              existCount, level, RSFPlayerStr(player),
-              cellsInUsePath, ring1Path, ring2Path, ring34Path);
+              existCount, expectedCount, level, RSFPlayerStr(player),
+              cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
+              hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
 
     FeedBatchState st;
     for (int i = 0; i < PING_PONG_SLOTS; i++) st.slots[i] = slots[i];
@@ -434,14 +443,23 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
         uint64_t total = 0;
         for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
         {
+            bool hasRing1 = RingNestedIndexHasRing1(boardSize);
+            bool hasRing2 = RingNestedIndexHasRing2(boardSize);
+
             char cellsInUsePath[MAX_FULL_PATH_NAME];
-            char ring1Path[MAX_FULL_PATH_NAME];
-            char ring2Path[MAX_FULL_PATH_NAME];
+            char ring1PathBuf[MAX_FULL_PATH_NAME];
+            char ring2PathBuf[MAX_FULL_PATH_NAME];
             char ring34Path[MAX_FULL_PATH_NAME];
             RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
-            RSFNameRing1File(ring1Path,           sizeof(ring1Path),      pSt->storeDirectory, boardSize, level, player, 0);
-            RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
-            RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
+            if (hasRing1)
+                RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+            if (hasRing2)
+                RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
+            RSFNameRing34File(ring34Path, sizeof(ring34Path), pSt->storeDirectory, boardSize, level, player, 0);
+
+            const char* ring1Path     = hasRing1 ? ring1PathBuf : nullptr;
+            const char* ring2Path     = hasRing2 ? ring2PathBuf : nullptr;
+            int         expectedCount = 2 + (hasRing1 ? 1 : 0) + (hasRing2 ? 1 : 0);
 
             int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
             if (existCount == 0) continue;
@@ -449,11 +467,12 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
             RingNestedIndexReader reader;
             if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
                 Fatal(FATAL_MERGE_LOGIC_ERROR,
-                      "RunGpuFeederJob: nested-index files exist (%d/4) for level %d %s but "
+                      "RunGpuFeederJob: nested-index files exist (%d/%d) for level %d %s but "
                       "failed to load -- corrupt or truncated data. Files:\n"
                       "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
-                      existCount, level, RSFPlayerStr(player),
-                      cellsInUsePath, ring1Path, ring2Path, ring34Path);
+                      existCount, expectedCount, level, RSFPlayerStr(player),
+                      cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
+                      hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
             total += reader.GetBoardCount();
         }
         pSt->currentLevelTotalBoards = total;

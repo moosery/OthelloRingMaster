@@ -4,6 +4,46 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.17.0] - 2026-07-08
+
+### Skip degenerate Ring_1/Ring_2 levels for board sizes that never use them
+
+- The ring permutation always uses the full 8x8 geometry (4 concentric
+  rings), but a smaller board's active cells are centered within the 8x8
+  word and never reach the outer ring(s): 6x6 never sets any Ring_1 bit
+  (the outermost 8x8 ring, row/col 0 and 7), and 4x4 never sets any Ring_1
+  *or* Ring_2 bit (row/col 1 and 6 either). Storing those levels for those
+  board sizes was pure overhead -- worse, simply not writing the *file*
+  wouldn't have been enough on its own: the builder's group-cascade logic
+  would still have emitted one wholly redundant, always-zero-pattern
+  20-byte record per level per `CellsInUse` group (potentially millions of
+  wasted records), not actually saved anything.
+- Added `RingNestedIndexHasRing1`/`RingNestedIndexHasRing2` (`RingNestedIndex.h`)
+  as the one place this board-size policy is decided. `RingNestedIndexBuilder`
+  now infers which levels to skip from whether `pRing1Writer`/`pRing2Writer`
+  are null (callers simply don't open a writer for a level that doesn't
+  apply); `CloseRing1Group`/`CloseRing2Group` no-op for a null writer while
+  still cascading down correctly, and `CellsInUseRec.offset` now points at
+  whichever level is actually the next one stored (Ring_1 normally, Ring_2
+  or even Ring_3_4 directly when the outer level(s) are skipped).
+- `RingNestedIndexReader` mirrors this: `Load()` accepts nullable
+  `ring1Path`/`ring2Path` and records which levels loaded via new
+  `hasRing1`/`hasRing2` members; `ExpandAll` picks one of three walk shapes
+  up front (4-level for 8x8, 3-level for 6x6, 2-level for 4x4) rather than
+  branching per board.
+- Added a safety net consistent with the standing never-silent-data-loss
+  rule: if a supposedly-skipped level's bit pattern is ever nonzero (which
+  should be geometrically impossible), `Process()` fatals immediately
+  rather than silently discarding real color bits -- catches either a wrong
+  board-size assumption or real data corruption, instead of masking it.
+- Updated every caller (`CreateSeedFile.cpp`, `MergeFiles.cpp`'s
+  `ConvertLevelOutputToNestedIndex`, `LevelSolverThread.cpp`'s
+  `FeedNestedIndexLevel`/`RunGpuFeederJob`, `InitSolver.cpp`'s
+  `checkLevelFile`/`deletePlayerOutputFile`) to build/pass Ring_1/Ring_2
+  paths only when applicable, and `RingNestedIndexFileCount`'s "how many
+  files should exist" check is now computed per board size instead of a
+  hardcoded 4.
+
 ## [0.16.6] - 2026-07-07
 
 ### Remove GpuInformation.recommendedWorkerCount -- computed, never consumed

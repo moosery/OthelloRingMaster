@@ -310,11 +310,12 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
 /*
 ** Function: deletePlayerOutputFile
 ** @brief    Deletes every on-disk form of one level/player's output -- the
-**           ring nested-index four-file set (.cellsinuse/.ring1/.ring2/
-**           .ring34, the current store format) and any legacy flat file
-**           (.rsf/.rsfz/.rsfzl, from a store produced before the
-**           nested-index format existed) -- without validating any of it
-**           first.
+**           ring nested-index file set (.cellsinuse/.ring1/.ring2/.ring34,
+**           the current store format -- .ring1/.ring2 only exist for board
+**           sizes that use them, see RingNestedIndexHasRing1/HasRing2) and
+**           any legacy flat file (.rsf/.rsfz/.rsfzl, from a store produced
+**           before the nested-index format existed) -- without validating
+**           any of it first.
 ** @details  Exact board size only (not a wildcard) -- must never touch
 **           another board size's files sharing the same storeDir.
 ** @param    storeDir  - store directory to search
@@ -324,21 +325,26 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
 */
 static void deletePlayerOutputFile(const char* storeDir, int level, int boardSize, const char* player)
 {
-    int playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+    int  playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+    bool hasRing1   = RingNestedIndexHasRing1(boardSize);
+    bool hasRing2   = RingNestedIndexHasRing2(boardSize);
 
     char cellsInUsePath[MAX_FULL_PATH_NAME];
     char ring1Path[MAX_FULL_PATH_NAME];
     char ring2Path[MAX_FULL_PATH_NAME];
     char ring34Path[MAX_FULL_PATH_NAME];
     RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     storeDir, boardSize, level, playerCode, 0);
+    if (hasRing1)
+        RSFNameRing1File(ring1Path, sizeof(ring1Path), storeDir, boardSize, level, playerCode, 0);
+    if (hasRing2)
+        RSFNameRing2File(ring2Path, sizeof(ring2Path), storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing34File(ring34Path, sizeof(ring34Path), storeDir, boardSize, level, playerCode, 0);
 
-    const char* nestedPaths[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+    const char* nestedPaths[4] = { cellsInUsePath, hasRing1 ? ring1Path : nullptr,
+                                   hasRing2 ? ring2Path : nullptr, ring34Path };
     for (int i = 0; i < 4; i++)
     {
-        if (GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
+        if (nestedPaths[i] && GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
         {
             LoggerLog("  Deleting partial output '%s'\n", nestedPaths[i]);
             DeleteFileA(nestedPaths[i]);
@@ -366,8 +372,9 @@ static void deletePlayerOutputFile(const char* storeDir, int level, int boardSiz
 /*
 ** Function: checkLevelFile
 ** @brief    Probes for one level/player's output, checking the ring
-**           nested-index four-file set (.cellsinuse/.ring1/.ring2/.ring34,
-**           the current store format) first, falling back to a legacy flat
+**           nested-index file set (.cellsinuse/.ring1/.ring2/.ring34, the
+**           current store format -- .ring1/.ring2 only apply to board
+**           sizes that use them) first, falling back to a legacy flat
 **           Level_NNNN_WxH_<player>_0000.rsf[z][l] (from a store produced
 **           before the nested-index format existed). Exact board size only
 **           (not a wildcard -- a storeDir must never have another board
@@ -381,23 +388,31 @@ static void deletePlayerOutputFile(const char* storeDir, int level, int boardSiz
 */
 static LevelFileStatus checkLevelFile(const char* storeDir, int level, int boardSize, const char* player)
 {
-    int playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+    int  playerCode = (strcmp(player, "black") == 0) ? RSF_PLAYER_BLACK : RSF_PLAYER_WHITE;
+    bool hasRing1   = RingNestedIndexHasRing1(boardSize);
+    bool hasRing2   = RingNestedIndexHasRing2(boardSize);
 
     char cellsInUsePath[MAX_FULL_PATH_NAME];
-    char ring1Path[MAX_FULL_PATH_NAME];
-    char ring2Path[MAX_FULL_PATH_NAME];
+    char ring1PathBuf[MAX_FULL_PATH_NAME];
+    char ring2PathBuf[MAX_FULL_PATH_NAME];
     char ring34Path[MAX_FULL_PATH_NAME];
     RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing1File(ring1Path,           sizeof(ring1Path),      storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing2File(ring2Path,           sizeof(ring2Path),      storeDir, boardSize, level, playerCode, 0);
-    RSFNameRing34File(ring34Path,         sizeof(ring34Path),     storeDir, boardSize, level, playerCode, 0);
+    if (hasRing1)
+        RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), storeDir, boardSize, level, playerCode, 0);
+    if (hasRing2)
+        RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), storeDir, boardSize, level, playerCode, 0);
+    RSFNameRing34File(ring34Path, sizeof(ring34Path), storeDir, boardSize, level, playerCode, 0);
+
+    const char* ring1Path      = hasRing1 ? ring1PathBuf : nullptr;
+    const char* ring2Path      = hasRing2 ? ring2PathBuf : nullptr;
+    int         expectedCount  = 2 + (hasRing1 ? 1 : 0) + (hasRing2 ? 1 : 0);
 
     int nestedFoundCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
 
     if (nestedFoundCount > 0)
     {
         RingNestedIndexReader reader;
-        if (nestedFoundCount == 4 && reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+        if (nestedFoundCount == expectedCount && reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
             return LFS_VALID;
 
         LoggerLog("ScanForResumeLevel: corrupt/partial level %d %s nested-index files, deleting\n",

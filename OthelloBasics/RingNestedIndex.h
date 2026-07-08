@@ -6,9 +6,10 @@
 **   Ring_2 -> Ring_3_4), promoted out of the offline analysis tool that
 **   originally validated this design (see project_ring_split_validated_
 **   findings memory): RingNestedIndexBuilder consumes a sorted, deduped
-**   stream of ring-ordered BOARD_KEYs and writes the four nested files;
-**   RingNestedIndexReader does the reverse, expanding the four files back
-**   into the original sorted stream of BOARD_KEYs.
+**   stream of ring-ordered BOARD_KEYs and writes the nested files (four for
+**   8x8; fewer for smaller boards, see below); RingNestedIndexReader does
+**   the reverse, expanding the files back into the original sorted stream
+**   of BOARD_KEYs.
 **
 **   This is CPU-organizing work, not solving -- pure counting/comparison/
 **   offset bookkeeping over already-ring-ordered numeric keys, per the
@@ -16,14 +17,26 @@
 **   structure.
 **
 ** Notes:
-**   The four files are always split as 28/20/16 bits (CellsInUse carries
-**   the full 64-bit occupancy pattern separately; Ring_1/Ring_2/Ring_3_4
-**   partition the 64-bit color pattern with no gaps or overlaps) --
-**   validated on real production data, see project_ring_split_validated_
-**   findings memory. Ring_3_4 groups are always exactly 1 member (pattern +
-**   Ring_1 + Ring_2 + Ring_3_4 together reconstruct one board exactly, and
-**   the source store has no duplicates), which is why Ring34Rec carries no
-**   count field.
+**   The 64-bit color pattern is always split as 28/20/16 bits (Ring_1/
+**   Ring_2/Ring_3_4, with CellsInUse carrying the full 64-bit occupancy
+**   pattern separately) -- validated on real production data, see
+**   project_ring_split_validated_findings memory. Ring_3_4 groups are
+**   always exactly 1 member (pattern + Ring_1 + Ring_2 + Ring_3_4 together
+**   reconstruct one board exactly, and the source store has no
+**   duplicates), which is why Ring34Rec carries no count field.
+**
+**   Ring_1/Ring_2 are skipped entirely for board sizes that provably never
+**   set any bit in them (see RingNestedIndexHasRing1/HasRing2 below): 6x6
+**   never touches Ring_1, and 4x4 never touches Ring_1 or Ring_2, since a
+**   smaller board's active cells are centered within the 8x8 word and
+**   never reach the outer ring(s). Skipping them isn't just "don't write
+**   the file" -- without it, the builder would still emit one wholly
+**   redundant, always-zero-pattern record per level per CellsInUse group
+**   (pure overhead, not a size optimization at all). `RingNestedIndexBuilder`
+**   detects which levels to skip from whether `pRing1Writer`/`pRing2Writer`
+**   are null; `RingNestedIndexReader` from whether `ring1Path`/`ring2Path`
+**   passed to `Load()` are null. Callers decide via
+**   `RingNestedIndexHasRing1`/`RingNestedIndexHasRing2`.
 **
 **   Compression matches the intent behind what the original validation
 **   measured, adapted to stay fully streaming (no raw intermediate file,
@@ -61,21 +74,50 @@ constexpr int RING1_SHIFT     = RING_TOTAL_BITS - RING1_BITS;                 /*
 constexpr int RING2_SHIFT     = RING_TOTAL_BITS - RING1_BITS - RING2_BITS;    /* 16 */
 constexpr int RING34_SHIFT    = 0;
 
+/* Functions */
+
+/*
+** Function: RingNestedIndexHasRing1
+** @brief    True if boardSize's board data can ever set a Ring_1 bit.
+** @details  Ring_1 is exactly the outermost ring of the full 8x8 ring
+**           geometry (row/col 0 and 7) -- a smaller board's active cells,
+**           centered within the 8x8 word, never reach that ring. Only
+**           8x8 itself ever needs a Ring_1 level; 4x4/6x6 boards would
+**           store a Ring_1 file that's provably always one degenerate
+**           all-zero group, so this project skips it entirely for them.
+** @param    boardSize - board size (4, 6, or 8)
+** @return   true only for boardSize == 8.
+*/
+inline bool RingNestedIndexHasRing1(int boardSize) { return boardSize >= 8; }
+
+/*
+** Function: RingNestedIndexHasRing2
+** @brief    True if boardSize's board data can ever set a Ring_2 bit.
+** @details  Ring_2 is the second ring in from the 8x8 border (row/col 1
+**           and 6) -- a 4x4 board's active cells, centered within the 8x8
+**           word, never reach that ring either (only 6x6 and 8x8 do).
+** @param    boardSize - board size (4, 6, or 8)
+** @return   true for boardSize == 6 or 8; false for 4x4.
+*/
+inline bool RingNestedIndexHasRing2(int boardSize) { return boardSize >= 6; }
+
 /* Structures and Types */
 
 /*
 ** Type:    CellsInUseRec
 ** @brief   One entry per distinct ring-gathered occupancy pattern: the
-**          pattern itself, plus the offset into the Ring_1 array where
-**          this pattern's first Ring_1 record starts. No count field --
-**          the span is implied by the next entry's offset (or the end of
-**          the Ring_1 array, for the last entry).
+**          pattern itself, plus the offset into whichever level is the
+**          next one actually stored for this board size (Ring_1 normally;
+**          Ring_2 or even Ring_3_4 directly when the outer ring level(s)
+**          are skipped -- see RingNestedIndexHasRing1/HasRing2). No count
+**          field -- the span is implied by the next entry's offset (or the
+**          end of that level's array, for the last entry).
 */
 #pragma pack(push, 1)
 struct CellsInUseRec
 {
     uint64_t pattern;   /* ring-gathered occupancy (BOARD_KEY::ullCellsInUse in ring order) */
-    uint64_t offset;    /* index into the Ring_1 array where this pattern's records start    */
+    uint64_t offset;    /* index into the next stored level's array (see struct comment)     */
 };
 
 /*
@@ -126,9 +168,10 @@ struct RingNestedIndexStats
 /*
 ** Type:    RingNestedIndexBuilder
 ** @brief   Consumes a sorted, deduped stream of ring-ordered BOARD_KEYs
-**          (via repeated Process() calls) and writes the four nested
-**          index files. Call Finish() once after the last Process() call
-**          to flush any still-open groups.
+**          (via repeated Process() calls) and writes the nested index
+**          files (four for 8x8, fewer for smaller boards -- see file
+**          Notes). Call Finish() once after the last Process() call to
+**          flush any still-open groups.
 */
 struct RingNestedIndexBuilder
 {
@@ -156,11 +199,13 @@ struct RingNestedIndexBuilder
 
     /*
     ** Method: Init
-    ** @brief  Attaches the four already-open outputs this builder writes to.
+    ** @brief  Attaches the already-open outputs this builder writes to.
     ** @param  pCellsInUseWriterIn - already-open RSFWriter for the CellsInUse output (via RSFWriterOpenZL)
-    ** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output
-    ** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output
-    ** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output
+    ** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output, or nullptr if
+    **                               RingNestedIndexHasRing1(boardSize) is false (that level isn't stored)
+    ** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output, or nullptr if
+    **                               RingNestedIndexHasRing2(boardSize) is false (that level isn't stored)
+    ** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output (always required)
     */
     void Init(RSFWriter* pCellsInUseWriterIn, Lz4StreamWriter* pRing1WriterIn,
               Lz4StreamWriter* pRing2WriterIn, Lz4StreamWriter* pRing34WriterIn);
@@ -188,8 +233,8 @@ private:
 
 /*
 ** Type:    RingNestedIndexReader
-** @brief   Loads the four nested index files into memory and expands them
-**          back into the original sorted stream of ring-ordered BOARD_KEYs.
+** @brief   Loads the nested index files into memory and expands them back
+**          into the original sorted stream of ring-ordered BOARD_KEYs.
 */
 struct RingNestedIndexReader
 {
@@ -198,14 +243,19 @@ struct RingNestedIndexReader
     std::vector<RingLevelRec>   ring2;
     std::vector<Ring34Rec>      ring34;
 
+    bool  hasRing1 = false;   /* set by Load(); false if ring1Path was nullptr */
+    bool  hasRing2 = false;   /* set by Load(); false if ring2Path was nullptr */
+
     /*
     ** Method: Load
-    ** @brief  Reads all four nested index files fully into memory.
+    ** @brief  Reads the nested index files fully into memory.
     ** @param  cellsInUsePath - path to the CellsInUse file
-    ** @param  ring1Path      - path to the Ring_1 file
-    ** @param  ring2Path      - path to the Ring_2 file
-    ** @param  ring34Path     - path to the Ring_3_4 file
-    ** @return true if all four files were read successfully.
+    ** @param  ring1Path      - path to the Ring_1 file, or nullptr if
+    **                          RingNestedIndexHasRing1(boardSize) is false
+    ** @param  ring2Path      - path to the Ring_2 file, or nullptr if
+    **                          RingNestedIndexHasRing2(boardSize) is false
+    ** @param  ring34Path     - path to the Ring_3_4 file (always required)
+    ** @return true if every applicable file was read successfully.
     */
     bool Load(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path, const char* ring34Path);
 
@@ -227,19 +277,21 @@ struct RingNestedIndexReader
 
 /*
 ** Function: RingNestedIndexFileCount
-** @brief    Counts how many of the four nested-index files exist on disk,
-**           without validating their contents. Callers use this to tell
-**           "this level/player genuinely has no data" (0 -- Load() would
-**           also return false, but for a completely different, expected
-**           reason) apart from "data exists but is corrupt/truncated"
-**           (1-3, or 4 with Load() still failing) -- the two must never be
-**           handled the same way; the latter is a real problem that should
-**           never be silently treated as "no data."
+** @brief    Counts how many of the applicable nested-index files exist on
+**           disk, without validating their contents. Callers use this to
+**           tell "this level/player genuinely has no data" (0 -- Load()
+**           would also return false, but for a completely different,
+**           expected reason) apart from "data exists but is
+**           corrupt/truncated" (1+ but Load() still fails) -- the two must
+**           never be handled the same way; the latter is a real problem
+**           that should never be silently treated as "no data."
 ** @param    cellsInUsePath - path to the CellsInUse file
-** @param    ring1Path      - path to the Ring_1 file
-** @param    ring2Path      - path to the Ring_2 file
+** @param    ring1Path      - path to the Ring_1 file, or nullptr if not applicable for this board size
+** @param    ring2Path      - path to the Ring_2 file, or nullptr if not applicable for this board size
 ** @param    ring34Path     - path to the Ring_3_4 file
-** @return   0 if none of the four files exist; 1-4 otherwise.
+** @return   0 if none of the applicable files exist; up to the number of
+**           non-null paths passed otherwise. A null path is simply not
+**           counted either way (neither present nor absent).
 */
 int RingNestedIndexFileCount(const char* cellsInUsePath, const char* ring1Path,
                               const char* ring2Path, const char* ring34Path);
