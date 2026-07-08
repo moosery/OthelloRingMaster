@@ -4,6 +4,21 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.14.2] - 2026-07-07
+
+### Fix v0.14.1 build: add _CRT_SECURE_NO_WARNINGS to OthelloRingMaster
+
+- `OthelloRingMaster.vcxproj` never got `_CRT_SECURE_NO_WARNINGS` added to
+  its x64 preprocessor definitions (unlike `OthelloBasics.vcxproj`/
+  `Utility.vcxproj`, which already had it from earlier phases) -- the
+  original pre-Phase-4 stub only used `printf`/`RingConversion` calls, so
+  the gap never surfaced until this phase's ported Blaster code
+  (`strcpy`/`strncpy`/`fopen` throughout `OthelloRingMaster.cpp`,
+  `LevelSolverThread.cpp`, `MergeFiles.cpp`) started tripping MSVC's
+  secure-CRT deprecation warnings, escalated to errors by `SDLCheck`.
+  Added the define to both Debug|x64 and Release|x64, matching the rest of
+  the solution's existing convention.
+
 ## [0.14.1] - 2026-07-07
 
 ### Fix v0.14.0 build: pass /Zc:preprocessor to the CUDA host compiler
