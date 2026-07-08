@@ -4,6 +4,19 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.14.1] - 2026-07-07
+
+### Fix v0.14.0 build: pass /Zc:preprocessor to the CUDA host compiler
+
+- CUDA 13.2's CUB (bundled as `cccl`) hard-requires the conforming MSVC
+  preprocessor and fatals otherwise. `GpuKernels.cu` is the only `.cu` file
+  in the solution that includes `<cub/cub.cuh>` (`GpuInfo.cu`,
+  `OthelloBasicsForCUDA.cu`, `RingConversion.cu` don't use CUB), so it was
+  the only one that failed -- caught by the user's first real build
+  attempt of the completed Phase 4 pipeline.
+- Added `-Xcompiler "/Zc:preprocessor"` to `OthelloRingMaster.vcxproj`'s
+  `CudaCompile` `AdditionalOptions` (both Debug|x64 and Release|x64).
+
 ## [0.14.0] - 2026-07-07
 
 ### Wire main() into the real per-level solve loop -- Phase 4 complete
