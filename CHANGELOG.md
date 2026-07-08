@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.8.0] - 2026-07-07
+
+### Port CreateSeedFile (Phase 4 Step 2)
+
+- Added `CreateSeedFile.h`/`.cpp`: writes the Othello starting position as
+  level 0's single seed record via the new `RSF` writer, idempotent on
+  resume, then writes level 0's complete sentinel (level 0 has no
+  end-of-level merge).
+- The one real change from Blaster's version: uses `OthelloBasics`'s
+  `BoardKeyAllocateFirstBoard` (a precomputed ring-ordered constant,
+  `BoardKeyAllocate.cpp`) instead of Blaster's row-major
+  `BoardAllocateFirstBoard` -- the one necessary CPU-side exception to the
+  CPU-organizes/GPU-solves boundary, unchanged from how it already worked
+  in Phase 0.
+- Not yet wired into `main()` -- lands in Step 8.
+
 ## [0.7.0] - 2026-07-07
 
 ### Port foundation config/state types and standalone utilities (Phase 4 Step 1)
