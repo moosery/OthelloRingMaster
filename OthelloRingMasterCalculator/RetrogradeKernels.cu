@@ -16,6 +16,10 @@
 **   RetrogradeKernels.h's own Notes). This makes the whole pipeline much
 **   smaller than GpuKernels.cu's two-stack accumulator.
 **
+**   Within each parent's slot range, black children are packed from the
+**   front and white children from the back, growing toward each other --
+**   color is positional, never a stored per-child tag (see header Notes).
+**
 **   This first implementation is synchronous (blocking cudaMemcpy, no
 **   stream/ping-pong) -- correctness-focused for the 4x4 validation target
 **   (Phase 6), not yet tuned for real 6x6 throughput. Parallelization
@@ -26,6 +30,7 @@
 
 /* Includes */
 #include "RetrogradeKernels.h"
+#include "RSFFileName.h"             /* RSF_PLAYER_BLACK/RSF_PLAYER_WHITE */
 #include "OthelloBasicsForCUDA.h"    /* BOARD, dev_boardMoveCalculator/dev_playMove/dev_canonicalize */
 #include "RingConversion.h"          /* dev_RowMajorToRing/dev_RingToRowMajor, this TU's constant tables */
 #include "RingPermutation.h"         /* BuildRingPermutation/BuildInverseRingPermutation, for this TU's init */
@@ -54,16 +59,16 @@
 struct __RetrogradeGpuContext
 {
     UINT64_PAIR*  d_input;
-    UINT64_PAIR*  d_children;
-    uint32_t*     d_childCount;
-    uint8_t*      d_childPlayer;         /* per-child, not per-parent -- see file/header Notes */
-    uint8_t*      d_childColorFlipped;   /* per-child -- see file/header Notes */
+    UINT64_PAIR*  d_children;           /* per-parent two-stack: black from front, white from back */
+    uint8_t*      d_childColorFlipped;  /* same packing as d_children */
+    uint32_t*     d_blackChildCount;
+    uint32_t*     d_whiteChildCount;
     uint32_t*     d_maxMovesStat;
 
     std::vector<UINT64_PAIR>  h_children;
-    std::vector<uint32_t>     h_childCount;
-    std::vector<uint8_t>      h_childPlayer;
     std::vector<uint8_t>      h_childColorFlipped;
+    std::vector<uint32_t>     h_blackChildCount;
+    std::vector<uint32_t>     h_whiteChildCount;
 
     DevBoardConsts  boardConsts;
     int             batchSize;
@@ -102,26 +107,26 @@ static void RetrogradeKernels_InitRingPermutationTables()
 **           input to row-major, generates children (handling the pass/
 **           terminal cases exactly like GpuKernels.cu's ExpandKernel),
 **           canonicalizes each child, converts back to ring order, and
-**           writes them into this thread's own private slot range --
-**           no atomics, no dedup (see file Notes).
-** @param    input             - batch of ring-ordered parent board records
-** @param    batchSize         - number of records in input
-** @param    inputPlayerBit    - next player to move for this whole batch (1=black, 0=white)
-** @param    consts            - board-size masks for move generation
-** @param    numRotations      - canonicalization symmetry count (always 16 here, matching
-**                               the forward solver's own canonicalization so lookups
-**                               against already-stored canonical representatives succeed)
-** @param    maxMovesPerBoard  - capacity of each thread's private slot range
-** @param    d_children        - out: [batchSize * maxMovesPerBoard], this thread's
-**                                children at [i*maxMovesPerBoard, i*maxMovesPerBoard+count)
-** @param    d_childCount      - out: [batchSize], this parent's child count (0 = terminal)
-** @param    d_childPlayer     - out: [batchSize * maxMovesPerBoard], each child's own
-**                                next-player tag (per-child -- see file/header Notes)
-** @param    d_childColorFlipped - out: [batchSize * maxMovesPerBoard], each child's own
-**                                flag for whether its canonical form came from
-**                                dev_canonicalize's color-swap family (see file/header Notes)
-** @param    d_maxMovesStat    - out: running max child count seen, for a host-side sanity
-**                                check against maxMovesPerBoard
+**           packs them into this thread's own private slot range -- black
+**           children from the front, white from the back, growing toward
+**           each other (no atomics, no dedup, no stored color tag -- see
+**           file/header Notes).
+** @param    input               - batch of ring-ordered parent board records
+** @param    batchSize           - number of records in input
+** @param    inputPlayerBit      - next player to move for this whole batch (1=black, 0=white)
+** @param    consts              - board-size masks for move generation
+** @param    numRotations        - canonicalization symmetry count (always 16 here, matching
+**                                 the forward solver's own canonicalization so lookups
+**                                 against already-stored canonical representatives succeed)
+** @param    maxMovesPerBoard    - capacity of each thread's private slot range
+** @param    d_children          - out: [batchSize * maxMovesPerBoard], this thread's
+**                                 children packed black-from-front/white-from-back
+** @param    d_childColorFlipped - out: same packing as d_children -- see header Notes
+** @param    d_blackChildCount   - out: [batchSize], this parent's black child count
+** @param    d_whiteChildCount   - out: [batchSize], this parent's white child count
+**                                 (both 0 means terminal)
+** @param    d_maxMovesStat      - out: running max (black+white) child count seen,
+**                                 for a host-side sanity check against maxMovesPerBoard
 */
 __global__ void RetrogradeExpandKernel(
     const UINT64_PAIR* __restrict__ input,
@@ -131,9 +136,9 @@ __global__ void RetrogradeExpandKernel(
     int                              numRotations,
     int                              maxMovesPerBoard,
     UINT64_PAIR*                     d_children,
-    uint32_t*                        d_childCount,
-    uint8_t*                         d_childPlayer,
     uint8_t*                         d_childColorFlipped,
+    uint32_t*                        d_blackChildCount,
+    uint32_t*                        d_whiteChildCount,
     uint32_t*                        d_maxMovesStat)
 {
     int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -163,7 +168,8 @@ __global__ void RetrogradeExpandKernel(
             ** parent directly from its own piece count (input[i]) --
             ** no children to look up.
             */
-            d_childCount[i] = 0;
+            d_blackChildCount[i] = 0;
+            d_whiteChildCount[i] = 0;
             return;
         }
 
@@ -181,7 +187,7 @@ __global__ void RetrogradeExpandKernel(
     */
     uint8_t expectedChildPlayer = (uint8_t)((src.usBoardInfo & 0x01) ^ 0x01);
 
-    int count = 0;
+    uint32_t blackCount = 0, whiteCount = 0;
     while (moves)
     {
         int moveIdx = __clzll(moves);
@@ -194,21 +200,26 @@ __global__ void RetrogradeExpandKernel(
         UINT64_PAIR childRec;
         childRec.hi = dev_RowMajorToRing(child.ullCellsInUse);
         childRec.lo = dev_RowMajorToRing(child.ullCellColors);
-        uint8_t childPlayer   = child.usBoardInfo & 0x01;
-        uint8_t colorFlipped  = (childPlayer != expectedChildPlayer) ? 1 : 0;
+        uint8_t childPlayer  = child.usBoardInfo & 0x01;
+        uint8_t colorFlipped = (childPlayer != expectedChildPlayer) ? 1 : 0;
 
-        if (count < maxMovesPerBoard)
+        if ((int)(blackCount + whiteCount) < maxMovesPerBoard)
         {
-            size_t slot = (size_t)i * (size_t)maxMovesPerBoard + count;
+            size_t base = (size_t)i * (size_t)maxMovesPerBoard;
+            size_t slot = (childPlayer == RSF_PLAYER_BLACK)
+                        ? base + blackCount
+                        : base + (size_t)(maxMovesPerBoard - 1) - whiteCount;
             d_children[slot]          = childRec;
-            d_childPlayer[slot]       = childPlayer;
             d_childColorFlipped[slot] = colorFlipped;
         }
-        count++;
+
+        if (childPlayer == RSF_PLAYER_BLACK) blackCount++;
+        else                                 whiteCount++;
     }
 
-    d_childCount[i] = (uint32_t)count;
-    atomicMax(d_maxMovesStat, (uint32_t)count);
+    d_blackChildCount[i] = blackCount;
+    d_whiteChildCount[i] = whiteCount;
+    atomicMax(d_maxMovesStat, blackCount + whiteCount);
 }
 
 /*
@@ -222,22 +233,22 @@ RetrogradeGpuContext* RetrogradeGpuContextCreate(int boardSize, int batchSize, i
 
     __RetrogradeGpuContext* p = new __RetrogradeGpuContext();
     p->batchSize        = batchSize;
-    p->maxMovesPerBoard  = maxMovesPerBoard;
-    p->boardConsts       = OBCuda_GetBoardConsts();
+    p->maxMovesPerBoard = maxMovesPerBoard;
+    p->boardConsts      = OBCuda_GetBoardConsts();
 
     size_t childCapacity = (size_t)batchSize * (size_t)maxMovesPerBoard;
 
-    RETRO_GPU_CHECK(cudaMalloc(&p->d_input,              (size_t)batchSize * sizeof(UINT64_PAIR)));
-    RETRO_GPU_CHECK(cudaMalloc(&p->d_children,            childCapacity     * sizeof(UINT64_PAIR)));
-    RETRO_GPU_CHECK(cudaMalloc(&p->d_childCount,         (size_t)batchSize * sizeof(uint32_t)));
-    RETRO_GPU_CHECK(cudaMalloc(&p->d_childPlayer,         childCapacity     * sizeof(uint8_t)));
-    RETRO_GPU_CHECK(cudaMalloc(&p->d_childColorFlipped,   childCapacity     * sizeof(uint8_t)));
+    RETRO_GPU_CHECK(cudaMalloc(&p->d_input,             (size_t)batchSize * sizeof(UINT64_PAIR)));
+    RETRO_GPU_CHECK(cudaMalloc(&p->d_children,           childCapacity     * sizeof(UINT64_PAIR)));
+    RETRO_GPU_CHECK(cudaMalloc(&p->d_childColorFlipped,  childCapacity     * sizeof(uint8_t)));
+    RETRO_GPU_CHECK(cudaMalloc(&p->d_blackChildCount,   (size_t)batchSize * sizeof(uint32_t)));
+    RETRO_GPU_CHECK(cudaMalloc(&p->d_whiteChildCount,   (size_t)batchSize * sizeof(uint32_t)));
     RETRO_GPU_CHECK(cudaMalloc(&p->d_maxMovesStat, sizeof(uint32_t)));
 
     p->h_children.resize(childCapacity);
-    p->h_childCount.resize(batchSize);
-    p->h_childPlayer.resize(childCapacity);
     p->h_childColorFlipped.resize(childCapacity);
+    p->h_blackChildCount.resize(batchSize);
+    p->h_whiteChildCount.resize(batchSize);
 
     return p;
 }
@@ -251,9 +262,9 @@ void RetrogradeGpuContextDestroy(RetrogradeGpuContext* pCtx)
     if (!pCtx) return;
     cudaFree(pCtx->d_input);
     cudaFree(pCtx->d_children);
-    cudaFree(pCtx->d_childCount);
-    cudaFree(pCtx->d_childPlayer);
     cudaFree(pCtx->d_childColorFlipped);
+    cudaFree(pCtx->d_blackChildCount);
+    cudaFree(pCtx->d_whiteChildCount);
     cudaFree(pCtx->d_maxMovesStat);
     delete pCtx;
 }
@@ -275,7 +286,8 @@ void RetrogradeExpandBatch(RetrogradeGpuContext* pCtx, const UINT64_PAIR* pParen
     int blocks          = (count + threadsPerBlock - 1) / threadsPerBlock;
     RetrogradeExpandKernel<<<blocks, threadsPerBlock>>>(
         pCtx->d_input, count, playerBit, pCtx->boardConsts, 16, pCtx->maxMovesPerBoard,
-        pCtx->d_children, pCtx->d_childCount, pCtx->d_childPlayer, pCtx->d_childColorFlipped, pCtx->d_maxMovesStat);
+        pCtx->d_children, pCtx->d_childColorFlipped,
+        pCtx->d_blackChildCount, pCtx->d_whiteChildCount, pCtx->d_maxMovesStat);
     RETRO_GPU_CHECK(cudaGetLastError());
     RETRO_GPU_CHECK(cudaDeviceSynchronize());
 
@@ -288,43 +300,32 @@ void RetrogradeExpandBatch(RetrogradeGpuContext* pCtx, const UINT64_PAIR* pParen
 
     size_t childCapacity = (size_t)count * (size_t)pCtx->maxMovesPerBoard;
     RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_children.data(), pCtx->d_children, childCapacity * sizeof(UINT64_PAIR), cudaMemcpyDeviceToHost));
-    RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_childCount.data(), pCtx->d_childCount, (size_t)count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_childPlayer.data(), pCtx->d_childPlayer, childCapacity * sizeof(uint8_t), cudaMemcpyDeviceToHost));
     RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_childColorFlipped.data(), pCtx->d_childColorFlipped, childCapacity * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_blackChildCount.data(), pCtx->d_blackChildCount, (size_t)count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    RETRO_GPU_CHECK(cudaMemcpy(pCtx->h_whiteChildCount.data(), pCtx->d_whiteChildCount, (size_t)count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 }
 
 /*
 ** Function: RetrogradeGetChildCount
 ** @brief    See RetrogradeKernels.h.
 */
-uint32_t RetrogradeGetChildCount(const RetrogradeGpuContext* pCtx, int parentIdx)
+uint32_t RetrogradeGetChildCount(const RetrogradeGpuContext* pCtx, int parentIdx, int player)
 {
-    return pCtx->h_childCount[parentIdx];
+    return (player == RSF_PLAYER_BLACK) ? pCtx->h_blackChildCount[parentIdx] : pCtx->h_whiteChildCount[parentIdx];
 }
 
 /*
-** Function: RetrogradeGetChildPlayer
+** Function: RetrogradeGetChild
 ** @brief    See RetrogradeKernels.h.
 */
-uint8_t RetrogradeGetChildPlayer(const RetrogradeGpuContext* pCtx, int parentIdx, int childIdx)
+void RetrogradeGetChild(const RetrogradeGpuContext* pCtx, int parentIdx, int player, int childIdx,
+                         UINT64_PAIR* pOutBoard, bool* pOutColorFlipped)
 {
-    return pCtx->h_childPlayer[(size_t)parentIdx * (size_t)pCtx->maxMovesPerBoard + childIdx];
-}
+    size_t base = (size_t)parentIdx * (size_t)pCtx->maxMovesPerBoard;
+    size_t slot = (player == RSF_PLAYER_BLACK)
+                ? base + (size_t)childIdx
+                : base + (size_t)(pCtx->maxMovesPerBoard - 1) - (size_t)childIdx;
 
-/*
-** Function: RetrogradeGetChildColorFlipped
-** @brief    See RetrogradeKernels.h.
-*/
-bool RetrogradeGetChildColorFlipped(const RetrogradeGpuContext* pCtx, int parentIdx, int childIdx)
-{
-    return pCtx->h_childColorFlipped[(size_t)parentIdx * (size_t)pCtx->maxMovesPerBoard + childIdx] != 0;
-}
-
-/*
-** Function: RetrogradeGetChildren
-** @brief    See RetrogradeKernels.h.
-*/
-const UINT64_PAIR* RetrogradeGetChildren(const RetrogradeGpuContext* pCtx, int parentIdx)
-{
-    return &pCtx->h_children[(size_t)parentIdx * (size_t)pCtx->maxMovesPerBoard];
+    *pOutBoard        = pCtx->h_children[slot];
+    *pOutColorFlipped = pCtx->h_childColorFlipped[slot] != 0;
 }

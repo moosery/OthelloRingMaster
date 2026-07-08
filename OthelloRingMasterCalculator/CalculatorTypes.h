@@ -27,7 +27,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.21.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.21.1"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 

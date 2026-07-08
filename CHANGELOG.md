@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.21.1] - 2026-07-08
+
+### Retrograde kernel: positional child color instead of a stored per-child tag
+
+- `RetrogradeKernels.h`/`.cu`: reworked the per-parent child output layout
+  from one combined slot range with a stored `d_childPlayer` byte per
+  child into a two-stack-per-parent layout -- black children packed from
+  the front of the range, white from the back, growing toward each other
+  (no atomics needed, since each thread only writes its own range).
+  Matches the pattern `GpuKernels.cu`'s own forward-solve accumulator has
+  used from the start (its `d_accum` two-stack, split by
+  `d_blackWritePos`/`d_whiteWritePos` -- confirmed by inspection that it
+  never stored a per-child color tag either, so no equivalent change was
+  needed there). Color is now purely positional/derived, matching how
+  `BOARD_KEY` itself carries no next-player bit. `RetrogradeGetChildCount`
+  is now per-color; the old `RetrogradeGetChildPlayer`/`RetrogradeGetChildren`
+  pair is replaced by `RetrogradeGetChild(pCtx, parentIdx, player, childIdx, ...)`.
+- Real (if modest) motivation, per direct discussion with the user: this
+  isn't about disk space (the eliminated array never touched disk at
+  all) or about sharing GPU memory with a concurrently-running
+  `OthelloRingMaster` process (the two never run at the same time by
+  design) -- it's headroom within the calculator's own process, letting
+  its GPU batch size grow for the same memory budget.
+- The color-flip tag (`d_childColorFlipped`) is unchanged and still
+  per-child -- it answers a different question than which color a child
+  is (whether that child's *already-computed, on-disk* triple needs
+  black/white un-swapped before summing), with no positional equivalent
+  found for it.
+- `NonTerminalLevelStep.cpp` updated to consume the new per-color API:
+  iterates black then white children per parent instead of one combined
+  list with a per-child player check.
+
 ## [0.21.0] - 2026-07-08
 
 ### Calculator Phase 3: the non-terminal backward step

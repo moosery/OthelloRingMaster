@@ -305,14 +305,15 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
 
         for (int p = 0; p < (int)batch.size(); p++)
         {
-            uint32_t childCount = RetrogradeGetChildCount(pGpu, p);
+            uint32_t blackCount = RetrogradeGetChildCount(pGpu, p, RSF_PLAYER_BLACK);
+            uint32_t whiteCount = RetrogradeGetChildCount(pGpu, p, RSF_PLAYER_WHITE);
 
             OutcomeTriple       accumWide   = {};
             NibbleOutcomeTriple accumNibble = {};
             if (byteWidth == COUNTER_WIDTH_NIBBLE) NibbleOutcomeTripleSetZero(&accumNibble);
             else                                    OutcomeTripleSetZero(&accumWide, byteWidth);
 
-            if (childCount == 0)
+            if (blackCount == 0 && whiteCount == 0)
             {
                 BOARD_KEY parentKey{ batch[p].hi, batch[p].lo };
                 int outcome = ClassifyTerminalOutcome(parentKey);
@@ -326,46 +327,54 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
             }
             else
             {
-                const UINT64_PAIR* children = RetrogradeGetChildren(pGpu, p);
                 bool ok = true;
 
-                for (uint32_t c = 0; ok && c < childCount; c++)
+                /* Child color is positional now (which color's count/loop
+                ** we're in), never a stored tag -- see RetrogradeKernels.h Notes.
+                */
+                for (int childPlayer = RSF_PLAYER_WHITE; ok && childPlayer <= RSF_PLAYER_BLACK; childPlayer++)
                 {
-                    BOARD_KEY childKey{ children[c].hi, children[c].lo };
-                    uint8_t   childPlayer  = RetrogradeGetChildPlayer(pGpu, p, (int)c);
-                    bool      colorFlipped = RetrogradeGetChildColorFlipped(pGpu, p, (int)c);
+                    uint32_t thisColorCount = (childPlayer == RSF_PLAYER_BLACK) ? blackCount : whiteCount;
 
-                    OutcomeTriple childTriple;
-                    if (!LookupChildTriple(lookup, childPlayer, childKey, &childTriple))
-                        Fatal(FATAL_MERGE_LOGIC_ERROR,
-                              "ProcessNonTerminalLevel: level %d child (cellsInUse=0x%llX cellColors=0x%llX, %s-to-move) not found in level %d's store",
-                              level, (unsigned long long)childKey.ullCellsInUse, (unsigned long long)childKey.ullCellColors,
-                              RSFPlayerStr(childPlayer), level + 1);
-
-                    /* Canonicalization's color-flip symmetry means this
-                    ** child's stored blackWins/whiteWins can be swapped
-                    ** relative to the real, played-out continuation --
-                    ** un-swap before folding into the parent (tie is
-                    ** unaffected either way). See RetrogradeKernels.h Notes.
-                    */
-                    if (colorFlipped)
+                    for (uint32_t c = 0; ok && c < thisColorCount; c++)
                     {
-                        for (int b = 0; b < WIDE_COUNTER_MAX_BYTES; b++)
+                        UINT64_PAIR childRec;
+                        bool        colorFlipped;
+                        RetrogradeGetChild(pGpu, p, childPlayer, (int)c, &childRec, &colorFlipped);
+                        BOARD_KEY childKey{ childRec.hi, childRec.lo };
+
+                        OutcomeTriple childTriple;
+                        if (!LookupChildTriple(lookup, (uint8_t)childPlayer, childKey, &childTriple))
+                            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                                  "ProcessNonTerminalLevel: level %d child (cellsInUse=0x%llX cellColors=0x%llX, %s-to-move) not found in level %d's store",
+                                  level, (unsigned long long)childKey.ullCellsInUse, (unsigned long long)childKey.ullCellColors,
+                                  RSFPlayerStr(childPlayer), level + 1);
+
+                        /* Canonicalization's color-flip symmetry means this
+                        ** child's stored blackWins/whiteWins can be swapped
+                        ** relative to the real, played-out continuation --
+                        ** un-swap before folding into the parent (tie is
+                        ** unaffected either way). See RetrogradeKernels.h Notes.
+                        */
+                        if (colorFlipped)
                         {
-                            uint8_t tmp          = childTriple.black[b];
-                            childTriple.black[b] = childTriple.white[b];
-                            childTriple.white[b] = tmp;
+                            for (int b = 0; b < WIDE_COUNTER_MAX_BYTES; b++)
+                            {
+                                uint8_t tmp          = childTriple.black[b];
+                                childTriple.black[b] = childTriple.white[b];
+                                childTriple.white[b] = tmp;
+                            }
                         }
-                    }
 
-                    if (byteWidth == COUNTER_WIDTH_NIBBLE)
-                    {
-                        NibbleOutcomeTriple childNibble{ childTriple.black[0], childTriple.white[0], childTriple.tie[0] };
-                        ok = NibbleOutcomeTripleAdd(&accumNibble, &childNibble);
-                    }
-                    else
-                    {
-                        ok = OutcomeTripleAdd(&accumWide, &childTriple, byteWidth);
+                        if (byteWidth == COUNTER_WIDTH_NIBBLE)
+                        {
+                            NibbleOutcomeTriple childNibble{ childTriple.black[0], childTriple.white[0], childTriple.tie[0] };
+                            ok = NibbleOutcomeTripleAdd(&accumNibble, &childNibble);
+                        }
+                        else
+                        {
+                            ok = OutcomeTripleAdd(&accumWide, &childTriple, byteWidth);
+                        }
                     }
                 }
 
