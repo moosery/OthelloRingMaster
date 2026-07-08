@@ -4,6 +4,53 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.19.0] - 2026-07-08
+
+### Calculator Phase 1: storage layer -- arbitrary-width counter arithmetic, streamed counts files, persistent width config
+
+- New `Utility/WideCounter.h`/`.cpp`: generic, Othello-agnostic
+  arbitrary-precision unsigned-counter addition, `WideCounterAdd`
+  (byte widths 1, 2, 4, 8 natively via the CPU's own integer widths;
+  9+ bytes via a manual carry-chain) and `NibbleCounterAdd` (4-bit
+  counters, 0-14 usable). Overflow is detected *before* the add is
+  performed for native widths (`addend > maxUsable - accum`), never by
+  inspecting the result afterward -- a large addition can wrap right past
+  the reserved all-ones sentinel without landing anywhere near it, so a
+  post-hoc "is it all ones" check is not reliable. Bignum widths detect
+  overflow via an escaped top-byte carry, plus a fallback check for
+  landing on the sentinel by coincidence.
+- New `OthelloRingMasterCalculator/OutcomeTriple.h`/`.cpp`: the
+  domain-specific (black, white, tie) triple built on top of
+  `WideCounter`, in both a `NibbleOutcomeTriple` (narrowest tier) and
+  `OutcomeTriple` (byte-and-wider tiers) form. Each triple's `*Add`
+  commits all three counters together or not at all, so an overflow in
+  just one counter (e.g. tie) never leaves the other two half-updated.
+- New `OthelloRingMasterCalculator/CalculatorCountsFile.h`/`.cpp`: the
+  streamed, positionally-aligned writer/reader for one level's triples,
+  riding `Lz4Stream` underneath (same bounded-memory streaming discipline
+  as the forward solver's `Ring_1`/`Ring_2`/`Ring_3_4` files). Byte-and-
+  wider tiers write fixed `3*byteWidth`-byte records; the nibble tier
+  packs 2 boards into 3 bytes (12 bits/board x 2, zero waste), with a
+  zero-padded trailing record when a level has an odd board count --
+  the reader is told the true record count up front so it can discard
+  that padding rather than returning it. A truncated mid-record read is
+  fatal, never a silent stop.
+- New `OthelloRingMasterCalculator/CounterWidthConfig.h`/`.cpp`: the
+  single persistent per-board-size cache file (`counterwidthconfig_NxN.json`,
+  same directory and same hand-rolled flat-JSON style as
+  `Utility/DriveInfo.cpp`'s `driveinfo.json`) recording each level's
+  known-good tier width across runs. `CounterWidthConfigBumpLevel`
+  updates a level's width and -- since width only ever grows as level
+  number decreases -- proactively raises every shallower, not-yet-
+  processed level's guess that is currently narrower, logging both the
+  triggering level's change and every shallower level it bumped.
+- New `FATAL_COUNTER_WIDTH_CONFIG_WRITE_FAILED` in `Utility/Error.h` for
+  the config-file save path.
+- Not yet wired into `OthelloRingMasterCalculator.cpp`'s `main()` -- these
+  are the storage-layer building blocks Phase 2 (terminal-level bootstrap)
+  and later phases will drive. See `project_retrograde_calculator_implementation_plan`
+  memory for the phase breakdown.
+
 ## [0.18.0] - 2026-07-09
 
 ### Add OthelloRingMasterCalculator + OthelloRingMasterCalculatorStatus (Phase 0 scaffolding)

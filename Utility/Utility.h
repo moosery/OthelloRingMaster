@@ -28,3 +28,4 @@
 #include "RWLock.h"
 #include "SysMemInfo.h"
 #include "ThreadPool.h"
+#include "WideCounter.h"

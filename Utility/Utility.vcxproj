@@ -156,6 +156,7 @@
     <ClInclude Include="SysMemInfo.h" />
     <ClInclude Include="ThreadPool.h" />
     <ClInclude Include="Utility.h" />
+    <ClInclude Include="WideCounter.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DriveInfo.cpp" />
@@ -175,6 +176,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="ThreadPool.cpp" />
+    <ClCompile Include="WideCounter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\lz4\lz4.vcxproj">

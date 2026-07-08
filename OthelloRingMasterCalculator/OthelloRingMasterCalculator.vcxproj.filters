@@ -18,9 +18,27 @@
     <ClCompile Include="OthelloRingMasterCalculator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="OutcomeTriple.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CalculatorCountsFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CounterWidthConfig.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CalculatorTypes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="OutcomeTriple.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CalculatorCountsFile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CounterWidthConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

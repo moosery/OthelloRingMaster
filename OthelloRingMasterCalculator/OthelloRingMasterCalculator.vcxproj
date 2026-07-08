@@ -151,9 +151,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="OthelloRingMasterCalculator.cpp" />
+    <ClCompile Include="OutcomeTriple.cpp" />
+    <ClCompile Include="CalculatorCountsFile.cpp" />
+    <ClCompile Include="CounterWidthConfig.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CalculatorTypes.h" />
+    <ClInclude Include="OutcomeTriple.h" />
+    <ClInclude Include="CalculatorCountsFile.h" />
+    <ClInclude Include="CounterWidthConfig.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
