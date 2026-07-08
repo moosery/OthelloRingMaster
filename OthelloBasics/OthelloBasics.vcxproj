@@ -20,21 +20,18 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloBasics.h" />
-    <ClInclude Include="Rotation.h" />
+    <ClInclude Include="RingPermutation.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="BoardCreateUniqueBoard.cpp" />
-    <ClCompile Include="BoardCompare.cpp" />
+    <ClCompile Include="BoardKeyAllocate.cpp" />
     <ClCompile Include="BoardKeyCompare.cpp" />
-    <ClCompile Include="BoardAllocate.cpp" />
-    <ClCompile Include="BoardFlip.cpp" />
-    <ClCompile Include="BoardMirrorVerticalAxis.cpp" />
-    <ClCompile Include="BoardMoveCalculator.cpp" />
-    <ClCompile Include="BoardPrint.cpp" />
-    <ClCompile Include="BoardRotate90DegreesRight.cpp" />
-    <ClCompile Include="MoveAllocate.cpp" />
-    <ClCompile Include="MovePlayAndSetResultBoard.cpp" />
-    <ClCompile Include="MovePrint.cpp" />
+    <ClCompile Include="BoardKeyPrint.cpp" />
+    <ClCompile Include="RingPermutation.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Utility\Utility.vcxproj">
+      <Project>{1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1}</Project>
+    </ProjectReference>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -133,7 +130,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>../FastInsert;../BPlusTree;../Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -152,7 +149,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>../FastInsert;../BPlusTree;../Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../Utility;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>

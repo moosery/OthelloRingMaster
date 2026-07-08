@@ -1,24 +1,139 @@
+/*
+** Filename:  OthelloBasicsForCUDA.h
+**
+** Purpose:
+**   Declares everything row-major-bit-dependent for Othello board
+**   manipulation: the full working BOARD struct (occupancy/color/next-player/
+**   possible-moves/win-tie-loss/state), every bit macro that addresses a
+**   cell by row-major index, board-size mask setup, and the device
+**   functions that actually generate moves, compute flips, rotate/mirror,
+**   and canonicalize a board. All of this used to live in OthelloBasics.h;
+**   it moved here because the CPU never touches row-major bit structure --
+**   only the GPU does, per the CPU-organizes/GPU-solves boundary (see
+**   project_ring_layout_implementation_plan memory). BOARD_KEY (the lean,
+**   CPU-visible on-disk/organizing key) still lives in OthelloBasics.h.
+**
+** Notes:
+**   A previous "_key" family of device functions here (dev_applyMove_key,
+**   dev_canonicalize_key, etc.) operated directly on BOARD_KEY and read a
+**   next-player bit from it. That bit no longer exists on BOARD_KEY --
+**   next-player is tracked externally now (which file/batch a key belongs
+**   to), matching BlasterFile.h's on-disk convention. That family was for a
+**   different, external consumer (OLE) not part of this solution anyway, so
+**   it was dropped rather than reworked.
+*/
+
 #pragma once
+
+/* Includes */
 #include <OthelloBasics.h>
 
-// Board-size constants that device functions need in lieu of the host globals
-// (g_boardMask, g_boardRightEdge, g_boardLeftEdge).
-// Populate with OBCuda_GetBoardConsts() after calling SetBoardSizeForRun().
+/* Structures and Types */
+
+/*
+** Type:    BOARD
+** @brief   Full GPU working-set board: occupancy/color bitboards, the
+**          next-player bit, cached possible-moves, win/tie/loss counters,
+**          and play state. This is transient, GPU-internal representation
+**          used during expansion/generation -- once a board is finalized
+**          and filed, only its BOARD_KEY (the two bitboards) is stored.
+*/
+typedef struct _Board
+{
+    unsigned long long  ullCellsInUse;      /* 0-> Not used      1-> Used             */
+    unsigned long long  ullCellColors;      /* 0-> White         1-> Black            */
+    unsigned short      usBoardInfo;        /* 0b0000000X        Next Player 1->Black */
+                                             /*                               0->White */
+    unsigned short      _pad1[3];           /* explicit alignment padding             */
+    unsigned long long  ullPossibleMoves;   /* 0-> No move       1-> Can play          */
+    unsigned long long  ullBlackWins;       /* Number of potential black wins          */
+    unsigned long long  ullWhiteWins;       /* Number of potential white wins          */
+    unsigned long long  ullTies;            /* Number of tie boards                    */
+    unsigned short      usBoardState;       /* 0=not played, 1=played/non-terminal,    */
+                                             /* 2=played/terminal, 3=played/no moves    */
+    unsigned short      _pad2[3];           /* explicit trailing padding               */
+} BOARD, * PBOARD;
+
+/* Board-size constants that device functions need in lieu of the host globals
+** (g_boardMask, g_boardRightEdge, g_boardLeftEdge).
+** Populate with OBCuda_GetBoardConsts() after calling SetBoardSizeForRun().
+*/
 struct DevBoardConsts {
     unsigned long long boardMask;
     unsigned long long boardRightEdge;
     unsigned long long boardLeftEdge;
 };
 
-// Host function: captures current g_board* globals into a DevBoardConsts.
+/* Macros and Defines */
+
+/* The bit we move all around */
+#define FIRSTBIT                           ((unsigned long long) 0x8000000000000000)
+
+/* BIT Index Macro */
+#define GETINDEX(row,col)                  ((row * 8) + col)
+
+/* Next Player Macros */
+#define GETBOARDNEXTPLAYERSHORT(val)       (((val) & 0x01) ? BLACK : WHITE)
+#define GETBOARDNEXTPLAYER(pBoard)         GETBOARDNEXTPLAYERSHORT((pBoard)->usBoardInfo)
+#define SETBOARDNEXTPLAYERBLACKSHORT(val)  (val) = ((val) | 0x01)
+#define SETBOARDNEXTPLAYERWHITESHORT(val)  (val) = ((val) & 0xFE)
+#define SETBOARDNEXTPLAYERBLACK(pBoard)    SETBOARDNEXTPLAYERBLACKSHORT((pBoard)->usBoardInfo)
+#define SETBOARDNEXTPLAYERWHITE(pBoard)    SETBOARDNEXTPLAYERWHITESHORT((pBoard)->usBoardInfo)
+#define SETBOARDNEXTPLAYER(pBoard,color)   if(color == BLACK) { SETBOARDNEXTPLAYERBLACK(pBoard); } else { SETBOARDNEXTPLAYERWHITE(pBoard); }
+#define SETBOARDNEXTPLAYERFLIP(pBoard)     if(GETBOARDNEXTPLAYER(pBoard) == WHITE) { SETBOARDNEXTPLAYERBLACK(pBoard); } else { SETBOARDNEXTPLAYERWHITE(pBoard); }
+
+/* Globals */
+
+/* Board-size globals -- call SetBoardSizeForRun(boardSize) once before any
+** GPU run. Masks are precomputed here so device code avoids rebuilding them
+** on every call (which can be billions of times for a full solve). Defaults
+** match boardSize=4 so a SetBoardSizeForRun call is not strictly required
+** when the board size is 4.
+*/
+inline int                g_boardSize      = 4;
+inline int                g_boardSi        = 2;                    /* (8-4)/2 */
+inline int                g_boardEi        = 6;                    /* 8-2     */
+inline unsigned long long g_boardLeftEdge  = 0x0000202020200000ULL;
+inline unsigned long long g_boardRightEdge = 0x0000040404040000ULL;
+inline unsigned long long g_boardMask      = 0x00003C3C3C3C0000ULL;
+
+/* Functions */
+
+/*
+** Function: SetBoardSizeForRun
+** @brief    Rebuilds the board-size masks (g_boardMask/g_boardLeftEdge/
+**           g_boardRightEdge) for a new board size.
+** @param    boardSize - the board size to configure for (4, 6, or 8)
+*/
+inline void SetBoardSizeForRun(int boardSize)
+{
+    g_boardSize      = boardSize;
+    g_boardSi        = (8 - boardSize) / 2;
+    g_boardEi        = 8 - g_boardSi;
+    g_boardLeftEdge  = 0;
+    g_boardRightEdge = 0;
+    g_boardMask      = 0;
+    for (int r = g_boardSi; r < g_boardEi; r++)
+    {
+        g_boardLeftEdge  |= (FIRSTBIT >> GETINDEX(r, g_boardSi));
+        g_boardRightEdge |= (FIRSTBIT >> GETINDEX(r, g_boardEi - 1));
+        for (int c = g_boardSi; c < g_boardEi; c++)
+            g_boardMask |= (FIRSTBIT >> GETINDEX(r, c));
+    }
+}
+
+/*
+** Function: OBCuda_GetBoardConsts
+** @brief    Captures the current g_board* globals into a DevBoardConsts for
+**           device code to use.
+** @return   The current board-size constants.
+*/
 DevBoardConsts OBCuda_GetBoardConsts();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Device functions — available only in CUDA compilation units (.cu files).
-// All mirror the corresponding OthelloBasics CPU functions exactly.
-// numRotations passed to dev_canonicalize must be 1, 4, or 8 (not 16 —
-// BoardFlip is not implemented here).
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────────────────────
+** Device functions -- available only in CUDA compilation units (.cu files).
+** ─────────────────────────────────────────────────────────────────────────────
+*/
 #ifdef __CUDACC__
 
 // Manual byte-swap (replaces _byteswap_uint64 which is an MSVC-only intrinsic).
@@ -278,212 +393,6 @@ void dev_boardMoveCalculator(BOARD* board, const DevBoardConsts& c)
 
     board->ullPossibleMoves = validMoves;
 }
-
-// Compute legal moves for the current player directly from a BOARD_KEY.
-// Mirrors dev_boardMoveCalculator but takes a key and returns the move mask.
-__device__ __forceinline__
-unsigned long long dev_boardKeyGetMoves(const BOARD_KEY* key, const DevBoardConsts& c)
-{
-    char color = GETBOARDNEXTPLAYER(key);
-
-    unsigned long long myPieces, oppPieces;
-    if (color == BLACK) {
-        myPieces  = key->ullCellsInUse &  key->ullCellColors;
-        oppPieces = key->ullCellsInUse & ~key->ullCellColors;
-    } else {
-        myPieces  = key->ullCellsInUse & ~key->ullCellColors;
-        oppPieces = key->ullCellsInUse &  key->ullCellColors;
-    }
-
-    const unsigned long long notRight = ~c.boardRightEdge;
-    const unsigned long long notLeft  = ~c.boardLeftEdge;
-    unsigned long long empty      = c.boardMask & ~(myPieces | oppPieces);
-    unsigned long long validMoves = 0;
-    unsigned long long gen, candidates;
-
-    candidates = oppPieces & notRight;
-    gen  = (myPieces & notRight) >> 1; gen &= candidates;
-    gen |= ((gen & notRight) >> 1) & candidates; gen |= ((gen & notRight) >> 1) & candidates;
-    gen |= ((gen & notRight) >> 1) & candidates; gen |= ((gen & notRight) >> 1) & candidates;
-    gen |= ((gen & notRight) >> 1) & candidates;
-    validMoves |= ((gen & notRight) >> 1) & empty;
-
-    candidates = oppPieces & notLeft;
-    gen  = (myPieces & notLeft) << 1; gen &= candidates;
-    gen |= ((gen & notLeft) << 1) & candidates; gen |= ((gen & notLeft) << 1) & candidates;
-    gen |= ((gen & notLeft) << 1) & candidates; gen |= ((gen & notLeft) << 1) & candidates;
-    gen |= ((gen & notLeft) << 1) & candidates;
-    validMoves |= ((gen & notLeft) << 1) & empty;
-
-    candidates = oppPieces;
-    gen  = (myPieces >> 8) & candidates;
-    gen |= ((gen >> 8) & candidates); gen |= ((gen >> 8) & candidates);
-    gen |= ((gen >> 8) & candidates); gen |= ((gen >> 8) & candidates);
-    gen |= ((gen >> 8) & candidates);
-    validMoves |= (gen >> 8) & empty;
-
-    candidates = oppPieces;
-    gen  = (myPieces << 8) & candidates;
-    gen |= ((gen << 8) & candidates); gen |= ((gen << 8) & candidates);
-    gen |= ((gen << 8) & candidates); gen |= ((gen << 8) & candidates);
-    gen |= ((gen << 8) & candidates);
-    validMoves |= (gen << 8) & empty;
-
-    candidates = oppPieces & notRight;
-    gen  = (myPieces & notRight) >> 9; gen &= candidates;
-    gen |= ((gen & notRight) >> 9) & candidates; gen |= ((gen & notRight) >> 9) & candidates;
-    gen |= ((gen & notRight) >> 9) & candidates; gen |= ((gen & notRight) >> 9) & candidates;
-    gen |= ((gen & notRight) >> 9) & candidates;
-    validMoves |= ((gen & notRight) >> 9) & empty;
-
-    candidates = oppPieces & notLeft;
-    gen  = (myPieces & notLeft) >> 7; gen &= candidates;
-    gen |= ((gen & notLeft) >> 7) & candidates; gen |= ((gen & notLeft) >> 7) & candidates;
-    gen |= ((gen & notLeft) >> 7) & candidates; gen |= ((gen & notLeft) >> 7) & candidates;
-    gen |= ((gen & notLeft) >> 7) & candidates;
-    validMoves |= ((gen & notLeft) >> 7) & empty;
-
-    candidates = oppPieces & notRight;
-    gen  = (myPieces & notRight) << 7; gen &= candidates;
-    gen |= ((gen & notRight) << 7) & candidates; gen |= ((gen & notRight) << 7) & candidates;
-    gen |= ((gen & notRight) << 7) & candidates; gen |= ((gen & notRight) << 7) & candidates;
-    gen |= ((gen & notRight) << 7) & candidates;
-    validMoves |= ((gen & notRight) << 7) & empty;
-
-    candidates = oppPieces & notLeft;
-    gen  = (myPieces & notLeft) << 9; gen &= candidates;
-    gen |= ((gen & notLeft) << 9) & candidates; gen |= ((gen & notLeft) << 9) & candidates;
-    gen |= ((gen & notLeft) << 9) & candidates; gen |= ((gen & notLeft) << 9) & candidates;
-    gen |= ((gen & notLeft) << 9) & candidates;
-    validMoves |= ((gen & notLeft) << 9) & empty;
-
-    return validMoves;
-}
-
-// ── BOARD_KEY device functions ────────────────────────────────────────────────
-// Parallel set to the BOARD-based functions above.  OLE uses only these;
-// SolverKernel.cu continues to use the BOARD-based versions.
-
-__device__ __forceinline__
-void dev_applyMove_key(BOARD_KEY* board, char color, int moveIdx)
-{
-    unsigned long long moveBit  = FIRSTBIT >> moveIdx;
-    unsigned long long occupied = board->ullCellsInUse;
-    unsigned long long colors   = board->ullCellColors;
-
-    unsigned long long player, opponent;
-    if (color == BLACK) {
-        player   = occupied &  colors;
-        opponent = occupied & ~colors;
-    } else {
-        player   = occupied & ~colors;
-        opponent = occupied &  colors;
-    }
-
-    unsigned long long flips = dev_computeFlips(moveBit, player, opponent);
-
-    board->ullCellsInUse |= moveBit;
-    if (color == BLACK)
-        board->ullCellColors |= (moveBit | flips);
-    else
-        board->ullCellColors &= ~(moveBit | flips);
-}
-
-__device__ __forceinline__
-void dev_rotate90Right_key(const BOARD_KEY* src, BOARD_KEY* dst)
-{
-    dst->usBoardInfo   = src->usBoardInfo;
-    dst->ullCellsInUse = dev_flipDiagA1H8(dev_bswap64(src->ullCellsInUse));
-    dst->ullCellColors = dev_flipDiagA1H8(dev_bswap64(src->ullCellColors));
-}
-
-__device__ __forceinline__
-void dev_mirrorVerticalAxis_key(const BOARD_KEY* src, BOARD_KEY* dst)
-{
-    dst->usBoardInfo   = src->usBoardInfo;
-    dst->ullCellsInUse = dev_mirrorBytewise(src->ullCellsInUse);
-    dst->ullCellColors = dev_mirrorBytewise(src->ullCellColors);
-}
-
-__device__ __forceinline__
-void dev_boardFlip_key(const BOARD_KEY* src, BOARD_KEY* dst)
-{
-    dst->usBoardInfo   = src->usBoardInfo ^ 0x01u;
-    dst->ullCellsInUse = src->ullCellsInUse;
-    dst->ullCellColors = ~src->ullCellColors & src->ullCellsInUse;
-}
-
-__device__ __forceinline__
-bool dev_boardLT_key(const BOARD_KEY* a, const BOARD_KEY* b)
-{
-    if (a->ullCellsInUse != b->ullCellsInUse)
-        return a->ullCellsInUse < b->ullCellsInUse;
-    if (a->ullCellColors != b->ullCellColors)
-        return a->ullCellColors < b->ullCellColors;
-    return (a->usBoardInfo & 0x01u) > (b->usBoardInfo & 0x01u);
-}
-
-__device__ __forceinline__
-void dev_playMove_key(const BOARD_KEY* src, BOARD_KEY* dst, int moveIdx)
-{
-    dst->ullCellsInUse = src->ullCellsInUse;
-    dst->ullCellColors = src->ullCellColors;
-    dst->usBoardInfo   = src->usBoardInfo;
-    char color = GETBOARDNEXTPLAYER(src);
-    SETBOARDNEXTPLAYERFLIP(dst);
-    dev_applyMove_key(dst, color, moveIdx);
-}
-
-// Canonicalize a BOARD_KEY in-place: try up to numRotations symmetries, keep
-// the minimum under key ordering.  No moves computed — caller calls
-// dev_boardKeyGetMoves if needed.  numRotations: 1, 4, 8, or 16.
-// _pad1 bytes stay zero because arr is zero-initialized and rotation functions
-// only write the three named fields.
-__device__ __forceinline__
-void dev_canonicalize_key(BOARD_KEY* board, int numRotations)
-{
-    BOARD_KEY arr[16] = {};
-
-    arr[0].ullCellsInUse = board->ullCellsInUse;
-    arr[0].ullCellColors = board->ullCellColors;
-    arr[0].usBoardInfo   = board->usBoardInfo;
-
-    if (numRotations >= 4) {
-        dev_rotate90Right_key(&arr[0], &arr[1]);
-        dev_rotate90Right_key(&arr[1], &arr[2]);
-        dev_rotate90Right_key(&arr[2], &arr[3]);
-    }
-    if (numRotations >= 8) {
-        dev_mirrorVerticalAxis_key(&arr[0], &arr[4]);
-        dev_rotate90Right_key(&arr[4], &arr[5]);
-        dev_rotate90Right_key(&arr[5], &arr[6]);
-        dev_rotate90Right_key(&arr[6], &arr[7]);
-    }
-    if (numRotations >= 16) {
-        dev_boardFlip_key(&arr[0], &arr[8]);
-        dev_rotate90Right_key(&arr[8],  &arr[9]);
-        dev_rotate90Right_key(&arr[9],  &arr[10]);
-        dev_rotate90Right_key(&arr[10], &arr[11]);
-        dev_mirrorVerticalAxis_key(&arr[8], &arr[12]);
-        dev_rotate90Right_key(&arr[12], &arr[13]);
-        dev_rotate90Right_key(&arr[13], &arr[14]);
-        dev_rotate90Right_key(&arr[14], &arr[15]);
-    }
-
-    int n = (numRotations >= 16) ? 16
-          : (numRotations >=  8) ?  8
-          : (numRotations >=  4) ?  4 : 1;
-    int minIdx = 0;
-    for (int i = 1; i < n; i++) {
-        if (dev_boardLT_key(&arr[i], &arr[minIdx]))
-            minIdx = i;
-    }
-
-    board->ullCellsInUse = arr[minIdx].ullCellsInUse;
-    board->ullCellColors = arr[minIdx].ullCellColors;
-    board->usBoardInfo   = arr[minIdx].usBoardInfo;
-}
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Swap Black↔White by complementing ullCellColors within occupied cells and
 // flipping the next-player bit.  Used to generate the color-mirror symmetry

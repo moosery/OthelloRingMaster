@@ -4,6 +4,46 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.3.0] - 2026-07-07
+
+### Re-scope OthelloBasics / OthelloBasicsForCUDA to the CPU-organizes/GPU-solves boundary
+
+- **BOARD_KEY consolidated**: dropped its next-player bit and padding --
+  it's now just the two bitboard fields (16 bytes). Next-player is tracked
+  externally (which file/batch a key belongs to) rather than per-record,
+  matching the convention `BlasterFile.h`'s `BOARD_KEY_DISK` already used.
+- **OthelloBasics gutted to its CPU-safe surface**: `BoardKeyCompare` (now a
+  single unified two-term comparator -- the old `BoardCompare`/
+  `BoardKeyCompare` split collapsed into one now that both structs compare
+  the same two fields), `BoardKeyAllocate`/`BoardKeyAllocateClone`, and a
+  reworked `BoardKeyPrint`. Deleted outright: `BoardCreateUniqueBoard`,
+  `BoardFlip`, `BoardMirrorVerticalAxis`, `BoardMoveCalculator`,
+  `BoardRotate90DegreesRight`, `MovePlayAndSetResultBoard` (all already
+  fully mirrored by existing `dev_` GPU functions), plus `MoveAllocate`/
+  `MoveSet`/`MovePrint`/the `MOVE` struct and `Rotation.h` (unused once
+  their only caller was gone).
+- **Starting position hardcoded**: `BoardKeyAllocateFirstBoard` now sets a
+  precomputed ring-ordered constant instead of calling row-major
+  `SETOCCUPIED`/`SETWHITE`/`SETBLACK` macros and running move-gen at
+  startup. The constant is identical across every board size, since the
+  center 2x2 starting cells never move regardless of board size.
+- **BoardKeyPrint reworked**: prints directly from ring-ordered bits via the
+  inverse ring-permutation table as a lookup (`RingPermutation.h`/`.cpp`,
+  promoted out of `OthelloRingSplitAnalyzer`) -- never materializes a
+  row-major value on the CPU.
+- **OthelloBasicsForCUDA absorbed everything row-major**: the full `BOARD`
+  struct and every row-major bit macro moved here from `OthelloBasics.h`
+  (CPU no longer has access to them at all, not just "doesn't currently use
+  them"). Dropped the `_key`-suffixed device function family
+  (`dev_applyMove_key`, `dev_canonicalize_key`, etc.) -- it read a
+  next-player bit off `BOARD_KEY` that no longer exists, and was for a
+  different external consumer (OLE) not part of this solution anyway.
+  `BOARD`-based device functions (move-gen, flip, rotate/mirror,
+  canonicalize) are unchanged.
+- Fixed stale `OthelloBasics.vcxproj` include paths (`../FastInsert`,
+  `../BPlusTree` -- leftover from the original Blaster project, don't exist
+  here) and added a missing `Utility` project reference.
+
 ## [0.2.2] - 2026-07-07
 
 ### Move BlasterFile.h/.cpp under OthelloRingSplitAnalyzer
