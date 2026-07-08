@@ -4,6 +4,27 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.16.2] - 2026-07-07
+
+### Collapse writerDriveStats drive-letter lookups to direct indexing
+
+- Follow-up to v0.16.1: once `writerDriveStats[i]` is guaranteed built
+  1:1 with `mwDirectory[i]` (one merge-writer directory per drive, no
+  more "multiple dirs per drive" support), the three remaining
+  search-by-drive-letter loops that assumed a possible many-to-one
+  relationship became provably dead work -- each could only ever match
+  index `i` itself.
+- `MergeFiles.cpp`'s post-flush merge-trigger check and
+  `DoCrossDriveIntermediateMerge`'s under-lock space recheck both now
+  index `writerDriveStats[ti]`/`writerDriveStats[i]` directly instead of
+  scanning for a matching `driveLetter`.
+- `StatsListener.cpp`'s live status display now reads
+  `mwBlackFileCount[i]`/`mwWhiteFileCount[i]` directly instead of
+  scanning every merge-writer thread for one whose directory sits on the
+  current drive.
+- No behavior change -- these loops always found exactly one match at
+  the same index; this just removes the now-unnecessary search.
+
 ## [0.16.1] - 2026-07-07
 
 ### Remove leftover "multiple merge-writer directories per drive" support

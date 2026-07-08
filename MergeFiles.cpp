@@ -749,23 +749,18 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].mwFilesCreated,      (LONG64)filesCreated);
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].mwBytes,             (LONG64)fileBytes);
 
-    /* Debit the NVMe ledger for bytes just written, then check merge triggers. */
+    /* Debit the NVMe ledger for bytes just written, then check merge triggers.
+    ** writerDriveStats[ti] is this thread's own drive -- writerDriveStats[i]
+    ** is built 1:1 with mwDirectory[i] (see InitSolver.cpp), so no
+    ** search-by-drive-letter is needed here.
+    */
     char driveLetter = pSt->mwDirectory[ti][0];
     DriveDebit(pSt, driveLetter, (int64_t)fileBytes);
 
-    bool needsMerge = false;
-    for (int i = 0; i < pSt->numWriterDrives; i++)
-    {
-        if (pSt->writerDriveStats[i].driveLetter == driveLetter)
-        {
-            pSt->writerDriveStats[i].levelFilesWritten      += filesCreated;
-            pSt->writerDriveStats[i].levelBytesWritten      += fileBytes;
-            pSt->writerDriveStats[i].levelBytesUncompressed += uncompressedBytes;
-            if (DriveAvailable(pSt, driveLetter) < (int64_t)pSt->writerDriveStats[i].threshold)
-                needsMerge = true;
-            break;
-        }
-    }
+    pSt->writerDriveStats[ti].levelFilesWritten      += filesCreated;
+    pSt->writerDriveStats[ti].levelBytesWritten      += fileBytes;
+    pSt->writerDriveStats[ti].levelBytesUncompressed += uncompressedBytes;
+    bool needsMerge = DriveAvailable(pSt, driveLetter) < (int64_t)pSt->writerDriveStats[ti].threshold;
     if (!needsMerge)
     {
         /* File-count trigger: merge when total unconsumed files per color >= MAX_MERGE_FANIN. */
@@ -829,16 +824,15 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
             bk += pSt->mwBlackFileCount[i] - pSt->mwBlackFilesConsumed[i];
             wh += pSt->mwWhiteFileCount[i] - pSt->mwWhiteFilesConsumed[i];
         }
+        /* writerDriveStats[i] is writer i's own drive (built 1:1 with
+        ** mwDirectory[i] -- see InitSolver.cpp), so no search needed.
+        */
         bool spaceOk = true;
         for (int i = 0; i < pSt->numMergeWriters && spaceOk; i++)
         {
             char dl = pSt->mwDirectory[i][0];
-            for (int j = 0; j < pSt->numWriterDrives; j++)
-            {
-                if (pSt->writerDriveStats[j].driveLetter == dl
-                    && DriveAvailable(pSt, dl) < (int64_t)pSt->writerDriveStats[j].threshold)
-                { spaceOk = false; break; }
-            }
+            if (DriveAvailable(pSt, dl) < (int64_t)pSt->writerDriveStats[i].threshold)
+                spaceOk = false;
         }
         if (bk < MAX_MERGE_FANIN && wh < MAX_MERGE_FANIN && spaceOk)
         {

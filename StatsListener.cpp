@@ -221,16 +221,11 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
 
-        /* Sum live writer file counts across threads on this drive */
-        int liveBlack = 0, liveWhite = 0;
-        for (int ti = 0; ti < pSt->numMergeWriters; ti++)
-        {
-            if (pSt->mwDirectory[ti][0] == d->driveLetter)
-            {
-                liveBlack += pSt->mwBlackFileCount[ti];
-                liveWhite += pSt->mwWhiteFileCount[ti];
-            }
-        }
+        /* mwDirectory[i] is this drive's one writer thread (1:1 with
+        ** writerDriveStats[i] -- see InitSolver.cpp), so no scan needed.
+        */
+        int liveBlack = pSt->mwBlackFileCount[i];
+        int liveWhite = pSt->mwWhiteFileCount[i];
 
         bool showUncomp = (d->levelBytesUncompressed > 0
                            && d->levelBytesUncompressed != d->levelBytesWritten);
