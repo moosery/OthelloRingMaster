@@ -112,6 +112,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>../lz4;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -129,6 +130,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>../lz4;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -148,6 +150,7 @@
     <ClInclude Include="Error.h" />
     <ClInclude Include="FileAndDirUtils.h" />
     <ClInclude Include="Mem.h" />
+    <ClInclude Include="RingStoreFile.h" />
     <ClInclude Include="RWLock.h" />
     <ClInclude Include="SysMemInfo.h" />
     <ClInclude Include="ThreadPool.h" />
@@ -164,11 +167,17 @@
     <ClCompile Include="Error.cpp" />
     <ClCompile Include="FileAndDirUtils.cpp" />
     <ClCompile Include="Mem.cpp" />
+    <ClCompile Include="RingStoreFile.cpp" />
     <ClCompile Include="RWLock.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="ThreadPool.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\lz4\lz4.vcxproj">
+      <Project>{1ffdb617-7315-47e7-8359-ce3f75e4ec8f}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

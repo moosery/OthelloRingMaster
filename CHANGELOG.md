@@ -4,6 +4,36 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.6.0] - 2026-07-07
+
+### Genericize the record-file format into Utility as RSF; delete OthelloRingSplitAnalyzer
+
+Phase 4 (porting the live-solver pipeline from OthelloLevelBlaster) Step 0.
+
+- Added `Utility/RingStoreFile.h`/`.cpp`: a generic on-disk record-file
+  format (`RSFWriter`/`RSFReader`, three tiers: `.rsf` plain, `.rsfz`
+  delta+varint compressed, `.rsfzl` delta+varint+LZ4), operating on a new
+  generic `UINT64_PAIR { uint64_t hi, lo; }` record type instead of any
+  Othello-specific key -- `Utility` stays board-representation-agnostic.
+  This is a straight port of `OthelloRingSplitAnalyzer`'s `BlasterFile.h`/
+  `.cpp` logic (delta+zigzag+varint encoding, LZ4 framing, trailer-magic
+  format detection), renamed away from `Blaster`/`BLF` naming throughout
+  (new prefix `RSF`, new magic constants) since nothing in this project
+  should reference Blaster going forward.
+- `Utility` now depends on `lz4` for the first time (`ProjectReference` +
+  include path added) -- this was flagged as a deferred step back when
+  `BlasterFile.*` was first ported ("revisit if/when the ring-split work
+  graduates past an analysis experiment"); this is that moment, since
+  Phase 4's ported solver code needs this same read/write-with-compression
+  functionality and there's no reason to keep two copies of it.
+- **Deleted `OthelloRingSplitAnalyzer/` entirely** (including the now-
+  superseded `BlasterFile.h`/`.cpp`) -- its job, proving the ring-split
+  nested-index theory against real production data, is done and already
+  reflected in `RingNestedIndex.h`/`.cpp`. Removed from
+  `OthelloRingMaster.slnx`.
+- No behavior change to anything that already worked; this just relocates
+  and renames record-file I/O ahead of the rest of Phase 4 depending on it.
+
 ## [0.5.0] - 2026-07-07
 
 ### Add RingNestedIndex: reusable CellsInUse -> Ring_1 -> Ring_2 -> Ring_3_4 builder/reader

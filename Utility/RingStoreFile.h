@@ -1,0 +1,196 @@
+/*
+** Filename:  RingStoreFile.h
+**
+** Purpose:
+**   Declares a generic on-disk record file format: a sequence of 16-byte
+**   UINT64_PAIR records followed by a 64-byte RSFTrailer written last (a
+**   missing/corrupt trailer magic means the file was never fully written
+**   and must be discarded). This module is not Othello-aware -- it only
+**   knows about two-uint64_t records, sorted ascending (hi first, then lo)
+**   with no duplicates within a stream. Any caller's own key type that is
+**   binary-compatible with UINT64_PAIR (same two-uint64_t layout) can be
+**   cast to/from it at the call site.
+**
+**   Three format variants share this same trailer layout, distinguished by
+**   the trailer's magic value:
+**     - .rsf   (RSF_MAGIC)   -- plain, uncompressed records.
+**     - .rsfz  (RSFZ_MAGIC)  -- delta+varint compressed records.
+**     - .rsfzl (RSFZL_MAGIC) -- delta+varint, then LZ4-framed on top.
+**   RSFWriter/RSFReader are opaque streaming types covering all three;
+**   RSFWrite is a one-shot batch writer for an already-sorted/deduped
+**   in-memory array (always uncompressed).
+**
+** Notes:
+**   Promoted out of the OthelloRingSplitAnalyzer-only BlasterFile.h/.cpp
+**   (now deleted -- its job of proving the ring-split theory is done) and
+**   genericized: no more Othello-specific naming or types, so any project
+**   in this solution can depend on it without pulling in board semantics.
+*/
+
+#pragma once
+
+/* Includes */
+#include <stdint.h>
+
+/* Structures and Types */
+
+/*
+** Type:    UINT64_PAIR
+** @brief   Generic 16-byte record: two uint64_t fields, no padding, no
+**          semantic meaning attached at this layer.
+*/
+#pragma pack(push, 1)
+typedef struct _Uint64Pair
+{
+    uint64_t hi;
+    uint64_t lo;
+} UINT64_PAIR, * PUINT64_PAIR;
+#pragma pack(pop)
+static_assert(sizeof(UINT64_PAIR) == 16, "UINT64_PAIR must be 16 bytes");
+
+/*
+** Type:    RSFTrailer
+** @brief   Fixed 64-byte trailer written at the end of every ring-store
+**          file, after all UINT64_PAIR records. Its magic field is written
+**          last, so a missing/wrong magic reliably signals an incomplete
+**          or corrupt file rather than requiring per-record validation.
+*/
+#pragma pack(push, 1)
+typedef struct _RSFTrailer
+{
+    uint8_t   minKey[16];     /* first UINT64_PAIR in sorted order                    */
+    uint8_t   maxKey[16];     /* last  UINT64_PAIR in sorted order                    */
+    uint64_t  recordCount;    /* UINT64_PAIR records preceding this trailer           */
+    uint8_t   _reserved[16];  /* reserved, must be zero                               */
+    uint64_t  magic;          /* RSF_MAGIC -- written last; absence = incomplete file */
+} RSFTrailer, * PRSFTrailer;
+#pragma pack(pop)
+static_assert(sizeof(RSFTrailer) == 64, "RSFTrailer must be 64 bytes");
+
+/*
+** Type:    RSFWriter
+** @brief   Opaque streaming writer. RSFWriterOpen produces plain 16-byte
+**          records; RSFWriterOpenZ/RSFWriterOpenZMem produce delta+varint
+**          (+ optional LZ4) compressed output. RSFWriterRecord and
+**          RSFWriterClose work identically across all of them.
+*/
+typedef struct __RSFWriter RSFWriter;
+
+/*
+** Type:    RSFReader
+** @brief   Opaque sequential reader, dispatching on the trailer's magic to
+**          handle .rsf/.rsfz/.rsfzl transparently.
+*/
+typedef struct __RSFReader RSFReader;
+
+/* Constants */
+#define RSF_MAGIC   0x52534653544F5245ULL   /* "RSFSTORE" in ASCII byte order */
+#define RSFZ_MAGIC  0x52534653544F525AULL   /* "RSFSTORZ" in ASCII byte order */
+#define RSFZL_MAGIC 0x52534653544F524CULL   /* "RSFSTORL" in ASCII byte order */
+
+#define RSF_WRITE_BUFFER_SIZE      (512  * 1024)
+#define RSF_COMP_WRITE_BUFFER_SIZE (1024 * 1024)
+#define RSF_COMP_READ_BUFFER_SIZE  (1024 * 1024)
+
+/* Functions */
+
+/*
+** Function: RSFWrite
+** @brief    Writes count already-sorted-and-deduped UINT64_PAIR records
+**           to path as a plain (uncompressed) .rsf file, followed by the trailer.
+** @param    path     - file path to create (overwritten if it exists)
+** @param    pRecords - sorted, deduped array of records to write
+** @param    count    - number of records in pRecords
+*/
+void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count);
+
+/*
+** Function: RSFWriterOpen
+** @brief    Opens path for streaming, plain (uncompressed) .rsf output.
+** @param    path - file path to create (overwritten if it exists)
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpen(const char* path);
+
+/*
+** Function: RSFWriterOpenZ
+** @brief    Opens path for streaming, delta+varint compressed output.
+**           Adds an LZ4 frame layer on top automatically if path ends in ".rsfzl".
+** @param    path - file path to create (overwritten if it exists)
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZ(const char* path);
+
+/*
+** Function: RSFWriterOpenZMem
+** @brief    Opens a memory-backed writer producing delta+varint+LZ4
+**           compressed output directly into buf, instead of a file.
+** @param    buf      - destination buffer for compressed output
+** @param    maxBytes - capacity of buf; RSFWriterRecord/Close fatal if exceeded
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes);
+
+/*
+** Function: RSFWriterRecord
+** @brief    Appends one record to a streaming writer.
+** @param    pw  - the writer to append to
+** @param    pRec - the record to write
+*/
+void RSFWriterRecord(RSFWriter* pw, const UINT64_PAIR* pRec);
+
+/*
+** Function: RSFWriterClose
+** @brief    Flushes any pending output, writes the trailer, closes the
+**           writer, and frees it.
+** @param    pw         - the writer to close (no longer valid after this call)
+** @param    pFileBytes - out: total bytes written (compressed payload + trailer for compressed writers; buffer bytes written for memory mode), or nullptr to skip
+** @return   The number of records written.
+*/
+uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes = nullptr);
+
+/*
+** Function: RSFOpen
+** @brief    Opens a ring-store file (.rsf/.rsfz/.rsfzl, auto-detected via
+**           the trailer magic) for sequential reading.
+** @details  Validates the trailer (magic + size sanity) before returning,
+**           so a caller never has to separately check file integrity.
+** @param    path - file path to open for reading
+** @return   A new RSFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
+*/
+RSFReader* RSFOpen(const char* path);
+
+/*
+** Function: RSFReaderOpenZMem
+** @brief    Opens a memory-backed reader over a single compressed (LZ4-framed) pool segment.
+** @param    compBuf     - buffer holding the compressed data; must remain valid until RSFClose. Not owned/freed by the reader.
+** @param    compBytes   - number of valid bytes in compBuf
+** @param    recordCount - number of UINT64_PAIR records the segment decompresses to
+** @return   A new RSFReader.
+*/
+RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_t recordCount);
+
+/*
+** Function: RSFRead
+** @brief    Reads up to maxCount records from r into pOut.
+** @param    r        - the reader to read from
+** @param    pOut     - destination buffer, at least maxCount records
+** @param    maxCount - maximum number of records to read
+** @return   Number of records actually read; 0 means EOF.
+*/
+int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount);
+
+/*
+** Function: RSFReaderTrailer
+** @brief    Returns the trailer belonging to an open reader.
+** @param    r - the reader to query
+** @return   Pointer to the trailer, valid until RSFClose(r).
+*/
+const RSFTrailer* RSFReaderTrailer(const RSFReader* r);
+
+/*
+** Function: RSFClose
+** @brief    Closes and frees a reader, and nulls the caller's pointer to it.
+** @param    ppReader - address of the reader pointer to close
+*/
+void RSFClose(RSFReader** ppReader);

@@ -1,15 +1,15 @@
 /*
-** Filename:  BlasterFile.cpp
+** Filename:  RingStoreFile.cpp
 **
 ** Purpose:
-**   Implements the Blaster on-disk board-key file format declared in
-**   BlasterFile.h: BLFWrite for one-shot batch output, and the
-**   BLFWriter/BLFReader streaming types covering all three format variants
-**   (.blf plain, .blfz delta+varint compressed, .blfzl delta+varint+LZ4).
+**   Implements the generic ring-store record file format declared in
+**   RingStoreFile.h: RSFWrite for one-shot batch output, and the
+**   RSFWriter/RSFReader streaming types covering all three format variants
+**   (.rsf plain, .rsfz delta+varint compressed, .rsfzl delta+varint+LZ4).
 */
 
 /* Includes */
-#include "BlasterFile.h"
+#include "RingStoreFile.h"
 #include "Error.h"
 #include "Logger.h"
 #include "Mem.h"
@@ -66,36 +66,36 @@ static inline size_t VarIntPut(uint64_t v, uint8_t* out)
 
 /*
 ** ============================================================
-** BLFWriter
+** RSFWriter
 ** ============================================================
 */
 
 /*
-** Type:    __BLFWriter
-** @brief   Concrete state behind the opaque BLFWriter handle. One struct
-**          covers all three writer modes (plain/.blfz/.blfzl, file- or
+** Type:    __RSFWriter
+** @brief   Concrete state behind the opaque RSFWriter handle. One struct
+**          covers all three writer modes (plain/.rsfz/.rsfzl, file- or
 **          memory-backed) via the compressed/isLZ4/memOut fields, rather
 **          than separate types per mode.
 */
-struct __BLFWriter
+struct __RSFWriter
 {
-    FILE*           f;
-    char            path[MAX_FULL_PATH_NAME];
-    uint64_t        count;
-    BOARD_KEY_DISK  firstKey;
-    BOARD_KEY_DISK  lastKey;
-    bool            hasFirst;
-    bool            compressed;
-    bool            isLZ4;                     /* true when LZ4 frame is active (file or memory mode) */
+    FILE*         f;
+    char          path[MAX_FULL_PATH_NAME];
+    uint64_t      count;
+    UINT64_PAIR   firstRec;
+    UINT64_PAIR   lastRec;
+    bool          hasFirst;
+    bool          compressed;
+    bool          isLZ4;                     /* true when LZ4 frame is active (file or memory mode) */
 
     /* compressed-only */
     uint8_t*  varBuf;
     size_t    varBufPos;
     uint64_t  compBytesTotal;
-    uint64_t  prevF0;
-    uint64_t  prevF1;
+    uint64_t  prevHi;
+    uint64_t  prevLo;
 
-    /* LZ4 layer (.blfzl) -- only when lz4Cctx != nullptr */
+    /* LZ4 layer (.rsfzl) -- only when lz4Cctx != nullptr */
     LZ4F_cctx*  lz4Cctx;
     uint8_t*    lz4OutBuf;
     size_t      lz4OutBufSize;
@@ -114,13 +114,13 @@ struct __BLFWriter
 ** @param    data - the bytes to write
 ** @param    size - number of bytes in data
 */
-static void WriteOut(BLFWriter* pw, const void* data, size_t size)
+static void WriteOut(RSFWriter* pw, const void* data, size_t size)
 {
     if (pw->memOut)
     {
         if (pw->memOutPos + size > pw->memOutMax)
             Fatal(FATAL_ALLOCATION_FAILED,
-                  "BLFWriter: memory output overflow (pos=%zu size=%zu cap=%zu)",
+                  "RSFWriter: memory output overflow (pos=%zu size=%zu cap=%zu)",
                   pw->memOutPos, size, pw->memOutMax);
         memcpy(pw->memOut + pw->memOutPos, data, size);
         pw->memOutPos += size;
@@ -128,7 +128,7 @@ static void WriteOut(BLFWriter* pw, const void* data, size_t size)
     else
     {
         if (fwrite(data, 1, size, pw->f) != size)
-            Fatal(FATAL_FILE_OPEN, "BLFWriter: write failed on '%s'", pw->path);
+            Fatal(FATAL_FILE_OPEN, "RSFWriter: write failed on '%s'", pw->path);
     }
 }
 
@@ -138,7 +138,7 @@ static void WriteOut(BLFWriter* pw, const void* data, size_t size)
 **           compressor if one is active, otherwise straight to WriteOut.
 ** @param    pw - the writer whose varint buffer should be flushed
 */
-static void FlushVarBuf(BLFWriter* pw)
+static void FlushVarBuf(RSFWriter* pw)
 {
     if (pw->varBufPos == 0) return;
 
@@ -166,67 +166,56 @@ static void FlushVarBuf(BLFWriter* pw)
 }
 
 /*
-** Function: BLFWriterOpen
-** @brief    Opens path for streaming, plain (uncompressed) .blf output.
+** Function: RSFWriterOpen
+** @brief    Opens path for streaming, plain (uncompressed) .rsf output.
 ** @param    path - file path to create (overwritten if it exists)
-** @return   A new BLFWriter. Fatals on failure (never returns nullptr).
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-BLFWriter* BLFWriterOpen(const char* path)
+RSFWriter* RSFWriterOpen(const char* path)
 {
     FILE* f = fopen(path, "wb");
     if (!f)
-        Fatal(FATAL_FILE_OPEN, "BLFWriterOpen: cannot create '%s'", path);
-    setvbuf(f, NULL, _IOFBF, BLF_WRITE_BUFFER_SIZE);
+        Fatal(FATAL_FILE_OPEN, "RSFWriterOpen: cannot create '%s'", path);
+    setvbuf(f, NULL, _IOFBF, RSF_WRITE_BUFFER_SIZE);
 
-    BLFWriter* pw = (BLFWriter*)MemMalloc("BLFWriter", sizeof(BLFWriter));
-    if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpen: cannot allocate writer"); }
-    memset(pw, 0, sizeof(BLFWriter));
+    RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriter", sizeof(RSFWriter));
+    if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpen: cannot allocate writer"); }
+    memset(pw, 0, sizeof(RSFWriter));
     pw->f = f;
     strncpy(pw->path, path, sizeof(pw->path) - 1);
     return pw;
 }
 
 /*
-** Function: BLFWriterOpenZ
+** Function: RSFWriterOpenZ
 ** @brief    Opens path for streaming, delta+varint compressed output.
-**           Adds an LZ4 frame layer on top automatically if path ends in ".blfzl".
+**           Adds an LZ4 frame layer on top automatically if path ends in ".rsfzl".
 ** @param    path - file path to create (overwritten if it exists)
-** @return   A new BLFWriter. Fatals on failure (never returns nullptr).
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-BLFWriter* BLFWriterOpenZ(const char* path)
+RSFWriter* RSFWriterOpenZ(const char* path)
 {
     FILE* f = fopen(path, "wb");
     if (!f)
-        Fatal(FATAL_FILE_OPEN, "BLFWriterOpenZ: cannot create '%s'", path);
+        Fatal(FATAL_FILE_OPEN, "RSFWriterOpenZ: cannot create '%s'", path);
+    setvbuf(f, NULL, _IOFBF, RSF_COMP_WRITE_BUFFER_SIZE);
 
-    /* Apply large CRT buffer only on network (Samba/Y:) paths to amortize SMB
-    ** round-trips. NVMe writers flush 64 KB+ chunks that pass through
-    ** efficiently without buffering. One Samba writer at a time so 64 MB is
-    ** acceptable.
-    */
-    {
-        char dl = path[0];
-        if (dl >= 'a') dl -= 32;
-        if (dl == 'Y')
-            setvbuf(f, NULL, _IOFBF, 64 * 1024 * 1024);
-    }
-
-    BLFWriter* pw = (BLFWriter*)MemMalloc("BLFWriterZ", sizeof(BLFWriter));
-    if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpenZ: cannot allocate writer"); }
-    memset(pw, 0, sizeof(BLFWriter));
+    RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriterZ", sizeof(RSFWriter));
+    if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZ: cannot allocate writer"); }
+    memset(pw, 0, sizeof(RSFWriter));
     pw->f          = f;
     pw->compressed = true;
     strncpy(pw->path, path, sizeof(pw->path) - 1);
 
-    pw->varBuf = (uint8_t*)MemMalloc("BLFWriterZBuf", BLF_COMP_WRITE_BUFFER_SIZE);
+    pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
     {
         fclose(f); MemFree(pw);
-        Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpenZ: cannot allocate write buffer");
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZ: cannot allocate write buffer");
     }
 
-    /* .blfzl: add LZ4 frame layer on top of varint */
-    if (strstr(path, ".blfzl"))
+    /* .rsfzl: add LZ4 frame layer on top of varint */
+    if (strstr(path, ".rsfzl"))
     {
         pw->isLZ4 = true;
         LZ4F_errorCode_t lz4Err = LZ4F_createCompressionContext(&pw->lz4Cctx, LZ4F_VERSION);
@@ -234,22 +223,22 @@ BLFWriter* BLFWriterOpenZ(const char* path)
         {
             fclose(f); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_ALLOCATION_FAILED,
-                  "BLFWriterOpenZ: LZ4 context create failed on '%s': %s",
+                  "RSFWriterOpenZ: LZ4 context create failed on '%s': %s",
                   path, LZ4F_getErrorName(lz4Err));
         }
 
         LZ4F_preferences_t prefs      = {};
         prefs.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
 
-        pw->lz4OutBufSize = LZ4F_compressBound(BLF_COMP_WRITE_BUFFER_SIZE, nullptr)
+        pw->lz4OutBufSize = LZ4F_compressBound(RSF_COMP_WRITE_BUFFER_SIZE, nullptr)
                           + LZ4F_HEADER_SIZE_MAX + 32;
-        pw->lz4OutBuf = (uint8_t*)MemMalloc("BLFWriterZLBuf", pw->lz4OutBufSize);
+        pw->lz4OutBuf = (uint8_t*)MemMalloc("RSFWriterZLBuf", pw->lz4OutBufSize);
         if (!pw->lz4OutBuf)
         {
             LZ4F_freeCompressionContext(pw->lz4Cctx);
             fclose(f); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_ALLOCATION_FAILED,
-                  "BLFWriterOpenZ: cannot allocate LZ4 output buffer");
+                  "RSFWriterOpenZ: cannot allocate LZ4 output buffer");
         }
 
         /* Write LZ4 frame header; enable content checksum for integrity verification */
@@ -260,7 +249,7 @@ BLFWriter* BLFWriterOpenZ(const char* path)
             LZ4F_freeCompressionContext(pw->lz4Cctx);
             fclose(f); MemFree(pw->lz4OutBuf); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_FILE_OPEN,
-                  "BLFWriterOpenZ: LZ4 frame begin failed on '%s': %s",
+                  "RSFWriterOpenZ: LZ4 frame begin failed on '%s': %s",
                   path, LZ4F_getErrorName(headerSize));
         }
         WriteOut(pw, pw->lz4OutBuf, headerSize);
@@ -271,29 +260,29 @@ BLFWriter* BLFWriterOpenZ(const char* path)
 }
 
 /*
-** Function: BLFWriterOpenZMem
+** Function: RSFWriterOpenZMem
 ** @brief    Opens a memory-backed writer producing delta+varint+LZ4
 **           compressed output directly into buf, instead of a file.
 ** @param    buf      - destination buffer for compressed output
-** @param    maxBytes - capacity of buf; BLFWriterRecord/Close fatal if exceeded
-** @return   A new BLFWriter. Fatals on failure (never returns nullptr).
+** @param    maxBytes - capacity of buf; RSFWriterRecord/Close fatal if exceeded
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-BLFWriter* BLFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
+RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
 {
-    BLFWriter* pw = (BLFWriter*)MemMalloc("BLFWriterZMem", sizeof(BLFWriter));
-    if (!pw) Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpenZMem: cannot allocate writer");
-    memset(pw, 0, sizeof(BLFWriter));
+    RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriterZMem", sizeof(RSFWriter));
+    if (!pw) Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZMem: cannot allocate writer");
+    memset(pw, 0, sizeof(RSFWriter));
     pw->compressed = true;
     pw->isLZ4      = true;
     pw->memOut     = buf;
     pw->memOutMax  = maxBytes;
     strncpy(pw->path, "(memory)", sizeof(pw->path) - 1);
 
-    pw->varBuf = (uint8_t*)MemMalloc("BLFWriterZMemVarBuf", BLF_COMP_WRITE_BUFFER_SIZE);
+    pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZMemVarBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
     {
         MemFree(pw);
-        Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpenZMem: cannot allocate varint buffer");
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZMem: cannot allocate varint buffer");
     }
 
     LZ4F_errorCode_t lz4Err = LZ4F_createCompressionContext(&pw->lz4Cctx, LZ4F_VERSION);
@@ -301,20 +290,20 @@ BLFWriter* BLFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
     {
         MemFree(pw->varBuf); MemFree(pw);
         Fatal(FATAL_ALLOCATION_FAILED,
-              "BLFWriterOpenZMem: LZ4 context create failed: %s", LZ4F_getErrorName(lz4Err));
+              "RSFWriterOpenZMem: LZ4 context create failed: %s", LZ4F_getErrorName(lz4Err));
     }
 
     LZ4F_preferences_t prefs = {};
     prefs.frameInfo.contentChecksumFlag = LZ4F_contentChecksumEnabled;
 
-    pw->lz4OutBufSize = LZ4F_compressBound(BLF_COMP_WRITE_BUFFER_SIZE, nullptr)
+    pw->lz4OutBufSize = LZ4F_compressBound(RSF_COMP_WRITE_BUFFER_SIZE, nullptr)
                       + LZ4F_HEADER_SIZE_MAX + 32;
-    pw->lz4OutBuf = (uint8_t*)MemMalloc("BLFWriterZMemLZ4Buf", pw->lz4OutBufSize);
+    pw->lz4OutBuf = (uint8_t*)MemMalloc("RSFWriterZMemLZ4Buf", pw->lz4OutBufSize);
     if (!pw->lz4OutBuf)
     {
         LZ4F_freeCompressionContext(pw->lz4Cctx);
         MemFree(pw->varBuf); MemFree(pw);
-        Fatal(FATAL_ALLOCATION_FAILED, "BLFWriterOpenZMem: cannot allocate LZ4 output buffer");
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZMem: cannot allocate LZ4 output buffer");
     }
 
     size_t headerSize = LZ4F_compressBegin(pw->lz4Cctx, pw->lz4OutBuf, pw->lz4OutBufSize, &prefs);
@@ -323,7 +312,7 @@ BLFWriter* BLFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
         LZ4F_freeCompressionContext(pw->lz4Cctx);
         MemFree(pw->lz4OutBuf); MemFree(pw->varBuf); MemFree(pw);
         Fatal(FATAL_ALLOCATION_FAILED,
-              "BLFWriterOpenZMem: LZ4 compressBegin failed: %s", LZ4F_getErrorName(headerSize));
+              "RSFWriterOpenZMem: LZ4 compressBegin failed: %s", LZ4F_getErrorName(headerSize));
     }
     WriteOut(pw, pw->lz4OutBuf, headerSize);
     pw->compBytesTotal += headerSize;
@@ -332,45 +321,45 @@ BLFWriter* BLFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
 }
 
 /*
-** Function: BLFWriterRecord
+** Function: RSFWriterRecord
 ** @brief    Appends one record to a streaming writer.
 ** @param    pw   - the writer to append to
-** @param    pKey - the record to write
+** @param    pRec - the record to write
 */
-void BLFWriterRecord(BLFWriter* pw, const BOARD_KEY_DISK* pKey)
+void RSFWriterRecord(RSFWriter* pw, const UINT64_PAIR* pRec)
 {
     if (!pw->compressed)
     {
-        if (fwrite(pKey, sizeof(BOARD_KEY_DISK), 1, pw->f) != 1)
-            Fatal(FATAL_FILE_OPEN, "BLFWriterRecord: write failed");
+        if (fwrite(pRec, sizeof(UINT64_PAIR), 1, pw->f) != 1)
+            Fatal(FATAL_FILE_OPEN, "RSFWriterRecord: write failed");
     }
     else
     {
         /* Ensure room for two max-length varints (10 bytes each) */
-        if (pw->varBufPos + 20 > BLF_COMP_WRITE_BUFFER_SIZE)
+        if (pw->varBufPos + 20 > RSF_COMP_WRITE_BUFFER_SIZE)
             FlushVarBuf(pw);
-        uint64_t df0 = ZZEnc((int64_t)pKey->ullCellsInUse - (int64_t)pw->prevF0);
-        uint64_t df1 = ZZEnc((int64_t)pKey->ullCellColors  - (int64_t)pw->prevF1);
-        pw->varBufPos += VarIntPut(df0, pw->varBuf + pw->varBufPos);
-        pw->varBufPos += VarIntPut(df1, pw->varBuf + pw->varBufPos);
-        pw->prevF0 = pKey->ullCellsInUse;
-        pw->prevF1 = pKey->ullCellColors;
+        uint64_t dHi = ZZEnc((int64_t)pRec->hi - (int64_t)pw->prevHi);
+        uint64_t dLo = ZZEnc((int64_t)pRec->lo - (int64_t)pw->prevLo);
+        pw->varBufPos += VarIntPut(dHi, pw->varBuf + pw->varBufPos);
+        pw->varBufPos += VarIntPut(dLo, pw->varBuf + pw->varBufPos);
+        pw->prevHi = pRec->hi;
+        pw->prevLo = pRec->lo;
     }
 
-    if (!pw->hasFirst) { pw->firstKey = *pKey; pw->hasFirst = true; }
-    pw->lastKey = *pKey;
+    if (!pw->hasFirst) { pw->firstRec = *pRec; pw->hasFirst = true; }
+    pw->lastRec = *pRec;
     pw->count++;
 }
 
 /*
-** Function: BLFWriterClose
+** Function: RSFWriterClose
 ** @brief    Flushes any pending output, writes the trailer, closes the
 **           writer, and frees it.
 ** @param    pw         - the writer to close (no longer valid after this call)
 ** @param    pFileBytes - out: total bytes written (compressed payload + trailer for compressed writers; buffer bytes written for memory mode), or nullptr to skip
 ** @return   The number of records written.
 */
-uint64_t BLFWriterClose(BLFWriter* pw, uint64_t* pFileBytes)
+uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes)
 {
     if (pw->compressed)
         FlushVarBuf(pw);
@@ -382,7 +371,7 @@ uint64_t BLFWriterClose(BLFWriter* pw, uint64_t* pFileBytes)
                                            pw->lz4OutBuf, pw->lz4OutBufSize, nullptr);
         if (LZ4F_isError(endSize))
             Fatal(FATAL_FILE_OPEN,
-                  "BLFWriterClose: LZ4 frame end failed on '%s': %s",
+                  "RSFWriterClose: LZ4 frame end failed on '%s': %s",
                   pw->path, LZ4F_getErrorName(endSize));
         if (endSize > 0)
         {
@@ -393,26 +382,26 @@ uint64_t BLFWriterClose(BLFWriter* pw, uint64_t* pFileBytes)
         MemFree(pw->lz4OutBuf);
     }
 
-    BlasterFileTrailer trailer = {};
+    RSFTrailer trailer = {};
     trailer.recordCount = pw->count;
     if (pw->hasFirst)
     {
-        memcpy(trailer.minKey, &pw->firstKey, sizeof(BOARD_KEY_DISK));
-        memcpy(trailer.maxKey, &pw->lastKey,  sizeof(BOARD_KEY_DISK));
+        memcpy(trailer.minKey, &pw->firstRec, sizeof(UINT64_PAIR));
+        memcpy(trailer.maxKey, &pw->lastRec,  sizeof(UINT64_PAIR));
     }
 
     uint64_t fileBytes;
     if (pw->compressed)
     {
         memcpy(trailer._reserved, &pw->compBytesTotal, sizeof(uint64_t));
-        trailer.magic = pw->isLZ4 ? BLFZL_MAGIC : BLFZ_MAGIC;
-        fileBytes     = pw->compBytesTotal + sizeof(BlasterFileTrailer);
+        trailer.magic = pw->isLZ4 ? RSFZL_MAGIC : RSFZ_MAGIC;
+        fileBytes     = pw->compBytesTotal + sizeof(RSFTrailer);
         MemFree(pw->varBuf);
     }
     else
     {
-        trailer.magic = BLF_MAGIC;
-        fileBytes     = pw->count * sizeof(BOARD_KEY_DISK) + sizeof(BlasterFileTrailer);
+        trailer.magic = RSF_MAGIC;
+        fileBytes     = pw->count * sizeof(UINT64_PAIR) + sizeof(RSFTrailer);
     }
 
     WriteOut(pw, &trailer, sizeof(trailer));
@@ -426,43 +415,43 @@ uint64_t BLFWriterClose(BLFWriter* pw, uint64_t* pFileBytes)
 
 /*
 ** ============================================================
-** BLFWrite (batch, always uncompressed)
+** RSFWrite (batch, always uncompressed)
 ** ============================================================
 */
 
 /*
-** Function: BLFWrite
-** @brief    Writes count already-sorted-and-deduped BOARD_KEY_DISK records
-**           to path as a plain (uncompressed) .blf file, followed by the trailer.
-** @param    path  - file path to create (overwritten if it exists)
-** @param    pKeys - sorted, deduped array of records to write
-** @param    count - number of records in pKeys
+** Function: RSFWrite
+** @brief    Writes count already-sorted-and-deduped UINT64_PAIR records
+**           to path as a plain (uncompressed) .rsf file, followed by the trailer.
+** @param    path     - file path to create (overwritten if it exists)
+** @param    pRecords - sorted, deduped array of records to write
+** @param    count    - number of records in pRecords
 */
-void BLFWrite(const char* path, const BOARD_KEY_DISK* pKeys, uint64_t count)
+void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count)
 {
     FILE* f = fopen(path, "wb");
     if (!f)
-        Fatal(FATAL_FILE_OPEN, "BLFWrite: cannot create '%s'", path);
+        Fatal(FATAL_FILE_OPEN, "RSFWrite: cannot create '%s'", path);
 
-    if (count > 0 && fwrite(pKeys, sizeof(BOARD_KEY_DISK), (size_t)count, f) != (size_t)count)
+    if (count > 0 && fwrite(pRecords, sizeof(UINT64_PAIR), (size_t)count, f) != (size_t)count)
     {
         fclose(f);
-        Fatal(FATAL_FILE_OPEN, "BLFWrite: record write failed for '%s'", path);
+        Fatal(FATAL_FILE_OPEN, "RSFWrite: record write failed for '%s'", path);
     }
 
-    BlasterFileTrailer trailer = {};
+    RSFTrailer trailer = {};
     trailer.recordCount = count;
     if (count > 0)
     {
-        memcpy(trailer.minKey, &pKeys[0],         sizeof(BOARD_KEY_DISK));
-        memcpy(trailer.maxKey, &pKeys[count - 1], sizeof(BOARD_KEY_DISK));
+        memcpy(trailer.minKey, &pRecords[0],         sizeof(UINT64_PAIR));
+        memcpy(trailer.maxKey, &pRecords[count - 1], sizeof(UINT64_PAIR));
     }
-    trailer.magic = BLF_MAGIC;
+    trailer.magic = RSF_MAGIC;
 
     if (fwrite(&trailer, sizeof(trailer), 1, f) != 1)
     {
         fclose(f);
-        Fatal(FATAL_FILE_OPEN, "BLFWrite: trailer write failed for '%s'", path);
+        Fatal(FATAL_FILE_OPEN, "RSFWrite: trailer write failed for '%s'", path);
     }
 
     fclose(f);
@@ -470,35 +459,35 @@ void BLFWrite(const char* path, const BOARD_KEY_DISK* pKeys, uint64_t count)
 
 /*
 ** ============================================================
-** BLFReader (handles .blf, .blfz, and .blfzl via magic dispatch)
+** RSFReader (handles .rsf, .rsfz, and .rsfzl via magic dispatch)
 ** ============================================================
 */
 
 /*
-** Type:    __BLFReader
-** @brief   Concrete state behind the opaque BLFReader handle. One struct
-**          covers all three formats (plain/.blfz/.blfzl, file- or
+** Type:    __RSFReader
+** @brief   Concrete state behind the opaque RSFReader handle. One struct
+**          covers all three formats (plain/.rsfz/.rsfzl, file- or
 **          memory-backed) via the compressed/lz4Dctx/memMode fields.
 */
-struct __BLFReader
+struct __RSFReader
 {
-    FILE*               f;
-    BlasterFileTrailer  trailer;
-    uint64_t            recordsRead;
-    bool                compressed;
-    bool                memMode;      /* true if compBuf is caller-owned; do not fread or free it */
+    FILE*       f;
+    RSFTrailer  trailer;
+    uint64_t    recordsRead;
+    bool        compressed;
+    bool        memMode;      /* true if compBuf is caller-owned; do not fread or free it */
 
-    /* compressed-only (.blfz and .blfzl) */
+    /* compressed-only (.rsfz and .rsfzl) */
     uint8_t*  compBuf;
     size_t    compBufSize;
     size_t    compBufPos;
     size_t    compBufFilled;
     uint64_t  compBytesTotal;
     uint64_t  compBytesConsumed;
-    uint64_t  prevF0;
-    uint64_t  prevF1;
+    uint64_t  prevHi;
+    uint64_t  prevLo;
 
-    /* LZ4 decompression layer (.blfzl only) -- nullptr for .blfz */
+    /* LZ4 decompression layer (.rsfzl only) -- nullptr for .rsfz */
     LZ4F_dctx*  lz4Dctx;
     uint8_t*    lz4DecBuf;        /* decompressed varint bytes             */
     size_t      lz4DecBufSize;
@@ -508,13 +497,13 @@ struct __BLFReader
 };
 
 /*
-** Function: BLFZReadByte
+** Function: RSFZReadByte
 ** @brief    Returns the next decoded varint-stream byte from a reader,
 **           transparently refilling from disk/LZ4 as needed.
 ** @param    r - the reader to read from
 ** @return   The next byte of the (decompressed, if applicable) varint stream.
 */
-static uint8_t BLFZReadByte(BLFReader* r)
+static uint8_t RSFZReadByte(RSFReader* r)
 {
     if (r->lz4Dctx)
     {
@@ -524,9 +513,7 @@ static uint8_t BLFZReadByte(BLFReader* r)
         while (r->lz4DecBufPos >= r->lz4DecBufFilled)
         {
             if (r->lz4FrameDone)
-                Fatal(FATAL_FILE_OPEN,
-                      "BLFZReadByte: read past end of LZ4 frame in '%s'",
-                      r->trailer.magic == BLFZL_MAGIC ? "(blfzl)" : "?");
+                Fatal(FATAL_FILE_OPEN, "RSFZReadByte: read past end of LZ4 frame");
 
             /* Refill compBuf from disk if empty */
             if (r->compBufPos >= r->compBufFilled)
@@ -534,13 +521,13 @@ static uint8_t BLFZReadByte(BLFReader* r)
                 uint64_t remaining = r->compBytesTotal - r->compBytesConsumed;
                 if (remaining == 0 || r->memMode)
                     Fatal(FATAL_FILE_OPEN,
-                          "BLFZReadByte: LZ4 compressed stream exhausted before frame end");
+                          "RSFZReadByte: LZ4 compressed stream exhausted before frame end");
                 size_t toRead = (remaining < (uint64_t)r->compBufSize)
                                 ? (size_t)remaining : r->compBufSize;
                 r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
                 r->compBufPos    = 0;
                 if (r->compBufFilled == 0)
-                    Fatal(FATAL_FILE_OPEN, "BLFZReadByte: LZ4 read failed");
+                    Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed");
             }
 
             size_t srcSize = r->compBufFilled - r->compBufPos;
@@ -551,7 +538,7 @@ static uint8_t BLFZReadByte(BLFReader* r)
                                           nullptr);
             if (LZ4F_isError(ret))
                 Fatal(FATAL_FILE_OPEN,
-                      "BLFZReadByte: LZ4 decompress error: %s",
+                      "RSFZReadByte: LZ4 decompress error: %s",
                       LZ4F_getErrorName(ret));
             r->compBufPos        += srcSize;
             r->compBytesConsumed += srcSize;
@@ -566,34 +553,34 @@ static uint8_t BLFZReadByte(BLFReader* r)
         return r->lz4DecBuf[r->lz4DecBufPos++];
     }
 
-    /* Original varint-only path (.blfz) */
+    /* Original varint-only path (.rsfz) */
     if (r->compBufPos >= r->compBufFilled)
     {
         uint64_t remaining = r->compBytesTotal - r->compBytesConsumed;
         if (remaining == 0 || r->memMode)
-            Fatal(FATAL_FILE_OPEN, "BLFZReadByte: varint stream exhausted before record count reached");
+            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint stream exhausted before record count reached");
         size_t toRead = (remaining < (uint64_t)r->compBufSize) ? (size_t)remaining : r->compBufSize;
         r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
         r->compBufPos    = 0;
         if (r->compBufFilled == 0)
-            Fatal(FATAL_FILE_OPEN, "BLFZReadByte: varint read failed (short read on compressed stream)");
+            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint read failed (short read on compressed stream)");
     }
     r->compBytesConsumed++;
     return r->compBuf[r->compBufPos++];
 }
 
 /*
-** Function: BLFZReadVarInt
+** Function: RSFZReadVarInt
 ** @brief    Reads one LEB128-style variable-length integer from a reader.
 ** @param    r - the reader to read from
 ** @return   The decoded value.
 */
-static uint64_t BLFZReadVarInt(BLFReader* r)
+static uint64_t RSFZReadVarInt(RSFReader* r)
 {
     uint64_t v  = 0;
     int      sh = 0;
     for (;;) {
-        uint8_t b = BLFZReadByte(r);
+        uint8_t b = RSFZReadByte(r);
         v |= (uint64_t)(b & 0x7F) << sh;
         sh += 7;
         if (!(b & 0x80)) break;
@@ -602,46 +589,46 @@ static uint64_t BLFZReadVarInt(BLFReader* r)
 }
 
 /*
-** Function: BLFOpen
-** @brief    Opens a Blaster file (.blf/.blfz/.blfzl, auto-detected via the
-**           trailer magic) for sequential reading.
+** Function: RSFOpen
+** @brief    Opens a ring-store file (.rsf/.rsfz/.rsfzl, auto-detected via
+**           the trailer magic) for sequential reading.
 ** @details  Validates the trailer (magic + size sanity) before returning,
 **           so a caller never has to separately check file integrity.
 ** @param    path - file path to open for reading
-** @return   A new BLFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
+** @return   A new RSFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
 */
-BLFReader* BLFOpen(const char* path)
+RSFReader* RSFOpen(const char* path)
 {
     FILE* f = fopen(path, "rb");
     if (!f) return nullptr;
 
-    if (_fseeki64(f, -(int64_t)sizeof(BlasterFileTrailer), SEEK_END) != 0)
+    if (_fseeki64(f, -(int64_t)sizeof(RSFTrailer), SEEK_END) != 0)
     {
         fclose(f);
-        LoggerLog("BLFOpen: cannot seek to trailer in '%s'\n", path);
+        LoggerLog("RSFOpen: cannot seek to trailer in '%s'\n", path);
         return nullptr;
     }
 
-    BlasterFileTrailer trailer = {};
+    RSFTrailer trailer = {};
     if (fread(&trailer, sizeof(trailer), 1, f) != 1)
     {
         fclose(f);
-        LoggerLog("BLFOpen: cannot read trailer in '%s'\n", path);
+        LoggerLog("RSFOpen: cannot read trailer in '%s'\n", path);
         return nullptr;
     }
 
     bool compressed = false;
     bool lz4        = false;
-    if (trailer.magic == BLF_MAGIC)
+    if (trailer.magic == RSF_MAGIC)
         compressed = false;
-    else if (trailer.magic == BLFZ_MAGIC)
+    else if (trailer.magic == RSFZ_MAGIC)
         compressed = true;
-    else if (trailer.magic == BLFZL_MAGIC)
+    else if (trailer.magic == RSFZL_MAGIC)
         { compressed = true; lz4 = true; }
     else
     {
         fclose(f);
-        LoggerLog("BLFOpen: bad magic in '%s' (corrupt or incomplete)\n", path);
+        LoggerLog("RSFOpen: bad magic in '%s' (corrupt or incomplete)\n", path);
         return nullptr;
     }
 
@@ -650,12 +637,12 @@ BLFReader* BLFOpen(const char* path)
 
     if (!compressed)
     {
-        int64_t expectedSize = (int64_t)trailer.recordCount * (int64_t)sizeof(BOARD_KEY_DISK)
-                             + (int64_t)sizeof(BlasterFileTrailer);
+        int64_t expectedSize = (int64_t)trailer.recordCount * (int64_t)sizeof(UINT64_PAIR)
+                             + (int64_t)sizeof(RSFTrailer);
         if (actualSize != expectedSize)
         {
             fclose(f);
-            LoggerLog("BLFOpen: size mismatch in '%s' (expected %lld, got %lld)\n",
+            LoggerLog("RSFOpen: size mismatch in '%s' (expected %lld, got %lld)\n",
                       path, expectedSize, actualSize);
             return nullptr;
         }
@@ -664,11 +651,11 @@ BLFReader* BLFOpen(const char* path)
     {
         uint64_t compressedBytes = 0;
         memcpy(&compressedBytes, trailer._reserved, sizeof(uint64_t));
-        int64_t expectedSize = (int64_t)compressedBytes + (int64_t)sizeof(BlasterFileTrailer);
+        int64_t expectedSize = (int64_t)compressedBytes + (int64_t)sizeof(RSFTrailer);
         if (actualSize != expectedSize)
         {
             fclose(f);
-            LoggerLog("BLFOpen: compressed size mismatch in '%s' (expected %lld, got %lld)\n",
+            LoggerLog("RSFOpen: compressed size mismatch in '%s' (expected %lld, got %lld)\n",
                       path, expectedSize, actualSize);
             return nullptr;
         }
@@ -680,32 +667,32 @@ BLFReader* BLFOpen(const char* path)
         return nullptr;
     }
 
-    BLFReader* r = (BLFReader*)MemMalloc("BLFReader", sizeof(BLFReader));
+    RSFReader* r = (RSFReader*)MemMalloc("RSFReader", sizeof(RSFReader));
     if (!r)
     {
         fclose(f);
-        Fatal(FATAL_ALLOCATION_FAILED, "BLFOpen: cannot allocate reader");
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFOpen: cannot allocate reader");
         return nullptr;
     }
-    memset(r, 0, sizeof(BLFReader));
+    memset(r, 0, sizeof(RSFReader));
     r->f          = f;
     r->trailer    = trailer;
     r->compressed = compressed;
 
     if (!compressed)
-        setvbuf(f, NULL, _IOFBF, BLF_COMP_READ_BUFFER_SIZE);
+        setvbuf(f, NULL, _IOFBF, RSF_COMP_READ_BUFFER_SIZE);
 
     if (compressed)
     {
         uint64_t compressedBytes = 0;
         memcpy(&compressedBytes, trailer._reserved, sizeof(uint64_t));
-        r->compBuf        = (uint8_t*)MemMalloc("BLFReaderZBuf", BLF_COMP_READ_BUFFER_SIZE);
-        r->compBufSize    = BLF_COMP_READ_BUFFER_SIZE;
+        r->compBuf        = (uint8_t*)MemMalloc("RSFReaderZBuf", RSF_COMP_READ_BUFFER_SIZE);
+        r->compBufSize    = RSF_COMP_READ_BUFFER_SIZE;
         r->compBytesTotal = compressedBytes;
         if (!r->compBuf)
         {
             fclose(f); MemFree(r);
-            Fatal(FATAL_ALLOCATION_FAILED, "BLFOpen: cannot allocate read buffer");
+            Fatal(FATAL_ALLOCATION_FAILED, "RSFOpen: cannot allocate read buffer");
             return nullptr;
         }
 
@@ -717,18 +704,18 @@ BLFReader* BLFOpen(const char* path)
             {
                 fclose(f); MemFree(r->compBuf); MemFree(r);
                 Fatal(FATAL_ALLOCATION_FAILED,
-                      "BLFOpen: LZ4 decomp context failed: %s",
+                      "RSFOpen: LZ4 decomp context failed: %s",
                       LZ4F_getErrorName(lz4Err));
                 return nullptr;
             }
-            r->lz4DecBufSize = BLF_COMP_READ_BUFFER_SIZE;
-            r->lz4DecBuf = (uint8_t*)MemMalloc("BLFReaderZLBuf", r->lz4DecBufSize);
+            r->lz4DecBufSize = RSF_COMP_READ_BUFFER_SIZE;
+            r->lz4DecBuf = (uint8_t*)MemMalloc("RSFReaderZLBuf", r->lz4DecBufSize);
             if (!r->lz4DecBuf)
             {
                 LZ4F_freeDecompressionContext(r->lz4Dctx);
                 fclose(f); MemFree(r->compBuf); MemFree(r);
                 Fatal(FATAL_ALLOCATION_FAILED,
-                      "BLFOpen: cannot allocate LZ4 decomp buffer");
+                      "RSFOpen: cannot allocate LZ4 decomp buffer");
                 return nullptr;
             }
         }
@@ -738,23 +725,23 @@ BLFReader* BLFOpen(const char* path)
 }
 
 /*
-** Function: BLFReaderOpenZMem
+** Function: RSFReaderOpenZMem
 ** @brief    Opens a memory-backed reader over a single compressed (LZ4-framed) pool segment.
-** @param    compBuf    - buffer holding the compressed data; must remain valid until BLFClose. Not owned/freed by the reader.
-** @param    compBytes  - number of valid bytes in compBuf
-** @param    boardCount - number of BOARD_KEY_DISK records the segment decompresses to
-** @return   A new BLFReader.
+** @param    compBuf     - buffer holding the compressed data; must remain valid until RSFClose. Not owned/freed by the reader.
+** @param    compBytes   - number of valid bytes in compBuf
+** @param    recordCount - number of UINT64_PAIR records the segment decompresses to
+** @return   A new RSFReader.
 */
-BLFReader* BLFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_t boardCount)
+RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_t recordCount)
 {
-    BLFReader* r = (BLFReader*)MemMalloc("BLFReaderMem", sizeof(BLFReader));
-    if (!r) Fatal(FATAL_ALLOCATION_FAILED, "BLFReaderOpenZMem: cannot allocate reader");
-    memset(r, 0, sizeof(BLFReader));
+    RSFReader* r = (RSFReader*)MemMalloc("RSFReaderMem", sizeof(RSFReader));
+    if (!r) Fatal(FATAL_ALLOCATION_FAILED, "RSFReaderOpenZMem: cannot allocate reader");
+    memset(r, 0, sizeof(RSFReader));
 
     r->compressed          = true;
     r->memMode             = true;
-    r->trailer.recordCount = boardCount;
-    r->trailer.magic       = BLFZL_MAGIC;
+    r->trailer.recordCount = recordCount;
+    r->trailer.magic       = RSFZL_MAGIC;
     memcpy(r->trailer._reserved, &compBytes, sizeof(uint64_t));
 
     /* Point directly at caller's buffer -- no copy, no ownership */
@@ -770,30 +757,30 @@ BLFReader* BLFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_
     {
         MemFree(r);
         Fatal(FATAL_ALLOCATION_FAILED,
-              "BLFReaderOpenZMem: LZ4 decomp context failed: %s", LZ4F_getErrorName(lz4Err));
+              "RSFReaderOpenZMem: LZ4 decomp context failed: %s", LZ4F_getErrorName(lz4Err));
     }
 
-    r->lz4DecBufSize = BLF_COMP_READ_BUFFER_SIZE;
-    r->lz4DecBuf = (uint8_t*)MemMalloc("BLFReaderMemDecBuf", r->lz4DecBufSize);
+    r->lz4DecBufSize = RSF_COMP_READ_BUFFER_SIZE;
+    r->lz4DecBuf = (uint8_t*)MemMalloc("RSFReaderMemDecBuf", r->lz4DecBufSize);
     if (!r->lz4DecBuf)
     {
         LZ4F_freeDecompressionContext(r->lz4Dctx);
         MemFree(r);
-        Fatal(FATAL_ALLOCATION_FAILED, "BLFReaderOpenZMem: cannot allocate decomp buffer");
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFReaderOpenZMem: cannot allocate decomp buffer");
     }
 
     return r;
 }
 
 /*
-** Function: BLFRead
+** Function: RSFRead
 ** @brief    Reads up to maxCount records from r into pOut.
 ** @param    r        - the reader to read from
 ** @param    pOut     - destination buffer, at least maxCount records
 ** @param    maxCount - maximum number of records to read
 ** @return   Number of records actually read; 0 means EOF.
 */
-int BLFRead(BLFReader* r, BOARD_KEY_DISK* pOut, int maxCount)
+int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount)
 {
     uint64_t remaining = r->trailer.recordCount - r->recordsRead;
     if (remaining == 0 || maxCount <= 0) return 0;
@@ -801,7 +788,7 @@ int BLFRead(BLFReader* r, BOARD_KEY_DISK* pOut, int maxCount)
 
     if (!r->compressed)
     {
-        int got = (int)fread(pOut, sizeof(BOARD_KEY_DISK), (size_t)want, r->f);
+        int got = (int)fread(pOut, sizeof(UINT64_PAIR), (size_t)want, r->f);
         r->recordsRead += (uint64_t)got;
         return got;
     }
@@ -809,12 +796,12 @@ int BLFRead(BLFReader* r, BOARD_KEY_DISK* pOut, int maxCount)
     int got = 0;
     while (got < want)
     {
-        uint64_t df0 = BLFZReadVarInt(r);
-        uint64_t df1 = BLFZReadVarInt(r);
-        r->prevF0 = (uint64_t)((int64_t)r->prevF0 + ZZDec(df0));
-        r->prevF1 = (uint64_t)((int64_t)r->prevF1 + ZZDec(df1));
-        pOut[got].ullCellsInUse = r->prevF0;
-        pOut[got].ullCellColors = r->prevF1;
+        uint64_t dHi = RSFZReadVarInt(r);
+        uint64_t dLo = RSFZReadVarInt(r);
+        r->prevHi = (uint64_t)((int64_t)r->prevHi + ZZDec(dHi));
+        r->prevLo = (uint64_t)((int64_t)r->prevLo + ZZDec(dLo));
+        pOut[got].hi = r->prevHi;
+        pOut[got].lo = r->prevLo;
         got++;
         r->recordsRead++;
     }
@@ -822,25 +809,25 @@ int BLFRead(BLFReader* r, BOARD_KEY_DISK* pOut, int maxCount)
 }
 
 /*
-** Function: BLFTrailer
+** Function: RSFReaderTrailer
 ** @brief    Returns the trailer belonging to an open reader.
 ** @param    r - the reader to query
-** @return   Pointer to the trailer, valid until BLFClose(r).
+** @return   Pointer to the trailer, valid until RSFClose(r).
 */
-const BlasterFileTrailer* BLFTrailer(const BLFReader* r)
+const RSFTrailer* RSFReaderTrailer(const RSFReader* r)
 {
     return &r->trailer;
 }
 
 /*
-** Function: BLFClose
+** Function: RSFClose
 ** @brief    Closes and frees a reader, and nulls the caller's pointer to it.
 ** @param    ppReader - address of the reader pointer to close
 */
-void BLFClose(BLFReader** ppReader)
+void RSFClose(RSFReader** ppReader)
 {
     if (!ppReader || !*ppReader) return;
-    BLFReader* r = *ppReader;
+    RSFReader* r = *ppReader;
     if (r->f) fclose(r->f);
     if (r->lz4Dctx)    LZ4F_freeDecompressionContext(r->lz4Dctx);
     if (r->lz4DecBuf)  MemFree(r->lz4DecBuf);
