@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.4.1] - 2026-07-07
+
+### Fix two path bugs from v0.4.0's build wiring (caught by first build attempt)
+
+- `RingConversion.h` included `OthelloBasicsForCUDA.h` with angle brackets;
+  angle-bracket includes don't check the including file's own directory
+  (only explicit `-I` paths), and that directory wasn't separately listed
+  -- changed to a quoted include, matching the rest of the codebase's
+  same-directory-sibling convention.
+- `OthelloRingMaster.vcxproj`'s `OthelloBasicsForCUDA` `ProjectReference`
+  wrongly had a `..\` prefix copied from a sub-folder project's reference
+  pattern. `OthelloRingMaster.vcxproj` lives at the solution root already,
+  so the correct relative path has no `..\`.
+
 ## [0.4.0] - 2026-07-07
 
 ### Add GPU ring<->row-major boundary conversion (RingConversion)

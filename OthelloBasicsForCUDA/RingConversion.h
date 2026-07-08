@@ -34,7 +34,7 @@
 #pragma once
 
 /* Includes */
-#include <OthelloBasicsForCUDA.h>
+#include "OthelloBasicsForCUDA.h"
 
 /* Functions */
 

@@ -145,7 +145,7 @@
     <ClCompile Include="OthelloRingMaster.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
+    <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
       <Project>{375f3354-bf89-48cd-8405-d660fa4a3983}</Project>
     </ProjectReference>
   </ItemGroup>
