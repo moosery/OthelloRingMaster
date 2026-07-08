@@ -20,12 +20,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloBasics.h" />
+    <ClInclude Include="RingNestedIndex.h" />
     <ClInclude Include="RingPermutation.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="BoardKeyAllocate.cpp" />
     <ClCompile Include="BoardKeyCompare.cpp" />
     <ClCompile Include="BoardKeyPrint.cpp" />
+    <ClCompile Include="RingNestedIndex.cpp" />
     <ClCompile Include="RingPermutation.cpp" />
   </ItemGroup>
   <ItemGroup>

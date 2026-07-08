@@ -1,0 +1,211 @@
+/*
+** Filename:  RingNestedIndex.h
+**
+** Purpose:
+**   Declares the ring-split nested-index format (CellsInUse -> Ring_1 ->
+**   Ring_2 -> Ring_3_4) promoted out of OthelloRingSplitAnalyzer.cpp's
+**   original analysis-only Aggregator: RingNestedIndexBuilder consumes a
+**   sorted, deduped stream of ring-ordered BOARD_KEYs and writes the four
+**   nested files; RingNestedIndexReader does the reverse, expanding the
+**   four files back into the original sorted stream of BOARD_KEYs.
+**
+**   This is CPU-organizing work, not solving -- pure counting/comparison/
+**   offset bookkeeping over already-ring-ordered numeric keys, per the
+**   CPU-organizes/GPU-solves boundary. It never touches row-major bit
+**   structure.
+**
+** Notes:
+**   The four files are always split as 28/20/16 bits (CellsInUse carries
+**   the full 64-bit occupancy pattern separately; Ring_1/Ring_2/Ring_3_4
+**   partition the 64-bit color pattern with no gaps or overlaps) --
+**   validated on real production data, see project_ring_split_validated_
+**   findings memory. Ring_3_4 groups are always exactly 1 member (pattern +
+**   Ring_1 + Ring_2 + Ring_3_4 together reconstruct one board exactly, and
+**   the source store has no duplicates), which is why Ring34Rec carries no
+**   count field.
+*/
+
+#pragma once
+
+/* Includes */
+#include "OthelloBasics.h"
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+/* Constants */
+
+/* The 64-bit color pattern is partitioned with no gaps/overlaps: bits
+** [RING1_SHIFT..63] are Ring_1's subpattern, [RING2_SHIFT..RING1_SHIFT-1]
+** are Ring_2's, [0..RING2_SHIFT-1] are Ring_3_4's.
+*/
+constexpr int RING_TOTAL_BITS = 64;
+constexpr int RING1_BITS      = 28;
+constexpr int RING2_BITS      = 20;
+constexpr int RING34_BITS     = 16;
+constexpr int RING1_SHIFT     = RING_TOTAL_BITS - RING1_BITS;                 /* 36 */
+constexpr int RING2_SHIFT     = RING_TOTAL_BITS - RING1_BITS - RING2_BITS;    /* 16 */
+constexpr int RING34_SHIFT    = 0;
+
+/* Structures and Types */
+
+/*
+** Type:    CellsInUseRec
+** @brief   One entry per distinct ring-gathered occupancy pattern: the
+**          pattern itself, plus the offset into the Ring_1 array where
+**          this pattern's first Ring_1 record starts. No count field --
+**          the span is implied by the next entry's offset (or the end of
+**          the Ring_1 array, for the last entry).
+*/
+#pragma pack(push, 1)
+struct CellsInUseRec
+{
+    uint64_t pattern;   /* ring-gathered occupancy (BOARD_KEY::ullCellsInUse in ring order) */
+    uint64_t offset;    /* index into the Ring_1 array where this pattern's records start    */
+};
+
+/*
+** Type:    RingLevelRec
+** @brief   Shared record shape for both Ring_1 and Ring_2: a count of
+**          member records in the next level down, this level's color
+**          subpattern, and the offset into the next level down where this
+**          group's records start.
+*/
+struct RingLevelRec
+{
+    uint64_t count;     /* number of records in the next level down belonging to this group */
+    uint32_t pattern;   /* low RING1_BITS or RING2_BITS meaningful, rest always 0            */
+    uint64_t offset;    /* index into the next level down where this group's records start  */
+};
+
+/*
+** Type:    Ring34Rec
+** @brief   One entry per board: the combined mid+inner-ring color
+**          subpattern. No count field -- every group has exactly 1 member
+**          (see file Notes), so storing a count would be pure dead weight.
+*/
+struct Ring34Rec
+{
+    uint16_t pattern;   /* low RING34_BITS meaningful (mid+inner ring combined) */
+};
+#pragma pack(pop)
+static_assert(sizeof(CellsInUseRec) == 16, "CellsInUseRec must be 16 bytes");
+static_assert(sizeof(RingLevelRec)  == 20, "RingLevelRec must be 20 bytes");
+static_assert(sizeof(Ring34Rec)     ==  2, "Ring34Rec must be 2 bytes");
+
+/*
+** Type:    RingNestedIndexStats
+** @brief   Record counts at each level, plus a sanity counter for the
+**          "every Ring_3_4 group has exactly 1 member" invariant -- a
+**          violation shows up here instead of silently losing data.
+*/
+struct RingNestedIndexStats
+{
+    uint64_t cellsInUseRecords          = 0;
+    uint64_t ring1Records                = 0;
+    uint64_t ring2Records                = 0;
+    uint64_t ring34Records               = 0;
+    uint64_t ring34GroupsWithCountNot1   = 0;
+    uint64_t totalBoards                 = 0;
+};
+
+/*
+** Type:    RingNestedIndexBuilder
+** @brief   Consumes a sorted, deduped stream of ring-ordered BOARD_KEYs
+**          (via repeated Process() calls) and writes the four nested
+**          index files. Call Finish() once after the last Process() call
+**          to flush any still-open groups.
+*/
+struct RingNestedIndexBuilder
+{
+    FILE* fpCellsInUse = nullptr;
+    FILE* fpRing1       = nullptr;
+    FILE* fpRing2       = nullptr;
+    FILE* fpRing34      = nullptr;
+
+    bool      havePattern           = false;
+    uint64_t  curPattern             = 0;
+
+    bool      haveRing1Group         = false;
+    uint32_t  curRing1Pattern        = 0;
+    uint64_t  ring1GroupRing2Start   = 0;
+
+    bool      haveRing2Group         = false;
+    uint32_t  curRing2Pattern        = 0;
+    uint64_t  ring2GroupRing34Start  = 0;
+
+    bool      haveRing34Group        = false;
+    uint16_t  curRing34Pattern       = 0;
+    uint64_t  ring34GroupCount       = 0;
+
+    RingNestedIndexStats stats;
+
+    /*
+    ** Method: Init
+    ** @brief  Attaches the four already-open output files this builder writes to.
+    ** @param  fpCellsInUseIn - CellsInUse output file
+    ** @param  fpRing1In      - Ring_1 output file
+    ** @param  fpRing2In      - Ring_2 output file
+    ** @param  fpRing34In     - Ring_3_4 output file
+    */
+    void Init(FILE* fpCellsInUseIn, FILE* fpRing1In, FILE* fpRing2In, FILE* fpRing34In);
+
+    /*
+    ** Method: Process
+    ** @brief  Feeds one ring-ordered BOARD_KEY into the builder. Keys must
+    **         arrive already sorted (ullCellsInUse then ullCellColors) and
+    **         deduped -- the same order BLFOpen/BLFRead's stream is already in.
+    ** @param  key - the next ring-ordered BOARD_KEY in sorted order
+    */
+    void Process(const BOARD_KEY& key);
+
+    /*
+    ** Method: Finish
+    ** @brief  Flushes any still-open groups. Call once after the last Process().
+    */
+    void Finish();
+
+private:
+    void CloseRing34Group();
+    void CloseRing2Group();
+    void CloseRing1Group();
+};
+
+/*
+** Type:    RingNestedIndexReader
+** @brief   Loads the four nested index files into memory and expands them
+**          back into the original sorted stream of ring-ordered BOARD_KEYs.
+*/
+struct RingNestedIndexReader
+{
+    std::vector<CellsInUseRec>  cellsInUse;
+    std::vector<RingLevelRec>   ring1;
+    std::vector<RingLevelRec>   ring2;
+    std::vector<Ring34Rec>      ring34;
+
+    /*
+    ** Method: Load
+    ** @brief  Reads all four nested index files fully into memory.
+    ** @param  cellsInUsePath - path to the CellsInUse file
+    ** @param  ring1Path      - path to the Ring_1 file
+    ** @param  ring2Path      - path to the Ring_2 file
+    ** @param  ring34Path     - path to the Ring_3_4 file
+    ** @return true if all four files were read successfully.
+    */
+    bool Load(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path, const char* ring34Path);
+
+    /*
+    ** Method: GetBoardCount
+    ** @brief  Returns the total number of boards represented by the loaded index.
+    ** @return ring34.size() (one entry per board -- see file Notes).
+    */
+    uint64_t GetBoardCount() const;
+
+    /*
+    ** Method: ExpandAll
+    ** @brief  Walks the nested index and calls onBoard once per board, in
+    **         the same sorted order the index was built from.
+    ** @param  onBoard - called once per board with the reconstructed ring-ordered BOARD_KEY
+    */
+    void ExpandAll(const std::function<void(const BOARD_KEY& key)>& onBoard) const;
+};

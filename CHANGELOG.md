@@ -4,6 +4,32 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.5.0] - 2026-07-07
+
+### Add RingNestedIndex: reusable CellsInUse -> Ring_1 -> Ring_2 -> Ring_3_4 builder/reader
+
+- Added `OthelloBasics/RingNestedIndex.h`/`.cpp`, promoting
+  `OthelloRingSplitAnalyzer.cpp`'s analysis-only `Aggregator` into a
+  reusable module: `RingNestedIndexBuilder` consumes a sorted, deduped
+  stream of ring-ordered `BOARD_KEY`s (via `Process()`) and writes the four
+  nested index files with the same validated cascading close/reopen logic
+  the analyzer proved out against real production data (28/20/16-bit
+  split, `Ring_3_4` groups always exactly 1 member).
+- Added `RingNestedIndexReader`, which didn't exist anywhere before: loads
+  the four files back into memory and `ExpandAll()`s them into the
+  original sorted stream of `BOARD_KEY`s via sequential offset-following
+  (`CellsInUse` span via next-entry lookahead, `Ring_1`/`Ring_2` spans via
+  each level's own stored `count`) -- the reverse direction the analyzer
+  never needed since it only ever built the index, never read it back.
+- Dropped the analyzer's dual raw+compressed `CellsInUse` writing
+  (`BLFWriterOpenZ`) -- this module only writes raw records; compression
+  is already a solved, separate concern (the MW pool's delta+varint+LZ4
+  mechanism).
+- This is pure CPU-organizing work (counting/comparison/offset bookkeeping
+  over already-ring-ordered numeric keys) -- it never touches row-major
+  bit structure, per the CPU-organizes/GPU-solves boundary.
+- No behavior change to the existing analyzer or GPU boundary conversion.
+
 ## [0.4.1] - 2026-07-07
 
 ### Fix two path bugs from v0.4.0's build wiring (caught by first build attempt)
