@@ -39,6 +39,9 @@
     <ClCompile Include="NonTerminalLevelStep.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="BackwardWalkDriver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="RetrogradeKernels.cu">
@@ -77,6 +80,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RetrogradeKernels.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="BackwardWalkDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

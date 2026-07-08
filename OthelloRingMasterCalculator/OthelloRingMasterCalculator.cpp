@@ -4,12 +4,11 @@
 ** Purpose:
 **   Entry point for OthelloRingMasterCalculator: parses CLI args, opens
 **   the logger, finds the deepest completed level in RingMaster's
-**   finished store, and runs the Phase 2 terminal-level bootstrap against
-**   it (see project_retrograde_calculator_implementation_plan memory for
-**   the full phase breakdown this is the second slice of). Phases 3+
-**   (the real non-terminal backward walk, status/monitoring, validation)
-**   are not implemented yet -- this only ever processes the one deepest
-**   level, once, and exits.
+**   finished store, and runs the full Phase 4 backward walk (deepest
+**   level down to 0, sentinel-based resumability) against it -- see
+**   project_retrograde_calculator_implementation_plan memory for the
+**   phase breakdown this completes through Phase 4. Phase 5+
+**   (status/monitoring, 4x4 validation, real 6x6 run) are not implemented yet.
 **
 ** Notes:
 **   Mirrors OthelloRingMaster.cpp's CLI-parsing shape (same option style,
@@ -21,8 +20,7 @@
 #include "CalculatorTypes.h"
 #include "CalculatorInitLogger.h"
 #include "StoreLevelScan.h"
-#include "TerminalLevelBootstrap.h"
-#include "NonTerminalLevelStep.h"
+#include "BackwardWalkDriver.h"
 #include "CounterWidthConfig.h"
 #include <windows.h>
 #include <ctype.h>
@@ -105,11 +103,8 @@ static void ParseArgs(int argc, char* argv[])
 /*
 ** Function: main
 ** @brief    Parses CLI args, opens the logger, finds the deepest completed
-**           level in RingMaster's store, runs the Phase 2 terminal-level
-**           bootstrap against it, then (if a shallower level exists) runs
-**           the Phase 3 non-terminal backward step for exactly the next
-**           level up. Looping this over every remaining level is Phase 4's
-**           job, not this file's.
+**           level in RingMaster's store, and runs the full backward walk
+**           (deepest level down to 0) against it.
 ** @param    argc - argument count
 ** @param    argv - argument values
 ** @return   0 on success, 1 on argument or precondition error.
@@ -144,13 +139,7 @@ int main(int argc, char* argv[])
     CounterWidthConfig widthConfig;
     CounterWidthConfigLoad(&widthConfig, g_state.cacheDirectory, g_config.boardSize);
 
-    ProcessTerminalLevel(&g_config, &g_state, deepestLevel);
-
-    if (deepestLevel > 0)
-    {
-        LoggerLog("(Phase 3: processing exactly one non-terminal level -- the full backward walk driver is not yet implemented.)\n");
-        ProcessNonTerminalLevel(&g_config, &g_state, &widthConfig, deepestLevel - 1);
-    }
+    RunBackwardWalk(&g_config, &g_state, &widthConfig, deepestLevel);
 
     return 0;
 }

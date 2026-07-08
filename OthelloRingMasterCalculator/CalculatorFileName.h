@@ -40,3 +40,26 @@ static inline void CalcNameCountsFile(char* out, size_t outSize,
     snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s.counts",
              dir, level, boardSize, boardSize, RSFPlayerStr(player));
 }
+
+/*
+** Function: CalcSentinelNameComplete
+** @brief    Builds the "this level's counts are fully written" sentinel
+**           path in the counts directory -- the calculator's own
+**           equivalent of RSFFileName.h's SentinelNameComplete, but for
+**           this project's own output rather than RingMaster's store.
+**           A level with no sentinel is (re)processed from scratch on the
+**           next run, exactly like a crashed/interrupted level's output
+**           files getting naturally overwritten by the next attempt --
+**           no separate "in progress" sentinel is needed here since
+**           there's no multi-writer merge step to interrupt mid-way.
+** @param    out       - buffer to receive the built path
+** @param    outSize   - size of out
+** @param    dir       - counts directory
+** @param    boardSize - board size (e.g. 6 for 6x6)
+** @param    level     - level number
+*/
+static inline void CalcSentinelNameComplete(char* out, size_t outSize,
+                                             const char* dir, int boardSize, int level)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_calc_complete", dir, level, boardSize, boardSize);
+}

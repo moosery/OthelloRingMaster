@@ -4,6 +4,35 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.22.0] - 2026-07-08
+
+### Calculator Phase 4: the full backward walk driver
+
+- New `OthelloRingMasterCalculator/BackwardWalkDriver.h`/`.cpp`:
+  `RunBackwardWalk` loops every level from the deepest completed level
+  down to 0, dispatching the deepest level to Phase 2's terminal
+  bootstrap and every level below it to Phase 3's non-terminal step,
+  threading one `CounterWidthConfig` through the whole walk so width
+  propagation carries across levels correctly.
+- Whole-level-granularity resumability: a new per-level sentinel
+  (`CalcSentinelNameComplete` in `CalculatorFileName.h`, mirroring
+  `RSFFileName.h`'s `SentinelNameComplete` but for this project's own
+  counts output) marks a level done only after it fully completes. A
+  level with no sentinel is (re)processed from scratch on the next
+  run -- deliberately simpler than `InitSolver.cpp`'s own
+  `ScanForResumeLevel`, since there's no merging-in-progress state to
+  distinguish and no explicit cleanup needed (reprocessing a level just
+  naturally overwrites whatever partial output a crash left behind, the
+  same way the in-process width-overflow retry already relies on).
+- Documented, not actively guarded-against, assumption: this resumability
+  assumes RingMaster's forward solve for the store being read is already
+  fully complete (matching the existing Phase 7 sequencing note) --
+  the deepest completed level must not change between calculator runs
+  against the same store.
+- `OthelloRingMasterCalculator.cpp`'s `main()` now runs the complete
+  backward walk in one invocation instead of stopping after one
+  non-terminal level.
+
 ## [0.21.1] - 2026-07-08
 
 ### Retrograde kernel: positional child color instead of a stored per-child tag
