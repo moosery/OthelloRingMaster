@@ -4,6 +4,31 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.10.0] - 2026-07-07
+
+### Port LevelSolverThread: GPU feeder + merge-writer jobs (Phase 4 Step 4)
+
+- Added `LevelSolverThread.h`/`.cpp`: the two thread-pool jobs that drive a
+  level's solve -- `RunGpuFeederJob` (enumerates a level's store files,
+  reads them in black-then-white sub-passes through a 4-slot ping-pong
+  buffer, feeds batches to `GpuKernels`, flushes when the accumulator lacks
+  room) and `RunMergeWriterJob` (D2H-copies a completed GPU flush into the
+  thread's two-stack MW buffer, compresses each player's staging area into
+  the shared in-memory pool via the new `RSF` writer, or flushes to disk if
+  there's no room). Mechanical port -- this file only ever moves opaque
+  `UINT64_PAIR` records between file/GPU/pool buffer, never interpreting
+  board bits, so nothing beyond the `BOARD_KEY_DISK`->`UINT64_PAIR` /
+  `BLF*`->`RSF*` rename was needed.
+- Added `MergeFiles.h` (declarations only -- `FlushMergeWriterBuffer`/
+  `DoEndOfLevelMerge`, both called by `LevelSolverThread.cpp`).
+  `MergeFiles.cpp`'s actual implementation is Step 5; this step does not
+  link on its own yet, same as any mid-phase checkpoint in this port.
+- **Filled a real gap in `OthelloBasics.h`**: `GetMaxMovesForBoardSize` was
+  identified back in Phase 0 planning as one of the CPU-safe pure-lookup
+  functions that should carry over unchanged, but was never actually added
+  during the gutting pass. Added now since `LevelSolverThread.cpp` needs it
+  directly to size GPU batch/accumulator capacity.
+
 ## [0.9.0] - 2026-07-07
 
 ### Port GpuKernels: accumulator, ExpandKernel ring boundary, CUB sort/dedup (Phase 4 Step 3)

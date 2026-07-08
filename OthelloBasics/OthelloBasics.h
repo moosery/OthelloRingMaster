@@ -106,6 +106,43 @@ PBOARD_KEY BoardKeyAllocateFirstBoard(int boardSize);
 */
 void BoardKeyPrint(FILE* fpOut, int boardSize, int keyCount, ...);
 
+/*
+** Function: GetMaxMovesForBoardSize
+** @brief    Returns the maximum possible legal-move count for a given board
+**           size, used to size GPU batch/accumulator capacity.
+** @details  A pure lookup table by board size -- no bit layout involved, so
+**           this stays CPU-visible even though move generation itself is
+**           GPU-exclusive.
+** @param    boardSize - board size (4, 6, or 8)
+** @return   Maximum legal moves for one board of that size. Fatals on an invalid board size.
+*/
+inline int GetMaxMovesForBoardSize(int boardSize)
+{
+    int returnSize = 0;
+
+    /* Board size determines the max legal-move count; anything else is a
+    ** caller error, not a recoverable runtime condition.
+    */
+    switch (boardSize)
+    {
+        case 4:
+            returnSize = 6;
+            break;
+        case 6:
+            returnSize = 19;
+            break;
+        case 8:
+            returnSize = 28;
+            break;
+        default:
+            Fatal(FATAL_INVALID_BOARD_SIZE, "GetMaxMovesForBoardSize: invalid board size specified (%d)", boardSize);
+            returnSize = 0;
+            break;
+    }
+
+    return returnSize;
+}
+
 /* Othello BOARD_KEY return codes */
 constexpr auto RC_BOARD_INVALID_SIZE      = RC_BOARD_BASE + 0;
 constexpr auto RC_BOARD_ALLOCATE_FAILURE  = RC_BOARD_BASE + 1;
