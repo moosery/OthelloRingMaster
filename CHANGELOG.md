@@ -4,6 +4,37 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.11.0] - 2026-07-07
+
+### Port MergeFiles: k-way merge, cross-drive consolidation, end-of-level merge (Phase 4 Step 5)
+
+- Added `MergeFiles.cpp` (~1600 lines, the largest single file in this
+  phase): `FlushMergeWriterBuffer` (in-memory k-way merge of one
+  merge-writer thread's accumulated GPU flush segments to an `RSF` file),
+  `DoCrossDriveIntermediateMerge` (consolidates NVMe writer files onto a
+  medium drive, or total-flushes to the store drive if that drive is full),
+  and `DoEndOfLevelMerge` (the end-of-level consolidation of every
+  remaining writer/intermediate file into a single sorted, deduped store
+  file per player). This completes `OthelloRingMaster`'s solver pipeline
+  linkage -- `LevelSolverThread.cpp` (Step 4) now has a real
+  `FlushMergeWriterBuffer`/`DoEndOfLevelMerge` to call.
+- Mechanical port: every merge comparator here (`MergeHeadGreater`,
+  `PoolMergeHeadGreater`) does a plain numeric `(hi, lo)` comparison on
+  `UINT64_PAIR` -- it never interprets board bits, so the merge is correct
+  regardless of the underlying encoding, as long as every input stream uses
+  the same one consistently (already-recorded risk in
+  project_gpu_reorder_integration_design memory). Renamed
+  `BOARD_KEY_DISK`->`UINT64_PAIR`, `BLF*`/`BlasterFileTrailer`->`RSF*`/
+  `RSFTrailer` throughout.
+- Dropped `InMemDiskHead`/`InMemDiskHeadGreater` from the original file --
+  confirmed dead code there (declared, never referenced anywhere).
+- **Caught and fixed a real bug during the house-style pass**: the file
+  banner's own explanatory text originally read literal `BLF*/BlasterFileTrailer`
+  -- the `*/` substring would have prematurely closed the banner comment.
+  Reworded to avoid the literal sequence; this is exactly the class of
+  mistake the project's stray-comment verification grep exists to catch,
+  and it caught it before commit.
+
 ## [0.10.0] - 2026-07-07
 
 ### Port LevelSolverThread: GPU feeder + merge-writer jobs (Phase 4 Step 4)

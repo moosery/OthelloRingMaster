@@ -155,6 +155,7 @@
     <ClCompile Include="InitLogger.cpp" />
     <ClCompile Include="CreateSeedFile.cpp" />
     <ClCompile Include="LevelSolverThread.cpp" />
+    <ClCompile Include="MergeFiles.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="GpuInfo.cu" />
