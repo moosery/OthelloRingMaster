@@ -4,6 +4,48 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.20.0] - 2026-07-08
+
+### Calculator Phase 2: terminal-level bootstrap -- the first real end-to-end slice
+
+- New `OthelloRingMasterCalculator/StoreLevelScan.h`/`.cpp`:
+  `FindDeepestCompleteLevel` scans RingMaster's finished store for the
+  highest level with a `_complete` sentinel. Deliberately simpler than
+  `InitSolver.cpp`'s own `ScanForResumeLevel` -- this calculator only ever
+  reads `storeDir`, never writes to it, so there's nothing to repair or
+  purge, just "stop at the first missing sentinel."
+- New `OthelloRingMasterCalculator/TerminalLevelBootstrap.h`/`.cpp`:
+  `ProcessTerminalLevel` reads the deepest completed level's boards (both
+  black-to-move and white-to-move, via `RingNestedIndexReader`/
+  `ExpandAll`), classifies each directly from final piece count
+  (`std::popcount` on `ullCellsInUse`/`ullCellColors` -- more black discs
+  wins, more white wins, equal ties), and streams the one-hot result out
+  through `NibbleCountsWriter` from Phase 1 -- no children, no lookups,
+  since every board at this level is terminal by construction. Also
+  populates `CalculatorLevelStats` (per-color and combined win/tie/loss
+  totals, board counts, timing, completion timestamp).
+- New `OthelloRingMasterCalculator/CalculatorFileName.h`: the counts-file
+  naming helper `RSFFileName.h` explicitly deferred ("a separate,
+  not-yet-started future phase") -- that phase has now arrived. One
+  `.counts` extension covers every tier; the reader always already knows
+  the width from `CounterWidthConfig` before opening the file.
+- New `OthelloRingMasterCalculator/CalculatorInitLogger.h`/`.cpp`: mirrors
+  the forward solver's `InitLogger.h`/`.cpp` exactly. This closes a real
+  gap Phase 0/1 left open -- `main()` never called any logger init, so
+  every `LoggerLog` call anywhere in the calculator (including Phase 1's
+  `CounterWidthConfigBumpLevel`) was silently discarded until now.
+- `CalculatorTypes.h`: added `countsDrive`/`countsDirNameNoDrive` to
+  `OthelloRingMasterCalculatorConfig` and `countsDirectory` to
+  `OthelloRingMasterCalculatorState` -- the calculator's own output
+  location, distinct from `storeDirectory` (RingMaster's read-only input).
+  New CLI options `--counts-drive`/`--counts-dir`
+  (default `Y:\OthelloRingMasterCalculator\Counts`).
+- `OthelloRingMasterCalculator.cpp`'s `main()` now actually does
+  something: parses args, opens the logger, finds the deepest completed
+  level, and runs `ProcessTerminalLevel` against it. Phases 3+ (the real
+  non-terminal backward walk, status/monitoring, 4x4 validation) remain
+  unimplemented -- this processes exactly one level, once, and exits.
+
 ## [0.19.0] - 2026-07-08
 
 ### Calculator Phase 1: storage layer -- arbitrary-width counter arithmetic, streamed counts files, persistent width config

@@ -154,12 +154,19 @@
     <ClCompile Include="OutcomeTriple.cpp" />
     <ClCompile Include="CalculatorCountsFile.cpp" />
     <ClCompile Include="CounterWidthConfig.cpp" />
+    <ClCompile Include="CalculatorInitLogger.cpp" />
+    <ClCompile Include="StoreLevelScan.cpp" />
+    <ClCompile Include="TerminalLevelBootstrap.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CalculatorTypes.h" />
     <ClInclude Include="OutcomeTriple.h" />
     <ClInclude Include="CalculatorCountsFile.h" />
     <ClInclude Include="CounterWidthConfig.h" />
+    <ClInclude Include="CalculatorFileName.h" />
+    <ClInclude Include="CalculatorInitLogger.h" />
+    <ClInclude Include="StoreLevelScan.h" />
+    <ClInclude Include="TerminalLevelBootstrap.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
