@@ -17,6 +17,24 @@
 /* Internal Helpers */
 
 /*
+** Function: FlushWriteBuffer
+** @brief    Issues one real fwrite of everything currently buffered in
+**           pWriter->writeBuffer to its current segment file, then clears
+**           the buffer. A no-op if nothing is buffered.
+** @param    pWriter - the writer whose buffer to flush
+*/
+static void FlushWriteBuffer(SegmentedStoreWriter* pWriter)
+{
+    if (pWriter->writeBuffer.empty()) return;
+
+    size_t written = fwrite(pWriter->writeBuffer.data(), 1, pWriter->writeBuffer.size(), pWriter->pCurrentFile);
+    if (written != pWriter->writeBuffer.size())
+        Fatal(FATAL_FI_FLUSH_FAILED, "SegmentedStoreWriter: buffered write failed to '%s'", pWriter->currentPath);
+
+    pWriter->writeBuffer.clear();
+}
+
+/*
 ** Function: OpenNextSegment
 ** @brief    Reserves the next available drive on demand and opens its
 **           segment file for writing, resetting the writer's per-segment
@@ -64,6 +82,7 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
 {
     if (!pWriter->pCurrentFile) return;
 
+    FlushWriteBuffer(pWriter);
     fclose(pWriter->pCurrentFile);
     pWriter->pCurrentFile = nullptr;
 
@@ -175,6 +194,8 @@ void SegmentedStoreWriter::Init(POthelloRingMasterCalculatorState pStateIn, char
         Fatal(FATAL_MERGE_LOGIC_ERROR, "SegmentedStoreWriter::Init: isKeySorted requires recordSize==%d, got %d",
               (int)sizeof(UINT64_PAIR), recordSize);
 
+    writeBuffer.reserve(SEGMENTED_STORE_WRITE_BUFFER_BYTES);
+
     /* No segment opened yet -- the first Write() reserves a drive on demand. */
 }
 
@@ -190,8 +211,8 @@ void SegmentedStoreWriter::Write(const void* pRecord)
         OpenNextSegment(this);
     }
 
-    if (fwrite(pRecord, (size_t)recordSize, 1, pCurrentFile) != 1)
-        Fatal(FATAL_FI_FLUSH_FAILED, "SegmentedStoreWriter::Write: write failed to '%s'", currentPath);
+    const uint8_t* pBytes = (const uint8_t*)pRecord;
+    writeBuffer.insert(writeBuffer.end(), pBytes, pBytes + recordSize);
 
     if (isKeySorted)
     {
@@ -212,6 +233,15 @@ void SegmentedStoreWriter::Write(const void* pRecord)
 
     currentBytesUsed += recordSize;
     currentRecordCount++;
+
+    /* Flush in SEGMENTED_STORE_WRITE_BUFFER_BYTES-sized chunks -- one real
+    ** fwrite per chunk instead of one per record. currentBytesUsed already
+    ** tracks logical bytes committed to this segment regardless of whether
+    ** they've actually hit disk yet, so segment-rollover budget accounting
+    ** above is unaffected by how often this flushes.
+    */
+    if (writeBuffer.size() >= SEGMENTED_STORE_WRITE_BUFFER_BYTES)
+        FlushWriteBuffer(this);
 }
 
 /*

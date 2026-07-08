@@ -4,6 +4,12 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.1] - 2026-07-08
+
+### Buffered scratch writes -- larger sequential fwrites instead of one per record
+
+- `SegmentedStoreWriter::Write` (`OthelloRingMasterCalculator/SegmentedStore.h`/`.cpp`) now accumulates records in an in-memory `writeBuffer` and issues one real `fwrite` per `SEGMENTED_STORE_WRITE_BUFFER_BYTES` (32 MB) chunk instead of one `fwrite` per record -- larger sequential writes measurably lower I/O time on both NVMe and HDD tiers. The buffer is a fixed constant, never scaled to level/dataset size (same category of exception as `GpuKernels.h`'s GPU batch size), so it stays consistent with the standing "never hold a whole level resident" rule -- at most a small handful of `SegmentedStoreWriter`s are ever alive at once (confirmed: one level's own output writer, plus level+1's board-key/counts scratch writers while those are being built, never overlapping with the level's own output writer since `LoadLookupSource` fully finishes before a level's own processing starts), so even several 32 MB buffers at once is a trivial fraction of available RAM. Segment-rollover/budget accounting (`currentBytesUsed`) and min/max-key tracking are unaffected -- both already operated per-record on the caller's data, not on when bytes actually hit disk. `Finish()`/segment-close flush any remaining buffered bytes before closing the file, so no data is ever lost on a segment boundary or at end-of-stream.
+
 ## [0.25.0] - 2026-07-08
 
 ### Streaming nested-index reads everywhere, and on-demand (no-upfront-count) scratch drive reservation

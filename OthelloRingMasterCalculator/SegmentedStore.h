@@ -69,6 +69,21 @@ typedef std::vector<SegmentInfo> SegmentList;
 */
 typedef std::vector<std::pair<char, int64_t>> ScratchPlan;
 
+/* Constants */
+
+/* SegmentedStoreWriter buffers this many bytes of records in memory before
+** issuing one real fwrite -- a FIXED cap, never scaled to level/dataset
+** size (same category of exception as GpuKernels.h's GPU batch size), so
+** it stays consistent with never holding a whole level resident. Larger
+** sequential writes measurably lower I/O time on both NVMe and HDD tiers.
+** Sized generously (not just "big enough"): at most a small handful of
+** SegmentedStoreWriters are ever alive at once (one level's own output,
+** plus level+1's board-key/counts scratch while it's being built), so
+** even several of these buffers simultaneously is a trivial fraction of
+** available RAM.
+*/
+#define SEGMENTED_STORE_WRITE_BUFFER_BYTES (32 * 1024 * 1024)
+
 /* Functions */
 
 /*
@@ -108,8 +123,10 @@ void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const ScratchP
 ** @brief   Streams fixed-size records out, reserving one drive at a time
 **          on demand (via ReserveNextScratchDrive) as each segment fills
 **          up -- never needs to know the total record count in advance.
-**          Never holds more than one segment's worth of data resident --
-**          each Write() call goes straight to disk.
+**          Buffers up to SEGMENTED_STORE_WRITE_BUFFER_BYTES of records in
+**          memory between real fwrites (a fixed cap, not proportional to
+**          the dataset) -- never holds anything close to a whole level
+**          resident, just a small, constant-size chunk of pending output.
 */
 struct SegmentedStoreWriter
 {
@@ -131,6 +148,13 @@ struct SegmentedStoreWriter
     uint64_t currentMinKeyHi = 0, currentMinKeyLo = 0;
     uint64_t currentMaxKeyHi = 0, currentMaxKeyLo = 0;
 
+    /* Accumulates whole records until it reaches SEGMENTED_STORE_WRITE_
+    ** BUFFER_BYTES, then one real fwrite flushes it all at once -- fixed
+    ** capacity (reserved once in Init), never proportional to how many
+    ** records this writer will ultimately see.
+    */
+    std::vector<uint8_t> writeBuffer;
+
     SegmentList segments;
 
     /*
@@ -151,18 +175,22 @@ struct SegmentedStoreWriter
 
     /*
     ** Method: Write
-    ** @brief  Appends one record, reserving a new drive on demand (via
-    **         ReserveNextScratchDrive) whenever the current segment's
-    **         budget is exhausted or no segment is open yet. Fatals if
-    **         every available drive is already fully claimed.
+    ** @brief  Appends one record to the in-memory writeBuffer (real
+    **         fwrite happens only once writeBuffer reaches
+    **         SEGMENTED_STORE_WRITE_BUFFER_BYTES, or a segment closes),
+    **         reserving a new drive on demand (via ReserveNextScratchDrive)
+    **         whenever the current segment's budget is exhausted or no
+    **         segment is open yet. Fatals if every available drive is
+    **         already fully claimed.
     ** @param  pRecord - recordSize bytes to append
     */
     void Write(const void* pRecord);
 
     /*
     ** Method: Finish
-    ** @brief  Closes the final segment. segments is then the complete,
-    **         ordered segment list for this dataset.
+    ** @brief  Flushes any buffered records and closes the final segment.
+    **         segments is then the complete, ordered segment list for
+    **         this dataset.
     */
     void Finish();
 };
