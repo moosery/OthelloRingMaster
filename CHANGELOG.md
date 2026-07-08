@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.18.0] - 2026-07-09
+
+### Add OthelloRingMasterCalculator + OthelloRingMasterCalculatorStatus (Phase 0 scaffolding)
+
+- New project `OthelloRingMasterCalculator` -- the future retrograde
+  win/tie/loss calculator, Phase 0 of the design worked through this
+  session (see `project_adaptive_counter_width_design` and
+  `project_retrograde_calculator_implementation_plan` memories for the
+  full algorithm/format design and phase breakdown). This commit is
+  scaffolding only: CLI parsing into a new `CalculatorTypes.h`
+  (`OthelloRingMasterCalculatorConfig`/`State`, `WinTieLossTriple`,
+  `CalculatorLevelStats`), a startup banner, no retrograde processing
+  logic yet.
+- New project `OthelloRingMasterCalculatorStatus` -- a standalone status
+  client mirroring `OthelloRingMasterStatus` exactly (same query-on-demand
+  shape, connect/ask/print, no continuous push), default port 17632 so it
+  can run alongside `OthelloRingMasterStatus` (17532) and Blaster's own
+  status tool (17432) without a bind conflict.
+- Both new projects reuse the existing shared library structure without
+  any relocation: `Utility` (`RSFWriter`/`RSFReader`, `Lz4Stream`) and
+  `OthelloBasics`/`OthelloBasicsForCUDA` (`RingNestedIndexBuilder`/
+  `Reader`) are already proper shared projects; `OthelloRingMasterCalculator`
+  references them the same way `OthelloRingMaster` itself does.
+  `RSFFileName.h` (path-naming helpers) stays where it is at the solution
+  root -- header-only, `static inline` throughout, zero build output of
+  its own, so an include-path reference is all that's needed, no library
+  project required.
+- `CalculatorTypes.h` is deliberately much smaller than `OthelloTypes.h`'s
+  config/state -- the calculator has none of the forward solver's
+  multi-drive/multi-writer machinery; it only ever reads one already-
+  finished level at a time and writes one counts file back out.
+
 ## [0.17.0] - 2026-07-08
 
 ### Skip degenerate Ring_1/Ring_2 levels for board sizes that never use them
