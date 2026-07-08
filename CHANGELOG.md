@@ -4,6 +4,34 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.16.1] - 2026-07-07
+
+### Remove leftover "multiple merge-writer directories per drive" support
+
+- Caught by the user as dead architecture carried over from a long time ago:
+  `createMergeWriterDirectoryName` took a `dirNumber` parameter "reserved for
+  multiple dirs per drive" but was only ever called with `0`, and
+  `WriterDriveStats.numDirs` existed to count how many merge-writer
+  directories shared one physical drive -- but the construction loop only
+  ever creates one merge-writer directory per unique fast drive, so
+  `numDirs` was always exactly `1` and the per-drive-letter grouping logic
+  that built it never actually collapsed anything.
+- Removed `numDirs` from `WriterDriveStats` (`OthelloTypes.h`) and the
+  `DRIVE_SPACE_LOW_BYTES * numDirs` multiplication in `InitSolver.cpp`
+  (threshold is now just `DRIVE_SPACE_LOW_BYTES`, its actual value in every
+  real run). Simplified the per-drive-stats construction loop to a direct
+  1:1 init (`writerDriveStats[i]` <-> `mwDirectory[i]`), removing a
+  search-by-drive-letter loop that could never find a match given each
+  drive only ever gets one entry.
+- Removed the now-meaningless `dirNumber` parameter from
+  `createMergeWriterDirectoryName`, and the `_0` suffix it produced in the
+  on-disk directory name (`writerDir_0` -> `writerDir`, matching
+  `mergeDir`'s own no-suffix naming). These directories are ephemeral
+  (wiped and recreated every startup by `cleanUpDrives`), so no
+  resume-compatibility concern.
+- Removed the `Dirs` column from `StatsListener.cpp`'s live status
+  drive-breakdown table (it always printed `1`).
+
 ## [0.16.0] - 2026-07-07
 
 ### Make the nested-index compression actually streaming, fix the resume scan, and clean up stale comments

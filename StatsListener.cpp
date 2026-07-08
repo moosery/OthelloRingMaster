@@ -214,9 +214,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
     /* Current-level drive breakdown (cumulative since level start) */
     n += snprintf(buf + n, bufSize - n,
-                  "  Drv  Dirs  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht\n");
+                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht\n");
     n += snprintf(buf + n, bufSize - n,
-                  "  ---  ----  -----  ------------  ------------  ------------  ----  ----\n");
+                  "  ---  -----  ------------  ------------  ------------  ----  ----\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
@@ -236,8 +236,8 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                            && d->levelBytesUncompressed != d->levelBytesWritten);
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
-                          d->driveLetter, d->numDirs,
+                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
+                          d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten      / (1024.0 * 1024.0 * 1024.0),
                           d->levelBytesUncompressed / (1024.0 * 1024.0 * 1024.0),
@@ -245,8 +245,8 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                           liveBlack, liveWhite);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5llu  %9.2f GB                %9.2f GB  %4d  %4d\n",
-                          d->driveLetter, d->numDirs,
+                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d\n",
+                          d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),

@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.16.0"
+#define VERSION "0.16.1"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -56,7 +56,7 @@
 
 /*
 ** Drive space threshold -- when free bytes on a drive drops below
-** DRIVE_SPACE_LOW_BYTES * numDirsOnDrive, trigger a merge-to-store flush.
+** DRIVE_SPACE_LOW_BYTES, trigger a merge-to-store flush.
 */
 #define DRIVE_SPACE_LOW_GB    20ULL
 #define DRIVE_SPACE_LOW_BYTES (DRIVE_SPACE_LOW_GB * 1024ULL * 1024ULL * 1024ULL)
@@ -71,7 +71,6 @@
 typedef struct __WriterDriveStats
 {
     char      driveLetter;
-    int       numDirs;
     uint64_t  threshold;
     uint64_t  lastFreeBytes;
     uint64_t  levelFilesWritten;

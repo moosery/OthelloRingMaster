@@ -53,17 +53,16 @@ static HANDLE g_instanceMutex = NULL;
 
 /*
 ** Function: createMergeWriterDirectoryName
-** @brief    Builds the path for one merge-writer directory on a given drive.
+** @brief    Builds the path for the one merge-writer directory on a given drive.
 ** @param    driveLetter      - drive to place the directory on
 ** @param    pStoreDirNoDrive - store directory path with the drive letter stripped
-** @param    dirNumber        - directory index (0 today; reserved for multiple dirs per drive)
 ** @param    pOutDir          - out: the built path (MAX_FULL_PATH_NAME capacity assumed)
 */
 static void createMergeWriterDirectoryName(char driveLetter, const char* pStoreDirNoDrive,
-                                           int dirNumber, char* pOutDir)
+                                           char* pOutDir)
 {
-    snprintf(pOutDir, MAX_FULL_PATH_NAME, "%c:%s\\writerDir_%d",
-             driveLetter, pStoreDirNoDrive, dirNumber);
+    snprintf(pOutDir, MAX_FULL_PATH_NAME, "%c:%s\\writerDir",
+             driveLetter, pStoreDirNoDrive);
 }
 
 /*
@@ -218,7 +217,7 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
         if (!d->available) continue;
         if (d->driveCategory != DRIVE_CAT_FAST) continue;
         if (d->driveLetter == pConfig->storeDrive) continue;
-        createMergeWriterDirectoryName(d->driveLetter, pConfig->storeDirNameNoDrive, 0,
+        createMergeWriterDirectoryName(d->driveLetter, pConfig->storeDirNameNoDrive,
                                        pState->mwDirectory[pState->numMergeWriters]);
         pState->numMergeWriters++;
     }
@@ -243,26 +242,16 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
     pState->storeMergeBlackFileCount = 0;
     pState->storeMergeWhiteFileCount = 0;
 
-    /* Build per-drive stats */
-    pState->numWriterDrives = 0;
-    for (int i = 0; i < pState->numMergeWriters; i++)
-    {
-        char dl = pState->mwDirectory[i][0];
-        int  di = -1;
-        for (int j = 0; j < pState->numWriterDrives; j++)
-            if (pState->writerDriveStats[j].driveLetter == dl) { di = j; break; }
-        if (di < 0)
-        {
-            di = pState->numWriterDrives++;
-            pState->writerDriveStats[di] = {};
-            pState->writerDriveStats[di].driveLetter = dl;
-        }
-        pState->writerDriveStats[di].numDirs++;
-    }
+    /* Build per-drive stats -- one merge-writer directory per fast drive
+    ** (see the loop above), so writerDriveStats[i] always corresponds
+    ** one-to-one with mwDirectory[i]; no per-drive grouping needed.
+    */
+    pState->numWriterDrives = pState->numMergeWriters;
     for (int i = 0; i < pState->numWriterDrives; i++)
     {
-        pState->writerDriveStats[i].threshold =
-            DRIVE_SPACE_LOW_BYTES * (uint64_t)pState->writerDriveStats[i].numDirs;
+        pState->writerDriveStats[i] = {};
+        pState->writerDriveStats[i].driveLetter = pState->mwDirectory[i][0];
+        pState->writerDriveStats[i].threshold   = DRIVE_SPACE_LOW_BYTES;
     }
 
     /* GPU accumulator worst-case capacity (boards) -- used by merge-writer
