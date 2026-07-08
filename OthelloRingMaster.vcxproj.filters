@@ -32,6 +32,9 @@
     <CudaCompile Include="GpuInfo.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
+    <CudaCompile Include="GpuKernels.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloTypes.h">
@@ -53,6 +56,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="CreateSeedFile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GpuKernels.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

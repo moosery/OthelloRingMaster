@@ -4,6 +4,36 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.9.0] - 2026-07-07
+
+### Port GpuKernels: accumulator, ExpandKernel ring boundary, CUB sort/dedup (Phase 4 Step 3)
+
+- Added `GpuKernels.h`/`.cu`: the GPU accumulator (two-stack layout, now over
+  `UINT64_PAIR` instead of `BOARD_KEY_DISK`), the CUB `DeviceRadixSort`-based
+  `SortAndDedupRegion` dedup pipeline (unchanged logic -- it always treated
+  boards as opaque sort keys), and `ExpandKernel`.
+- **`ExpandKernel` is the one real technical adaptation in this whole phase**
+  (everything else is a mechanical rename): it now converts at its own
+  boundary, per the already-recorded ring<->row-major design. Incoming
+  `UINT64_PAIR` fields are ring-ordered (the store's on-disk format) and get
+  converted to row-major via `dev_RingToRowMajor` before building a working
+  `BOARD` and calling the existing untouched `dev_boardMoveCalculator`/
+  `dev_playMove`/`dev_canonicalize` (no `_key`-suffixed function family
+  needed -- that was already deleted in Phase 0). Each canonicalized child's
+  fields convert back to ring order via `dev_RowMajorToRing` immediately
+  before the scatter-write into `d_accum`, so everything downstream (the CUB
+  sort/dedup/compaction) needs no awareness that ring order is involved at
+  all -- a bijective permutation preserves equality.
+- **Caught and fixed a real gotcha before it became a silent bug**:
+  `RingConversion.h`'s forward/inverse permutation tables are `static`
+  `__constant__` memory, so `GpuKernels.cu` (a second `.cu` file including
+  that header) gets its own independent, uninitialized copy distinct from
+  `RingConversion.cu`'s. Added `GpuKernels_InitRingPermutationTables()`
+  (private to `GpuKernels.cu`, called internally by `GpuAccumulatorCreate`)
+  so this is handled automatically rather than depending on every future
+  caller remembering a second init call.
+- Not yet wired into a real feeder loop -- lands in Step 4.
+
 ## [0.8.0] - 2026-07-07
 
 ### Port CreateSeedFile (Phase 4 Step 2)

@@ -157,6 +157,7 @@
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="GpuInfo.cu" />
+    <CudaCompile Include="GpuKernels.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloTypes.h" />
@@ -166,6 +167,7 @@
     <ClInclude Include="GpuInfo.h" />
     <ClInclude Include="InitLogger.h" />
     <ClInclude Include="CreateSeedFile.h" />
+    <ClInclude Include="GpuKernels.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
