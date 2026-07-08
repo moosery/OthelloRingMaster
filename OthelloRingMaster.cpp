@@ -48,7 +48,7 @@ MachineInfo             g_machineInfo = {};
 static void PrintUsage(const char* prog)
 {
     printf("Usage: %s [options]\n\n", prog);
-    printf("  --board-size N    Board size (e.g. 4 for 4x4, 6 for 6x6)  [default: 6]\n");
+    printf("  --board-size N    Board size: 4, 6, or 8                     [default: 6]\n");
     printf("  --drives LETTERS  Drive letters to use, e.g. DEFY           [default: DEFY]\n");
     printf("  --store-drive L   Drive letter for NAS/store output          [default: Y]\n");
     printf("  --store-dir PATH  Sub-path on store drive (no drive letter)  [default: \\OthelloRingMaster\\Store]\n");
@@ -126,7 +126,7 @@ static void ParseArgs(int argc, char* argv[])
         {
             REQUIRE_NEXT("--board-size")
             int n = atoi(argv[i]);
-            if (n < 2 || n > 12) { printf("ERROR: --board-size must be 2..12\n"); exit(1); }
+            if (n != 4 && n != 6 && n != 8) { printf("ERROR: --board-size must be 4, 6, or 8\n"); exit(1); }
             g_config.boardSize = (uint8_t)n;
         }
         else if (strcmp(argv[i], "--drives") == 0)

@@ -224,3 +224,22 @@ struct RingNestedIndexReader
     */
     void ExpandAll(const std::function<void(const BOARD_KEY& key)>& onBoard) const;
 };
+
+/*
+** Function: RingNestedIndexFileCount
+** @brief    Counts how many of the four nested-index files exist on disk,
+**           without validating their contents. Callers use this to tell
+**           "this level/player genuinely has no data" (0 -- Load() would
+**           also return false, but for a completely different, expected
+**           reason) apart from "data exists but is corrupt/truncated"
+**           (1-3, or 4 with Load() still failing) -- the two must never be
+**           handled the same way; the latter is a real problem that should
+**           never be silently treated as "no data."
+** @param    cellsInUsePath - path to the CellsInUse file
+** @param    ring1Path      - path to the Ring_1 file
+** @param    ring2Path      - path to the Ring_2 file
+** @param    ring34Path     - path to the Ring_3_4 file
+** @return   0 if none of the four files exist; 1-4 otherwise.
+*/
+int RingNestedIndexFileCount(const char* cellsInUsePath, const char* ring1Path,
+                              const char* ring2Path, const char* ring34Path);

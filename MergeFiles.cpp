@@ -161,6 +161,27 @@ static int EnumerateByPattern(const char* fullPattern, char** outPaths, int maxP
 }
 
 /*
+** Function: CountByPattern
+** @brief    Counts files matching fullPattern without allocating/copying
+**           anything -- same FindFirstFileA/FindNextFileA walk as
+**           EnumerateByPattern, used to size an array exactly before a
+**           real enumeration pass, instead of guessing a fixed capacity.
+** @param    fullPattern - glob pattern to search for
+** @return   Number of files found.
+*/
+static int CountByPattern(const char* fullPattern)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(fullPattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+
+    int count = 0;
+    do { count++; } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return count;
+}
+
+/*
 ** Function: KWayMergeFiles
 ** @brief    File-based k-way merge of player-homogeneous files (all same
 **           player). Deduplicates on (hi, lo). Takes ownership of every
@@ -188,12 +209,20 @@ static uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* out
 
     for (int i = 0; i < numInputs; i++)
     {
+        /* This file was just enumerated as existing by the caller, and
+        ** nothing can be deleting/rewriting files at this point in the
+        ** pipeline (see the callers' own static-file-set guarantees) -- an
+        ** open failure here means real corruption, not a race. Silently
+        ** skipping it would merge an incomplete file set without any sign
+        ** something was wrong, so fail loudly instead.
+        */
         RSFReader* r = RSFOpen(inputPaths[i]);
         if (!r)
-        {
-            LoggerLog("KWayMerge: WARNING skipping unreadable file '%s'\n", inputPaths[i]);
-            continue;
-        }
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "KWayMergeFiles: cannot open '%s' (missing, incomplete, or corrupt trailer) -- "
+                  "this file was enumerated as present moments earlier",
+                  inputPaths[i]);
+
         UINT64_PAIR first;
         if (RSFRead(r, &first, 1) == 1)
             heap.push({ first, r });
@@ -922,6 +951,18 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
             }
         }
 
+        /* This loop's true count is exactly known ahead of time (the sum of
+        ** snapArr[ti]-consumedArr[ti] across every writer) -- hitting the
+        ** capacity here means real unconsumed writer files were silently
+        ** left off this merge. Fail loudly rather than continue with a
+        ** partial file set.
+        */
+        if (numFiles >= kMaxFiles)
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "DoCrossDriveIntermediateMerge: %s writer-file count hit the capacity (%d) -- "
+                  "real unconsumed writer files would be silently dropped from this merge",
+                  RSFPlayerStr(player), kMaxFiles);
+
         if (numFiles == 0)
         {
             MemFree(paths);
@@ -1004,6 +1045,17 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                 MemFree(tmp);    /* free array; elements now owned by paths[] */
                 MemFree(tmpSz);
             }
+
+            /* Hitting the capacity here means real existing medium-drive
+            ** imerge files were silently left out of this total flush --
+            ** exactly the kind of cross-drive duplicate this path exists to
+            ** catch. Fail loudly rather than flush an incomplete file set.
+            */
+            if (numFiles >= kMaxFiles)
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "DoCrossDriveIntermediateMerge: %s total-flush file count hit the capacity (%d) -- "
+                      "real imerge files would be silently dropped from this flush",
+                      RSFPlayerStr(player), kMaxFiles);
 
             /* Reserve store-drive worst-case (pre-dedup) */
             if (!DriveReserve(pSt, pCtx->pConfig->storeDrive, totalBytes))
@@ -1396,6 +1448,75 @@ struct PlayerData
 };
 
 /*
+** Function: CountEndOfLevelInputFiles
+** @brief    Counts exactly how many on-disk files DoEndOfLevelMerge's Phase 1
+**           will enumerate for one player, across every writer directory,
+**           merge directory, and the store-merge directory, in every
+**           compression tier the current config could have produced.
+** @details  Safe to size an allocation from: DoEndOfLevelMerge only ever runs
+**           after both WaitForPoolIdle calls and FlushAllMergeWriterBuffers
+**           (see OthelloRingMaster.cpp's main loop), so no thread can still
+**           be creating new writer/imerge files by the time this counts them --
+**           the file set is static, and this count will still be accurate
+**           when Phase 1's real enumeration pass runs moments later.
+** @param    pCtx   - solve context
+** @param    level  - level being merged
+** @param    player - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @return   Exact number of files Phase 1 will find for this player.
+*/
+static int CountEndOfLevelInputFiles(PSolveContext pCtx, int level, int player)
+{
+    POthelloRingMasterState  pSt  = pCtx->pState;
+    POthelloRingMasterConfig pCfg = pCtx->pConfig;
+    char                     pat[MAX_FULL_PATH_NAME];
+    int                      count = 0;
+
+    for (int i = 0; i < pSt->numMergeWriters; i++)
+    {
+        RSFPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+        count += CountByPattern(pat);
+        if (pCfg->compressMode == COMPRESS_ALL)
+        {
+            RSFZPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+            count += CountByPattern(pat);
+            if (pCfg->lz4Drives[0])
+            {
+                RSFZLPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+                count += CountByPattern(pat);
+            }
+        }
+    }
+    for (int i = 0; i < pSt->numMergeDirs; i++)
+    {
+        RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+        count += CountByPattern(pat);
+        if (pCfg->compressMode == COMPRESS_ALL)
+        {
+            RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+            count += CountByPattern(pat);
+            if (pCfg->lz4Drives[0])
+            {
+                RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+                count += CountByPattern(pat);
+            }
+        }
+    }
+    RSFPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+    count += CountByPattern(pat);
+    if (pCfg->compressMode == COMPRESS_ALL)
+    {
+        RSFZPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+        count += CountByPattern(pat);
+        if (pCfg->lz4Drives[0])
+        {
+            RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+            count += CountByPattern(pat);
+        }
+    }
+    return count;
+}
+
+/*
 ** Function: DoEndOfLevelMerge
 ** @brief    Consolidates every remaining writer file (NVMe) and
 **           intermediate merge file (medium drives) into a single sorted,
@@ -1458,8 +1579,6 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         }
     }
 
-    const int kMaxInputFiles = MAX_MERGE_FANIN * MAX_MERGE_FANIN;
-
     /* -- Phase 1: enumerate files for both players (sequential, fast) --
     ** We scan first so mergeTotalInputBytes is known before the merge
     ** starts, giving the stats listener an accurate denominator from the
@@ -1469,6 +1588,18 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
 
     for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
     {
+        /* Sized exactly, not guessed: count real files first (safe here --
+        ** no thread can still be creating writer/imerge files by this point,
+        ** see CountEndOfLevelInputFiles's own header comment), then allocate
+        ** just enough for that count plus a small fixed pad for defense in
+        ** depth. Replaces a fixed MAX_MERGE_FANIN*MAX_MERGE_FANIN guess
+        ** (12.25M entries, ~392MB) that was never actually checked against
+        ** real production numbers -- the largest real run on record needed
+        ** only about 42,000 files for one color, ~291x less than the guess.
+        */
+        const int kInputFilePad = 256;
+        const int kMaxInputFiles = CountEndOfLevelInputFiles(pCtx, level, player) + kInputFilePad;
+
         data[player].inputPaths = (char**)MemMalloc("eolInputPaths",
                                                      (size_t)kMaxInputFiles * sizeof(char*));
         data[player].inputSizes = (uint64_t*)MemMalloc("eolInputSizes",
@@ -1561,6 +1692,18 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
                 }
             }
         }
+
+        /* Should never happen -- CountEndOfLevelInputFiles just counted the
+        ** same static file set plus a pad. Hitting the cap means that
+        ** assumption was somehow violated (e.g. a writer thread still
+        ** active), and continuing would silently merge an incomplete file
+        ** set -- fail loudly instead.
+        */
+        if (numFiles >= kMaxInputFiles)
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "DoEndOfLevelMerge: %s file count hit the counted capacity (%d) -- "
+                  "file set changed after counting, which should be impossible here",
+                  RSFPlayerStr(player), kMaxInputFiles);
 
         data[player].numFiles   = numFiles;
         data[player].inputBytes = playerBytes;

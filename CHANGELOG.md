@@ -4,6 +4,91 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.16.5] - 2026-07-07
+
+### Never silently drop data on a capacity/read failure -- fatal loudly instead
+
+Prompted by an explicit standing rule from the user: if the solver ever
+misses or drops real data, it must fatal with as much diagnostic detail as
+possible, never continue silently. Audited every place a "we expected to
+find/read something and didn't" condition existed and was previously either
+silently truncated or logged as a mere warning:
+
+- **`DoEndOfLevelMerge` Phase 1** (added in 0.16.4's counting rework) --
+  added a `Fatal(FATAL_MERGE_LOGIC_ERROR, ...)` safety net if real
+  enumeration ever somehow reaches the counted capacity, since that should
+  now be structurally impossible; hitting it means a real invariant was
+  violated.
+- **`DoCrossDriveIntermediateMerge`** -- both its writer-file gather (whose
+  true count is exactly known ahead of time from consumed/snapshot index
+  deltas) and its total-flush imerge gather now fatal if they hit their
+  respective capacities, instead of the old silent truncation.
+- **`RingNestedIndexReader::Load` callers in `LevelSolverThread.cpp`** --
+  `Load()` returning `false` was being treated as one thing ("no data for
+  this level/player, skip"), but it actually conflates two very different
+  cases: files genuinely absent (expected, fine) vs. files present but
+  corrupt/truncated (a real problem). Added `RingNestedIndexFileCount`
+  (`OthelloBasics/RingNestedIndex.h`/`.cpp`) to tell them apart: 0 files
+  found is still a silent skip, but 1+ files found with `Load()` still
+  failing is now a `Fatal` naming all four file paths and the exact level/
+  player. Also used to simplify `InitSolver.cpp`'s `checkLevelFile`, which
+  already had its own equivalent counting loop.
+- **`KWayMergeFiles`** -- a file that failed to open was logged as a mere
+  `"WARNING skipping unreadable file"` and silently excluded from the
+  merge. Every file passed in was just enumerated as present moments
+  earlier by the caller, and nothing can be deleting files at this point in
+  the pipeline, so an open failure here means real corruption, not a
+  race -- now a `Fatal` naming the exact path.
+
+## [0.16.4] - 2026-07-07
+
+### Replace guessed end-of-level merge buffer sizing with an exact count
+
+- `DoEndOfLevelMerge`'s Phase 1 file enumeration allocated its path/size
+  arrays using a fixed guess, `MAX_MERGE_FANIN * MAX_MERGE_FANIN` (12.25M
+  entries, ~392MB) -- inherited verbatim from the sibling production
+  solution's own code, never actually checked against real numbers. The
+  largest real production run on record needed only ~42,000 files for one
+  color (12 cascade groups at `MAX_MERGE_FANIN`), ~291x less than the guess.
+  Guessing wrong in the other direction is a real risk: if the true file
+  count ever exceeded the guess, `EnumerateByPattern`'s capacity checks
+  would silently stop collecting more files -- real solved board data
+  quietly dropped from the merge, not an error or a crash.
+- `DoEndOfLevelMerge` only ever runs after both `WaitForPoolIdle` calls and
+  `FlushAllMergeWriterBuffers` complete (see `OthelloRingMaster.cpp`'s main
+  loop) -- no thread can still be creating writer/imerge files by the time
+  Phase 1 enumerates them, so the on-disk file set is provably static at
+  that point. That makes a count-then-allocate approach safe: added
+  `CountByPattern` (a `FindFirstFileA`/`FindNextFileA` walk that only
+  counts, mirroring `EnumerateByPattern`'s own walk) and
+  `CountEndOfLevelInputFiles` (runs the exact same pattern set Phase 1
+  checks, just counting instead of collecting). Phase 1 now counts first,
+  then allocates exactly that count plus a small fixed pad (256) --
+  correct at any board size or data volume, no guessing, no wasted memory.
+- Added a loud `Fatal(FATAL_MERGE_LOGIC_ERROR, ...)` safety net if the real
+  enumeration ever somehow reaches the counted capacity anyway -- since
+  that should be structurally impossible given the above, hitting it means
+  a real invariant violation happened, and continuing would silently merge
+  an incomplete file set.
+- Left `DoCrossDriveIntermediateMerge`'s similarly-shaped `kMaxFiles`
+  bound alone -- it runs while other merge-writer threads may still be
+  actively producing files, so a naive count-then-allocate isn't safe
+  there without more care, and its existing bound already has ~2.5x
+  headroom over the same real 42,000-file high-water mark.
+
+## [0.16.3] - 2026-07-07
+
+### Fix --board-size CLI validation to match what's actually supported
+
+- `--board-size` accepted any value 2..12, but `GetMaxMovesForBoardSize`
+  and `BoardKeyAllocateFirstBoard` only ever handle 4/6/8 -- anything else
+  (5, 7, 9, 10, 11, 12, or the endpoints 2/3) passed CLI validation and
+  then failed deep in the pipeline (`CreateSeedFile.cpp`) with a
+  misleading `FATAL_ALLOCATION_FAILED` instead of a clear error at the
+  CLI boundary. Narrowed validation to exactly 4, 6, or 8, and corrected
+  the usage text (previously read "e.g. 4 for 4x4, 6 for 6x6", not
+  mentioning 8 or that only those three sizes are valid).
+
 ## [0.16.2] - 2026-07-07
 
 ### Collapse writerDriveStats drive-letter lookups to direct indexing

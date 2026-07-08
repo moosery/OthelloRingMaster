@@ -9,6 +9,7 @@
 /* Includes */
 #include "RingNestedIndex.h"
 #include <stdio.h>
+#include <windows.h>
 
 /* Functions */
 
@@ -274,4 +275,26 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
             }
         }
     }
+}
+
+/*
+** Function: RingNestedIndexFileCount
+** @brief    Counts how many of the four nested-index files exist on disk.
+** @param    cellsInUsePath - path to the CellsInUse file
+** @param    ring1Path      - path to the Ring_1 file
+** @param    ring2Path      - path to the Ring_2 file
+** @param    ring34Path     - path to the Ring_3_4 file
+** @return   0 if none of the four files exist; 1-4 otherwise.
+*/
+int RingNestedIndexFileCount(const char* cellsInUsePath, const char* ring1Path,
+                              const char* ring2Path, const char* ring34Path)
+{
+    const char* paths[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+    int         count    = 0;
+
+    for (int i = 0; i < 4; i++)
+        if (GetFileAttributesA(paths[i]) != INVALID_FILE_ATTRIBUTES)
+            count++;
+
+    return count;
 }

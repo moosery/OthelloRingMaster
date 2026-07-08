@@ -295,13 +295,22 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
     RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
     RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
 
-    RingNestedIndexReader reader;
-    if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+    int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
+    if (existCount == 0)
     {
         LoggerLog("GpuFeederJob: no nested-index data for level %d %s, skipping\n",
                   level, RSFPlayerStr(player));
         return;
     }
+
+    RingNestedIndexReader reader;
+    if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "FeedNestedIndexLevel: nested-index files exist (%d/4) for level %d %s but "
+              "failed to load -- corrupt or truncated data. Files:\n"
+              "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
+              existCount, level, RSFPlayerStr(player),
+              cellsInUsePath, ring1Path, ring2Path, ring34Path);
 
     FeedBatchState st;
     for (int i = 0; i < PING_PONG_SLOTS; i++) st.slots[i] = slots[i];
@@ -434,9 +443,18 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
             RSFNameRing2File(ring2Path,           sizeof(ring2Path),      pSt->storeDirectory, boardSize, level, player, 0);
             RSFNameRing34File(ring34Path,         sizeof(ring34Path),     pSt->storeDirectory, boardSize, level, player, 0);
 
+            int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
+            if (existCount == 0) continue;
+
             RingNestedIndexReader reader;
-            if (reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
-                total += reader.GetBoardCount();
+            if (!reader.Load(cellsInUsePath, ring1Path, ring2Path, ring34Path))
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "RunGpuFeederJob: nested-index files exist (%d/4) for level %d %s but "
+                      "failed to load -- corrupt or truncated data. Files:\n"
+                      "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
+                      existCount, level, RSFPlayerStr(player),
+                      cellsInUsePath, ring1Path, ring2Path, ring34Path);
+            total += reader.GetBoardCount();
         }
         pSt->currentLevelTotalBoards = total;
     }

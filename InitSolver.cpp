@@ -392,11 +392,7 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
     RSFNameRing2File(ring2Path,           sizeof(ring2Path),      storeDir, boardSize, level, playerCode, 0);
     RSFNameRing34File(ring34Path,         sizeof(ring34Path),     storeDir, boardSize, level, playerCode, 0);
 
-    const char* nestedPaths[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
-    int nestedFoundCount = 0;
-    for (int i = 0; i < 4; i++)
-        if (GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
-            nestedFoundCount++;
+    int nestedFoundCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
 
     if (nestedFoundCount > 0)
     {
