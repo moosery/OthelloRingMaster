@@ -232,6 +232,12 @@ struct FeedBatchState
     PSolveContext    pCtx;
 };
 
+/* Forward declaration -- FeedBoardIntoBatch calls this, but it's defined
+** further down (alphabetically after the Feed* functions among
+** RunGpuFeederJob's helpers).
+*/
+static void FlushAccumulator(GpuAccumulator* pAccum, PSolveContext pCtx);
+
 /*
 ** Function: FeedBoardIntoBatch
 ** @brief    Appends one expanded board into the current ping-pong slot,

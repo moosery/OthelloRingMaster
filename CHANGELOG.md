@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.15.1] - 2026-07-07
+
+### Fix v0.15.0 build: forward-declare FlushAccumulator
+
+- `FeedBoardIntoBatch`/`FeedNestedIndexLevel` landed in the file slot
+  previously occupied by `EnumerateStoreFilesForLevel` (before
+  `FlushAccumulator`'s own definition further down), but unlike that old
+  function, they call `FlushAccumulator` -- caught by the user's build as
+  `C3861: 'FlushAccumulator': identifier not found`. Added a forward
+  declaration in `LevelSolverThread.cpp` immediately before
+  `FeedBoardIntoBatch`.
+
 ## [0.15.0] - 2026-07-07
 
 ### Wire the ring nested-index into the live store write/read path
