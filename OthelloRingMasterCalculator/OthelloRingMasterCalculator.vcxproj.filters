@@ -36,6 +36,14 @@
     <ClCompile Include="TerminalLevelBootstrap.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NonTerminalLevelStep.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="RetrogradeKernels.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CalculatorTypes.h">
@@ -60,6 +68,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TerminalLevelBootstrap.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TerminalClassify.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NonTerminalLevelStep.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RetrogradeKernels.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1,0 +1,132 @@
+/*
+** Filename:  RetrogradeKernels.h
+**
+** Purpose:
+**   Declares the GPU-side move generation used by the retrograde
+**   calculator's non-terminal backward step: given a batch of level N
+**   parent boards, generate each parent's children (same move-gen/flip/
+**   canonicalize/ring-boundary-conversion logic GpuKernels.cu's
+**   ExpandKernel already uses) with the parent<->children association
+**   preserved, so the CPU side can look each child up in level N+1's
+**   already-computed counts and sum into the correct parent.
+**
+** Notes:
+**   Deliberately NOT the same accumulator shape as GpuKernels.h's
+**   GpuAccumulator: that pipeline's whole point is deduping children
+**   across a huge shared batch, which is exactly wrong here -- retrograde
+**   summing wants every (parent, child) edge counted once, not deduped
+**   (see project_adaptive_counter_width_design memory's "multiplicity is
+**   deliberate" section). So this kernel is one thread per parent writing
+**   into a FIXED, non-atomic, per-thread-private slot range -- no sort,
+**   no dedup, no atomics at all. Since ExpandKernel is already one thread
+**   per parent internally, this is a smaller variant of it, not a new
+**   algorithm.
+**
+**   Both the next-player tag AND the color-flip tag are PER-CHILD, not
+**   per-parent: dev_canonicalize's 16-way symmetry search includes the
+**   color-swap family (arr[8..15], built via dev_boardFlip), and which
+**   family wins is data-dependent -- two different moves from the same
+**   parent can canonicalize through different families. A child whose
+**   canonical form came from the flipped family has its stored
+**   ullCellColors (and therefore its already-computed black/white win
+**   counts) swapped relative to the real, played-out continuation --
+**   the consumer must swap blackWins/whiteWins back when summing that
+**   child's contribution into the parent (tie count is unaffected).
+*/
+
+#pragma once
+
+/* Includes */
+#include "RingStoreFile.h"   /* UINT64_PAIR */
+
+/* Structures and Types */
+
+/*
+** Type:    RetrogradeGpuContext
+** @brief   Opaque GPU context handle -- full definition is internal to
+**          RetrogradeKernels.cu.
+*/
+struct __RetrogradeGpuContext;
+typedef struct __RetrogradeGpuContext RetrogradeGpuContext;
+
+/* Functions */
+
+/*
+** Function: RetrogradeGpuContextCreate
+** @brief    Allocates device + pinned-host buffers sized for batchSize
+**           parents at up to maxMovesPerBoard children each.
+** @param    boardSize        - board size (4, 6, or 8) -- sets the move-gen masks
+** @param    batchSize        - max parents per RetrogradeExpandBatch call
+** @param    maxMovesPerBoard - GetMaxMovesForBoardSize(boardSize) -- worst-case children per board
+** @return   A new RetrogradeGpuContext.
+*/
+RetrogradeGpuContext* RetrogradeGpuContextCreate(int boardSize, int batchSize, int maxMovesPerBoard);
+
+/*
+** Function: RetrogradeGpuContextDestroy
+** @brief    Frees all device/pinned-host memory owned by pCtx.
+** @param    pCtx - the context to destroy
+*/
+void RetrogradeGpuContextDestroy(RetrogradeGpuContext* pCtx);
+
+/*
+** Function: RetrogradeExpandBatch
+** @brief    H2D-copies count parent boards, generates each one's children
+**           (handling the pass/terminal cases exactly like ExpandKernel),
+**           and D2H-copies the per-parent results back into host-resident
+**           buffers readable via RetrogradeGetChildCount/Player/Children
+**           until the next call.
+** @param    pCtx      - the context to run the batch through
+** @param    pParents  - ring-ordered parent board records
+** @param    count     - number of records in pParents (must be <= the
+**                       batchSize passed to RetrogradeGpuContextCreate)
+** @param    playerBit - 1=black, 0=white -- next player to move for this whole batch
+*/
+void RetrogradeExpandBatch(RetrogradeGpuContext* pCtx, const UINT64_PAIR* pParents,
+                            int count, uint8_t playerBit);
+
+/*
+** Function: RetrogradeGetChildCount
+** @brief    Returns parentIdx's child count from the last RetrogradeExpandBatch call.
+** @param    pCtx      - the context to query
+** @param    parentIdx - index within the last batch (0 <= parentIdx < count)
+** @return   Number of children generated for this parent; 0 means terminal.
+*/
+uint32_t RetrogradeGetChildCount(const RetrogradeGpuContext* pCtx, int parentIdx);
+
+/*
+** Function: RetrogradeGetChildPlayer
+** @brief    Returns childIdx's next-player tag within parentIdx's children
+**           (per-child, not per-parent -- see file Notes on why two
+**           children of the same parent can differ here).
+** @param    pCtx      - the context to query
+** @param    parentIdx - index within the last batch
+** @param    childIdx  - index within parentIdx's children (0 <= childIdx < RetrogradeGetChildCount(parentIdx))
+** @return   RSF_PLAYER_BLACK or RSF_PLAYER_WHITE (1 or 0).
+*/
+uint8_t RetrogradeGetChildPlayer(const RetrogradeGpuContext* pCtx, int parentIdx, int childIdx);
+
+/*
+** Function: RetrogradeGetChildColorFlipped
+** @brief    Returns whether childIdx's canonical form came from
+**           dev_canonicalize's color-swap symmetry family (see file
+**           Notes) -- if true, the child's already-computed
+**           blackWins/whiteWins must be swapped before being summed into
+**           the parent (tie count is unaffected either way).
+** @param    pCtx      - the context to query
+** @param    parentIdx - index within the last batch
+** @param    childIdx  - index within parentIdx's children
+** @return   true if this child's stored colors are swapped relative to
+**           the real, played-out continuation.
+*/
+bool RetrogradeGetChildColorFlipped(const RetrogradeGpuContext* pCtx, int parentIdx, int childIdx);
+
+/*
+** Function: RetrogradeGetChildren
+** @brief    Returns a pointer to parentIdx's children (host-resident,
+**           already D2H-copied), RetrogradeGetChildCount(parentIdx) records long.
+** @param    pCtx      - the context to query
+** @param    parentIdx - index within the last batch
+** @return   Pointer into the context's host-resident children buffer.
+*/
+const UINT64_PAIR* RetrogradeGetChildren(const RetrogradeGpuContext* pCtx, int parentIdx);

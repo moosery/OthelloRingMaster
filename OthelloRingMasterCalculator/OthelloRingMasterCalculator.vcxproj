@@ -157,6 +157,10 @@
     <ClCompile Include="CalculatorInitLogger.cpp" />
     <ClCompile Include="StoreLevelScan.cpp" />
     <ClCompile Include="TerminalLevelBootstrap.cpp" />
+    <ClCompile Include="NonTerminalLevelStep.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="RetrogradeKernels.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CalculatorTypes.h" />
@@ -167,6 +171,9 @@
     <ClInclude Include="CalculatorInitLogger.h" />
     <ClInclude Include="StoreLevelScan.h" />
     <ClInclude Include="TerminalLevelBootstrap.h" />
+    <ClInclude Include="TerminalClassify.h" />
+    <ClInclude Include="NonTerminalLevelStep.h" />
+    <ClInclude Include="RetrogradeKernels.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">

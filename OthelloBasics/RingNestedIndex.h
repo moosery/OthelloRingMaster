@@ -273,6 +273,21 @@ struct RingNestedIndexReader
     ** @param  onBoard - called once per board with the reconstructed ring-ordered BOARD_KEY
     */
     void ExpandAll(const std::function<void(const BOARD_KEY& key)>& onBoard) const;
+
+    /*
+    ** Method: FindBoardPosition
+    ** @brief  Finds key's ordinal position among this level's boards -- the
+    **         same 0-based index ExpandAll would have delivered it at --
+    **         via a binary search at each level of the hierarchy instead of
+    **         a full ExpandAll walk. Used by the retrograde calculator to
+    **         locate a generated child's already-computed record in the
+    **         next level's counts file (positionally aligned to this same
+    **         board order -- see project_adaptive_counter_width_design memory).
+    ** @param  key          - the ring-ordered BOARD_KEY to find
+    ** @param  pOutPosition - out: key's 0-based position (== index into ring34), if found
+    ** @return true if key was found in this level's store.
+    */
+    bool FindBoardPosition(const BOARD_KEY& key, uint64_t* pOutPosition) const;
 };
 
 /*

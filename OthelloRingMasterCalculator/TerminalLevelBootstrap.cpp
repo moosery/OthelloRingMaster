@@ -10,10 +10,10 @@
 #include "CalculatorFileName.h"
 #include "OutcomeTriple.h"
 #include "CalculatorCountsFile.h"
+#include "TerminalClassify.h"
 #include "RSFFileName.h"
 #include "OthelloBasics.h"
 #include "RingNestedIndex.h"
-#include <bit>
 #include <windows.h>
 
 /* Internal Helpers */
@@ -86,13 +86,10 @@ static void ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pCo
         ** is exactly the one where none did). Final piece count alone
         ** decides the outcome.
         */
-        int blackCount = std::popcount(key.ullCellsInUse & key.ullCellColors);
-        int whiteCount = std::popcount(key.ullCellsInUse) - blackCount;
-
-        int outcome;
-        if (blackCount > whiteCount)      { outcome = OUTCOME_BLACK_WIN; totals.blackWins++; }
-        else if (whiteCount > blackCount) { outcome = OUTCOME_WHITE_WIN; totals.whiteWins++;  }
-        else                              { outcome = OUTCOME_TIE;      totals.ties++;       }
+        int outcome = ClassifyTerminalOutcome(key);
+        if (outcome == OUTCOME_BLACK_WIN)      totals.blackWins++;
+        else if (outcome == OUTCOME_WHITE_WIN) totals.whiteWins++;
+        else                                   totals.ties++;
 
         NibbleOutcomeTriple triple;
         NibbleOutcomeTripleSetOneHot(&triple, outcome);

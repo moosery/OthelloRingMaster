@@ -4,6 +4,67 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.21.0] - 2026-07-08
+
+### Calculator Phase 3: the non-terminal backward step
+
+- New `OthelloBasics/RingNestedIndex.h`/`.cpp`: `RingNestedIndexReader::
+  FindBoardPosition` -- finds a board's ordinal position among a level's
+  boards (the same index `ExpandAll` would deliver it at) by binary-
+  searching down the `CellsInUse -> Ring_1/Ring_2 -> Ring_3_4` hierarchy,
+  instead of a full `ExpandAll` walk. This resolves the design's open
+  "flat binary search vs. nested-index hierarchy" lookup-mechanism
+  question in favor of reusing the same compact, already-resident nested
+  representation for lookups too, rather than materializing a separate
+  flat array.
+- New `OthelloRingMasterCalculator/RetrogradeKernels.h`/`.cu`: the GPU
+  side of the backward step. One thread per parent board (mirroring
+  `GpuKernels.cu`'s `ExpandKernel` internally, same move-gen/flip/
+  canonicalize/ring-boundary-conversion logic), but writing each parent's
+  children into a fixed, non-atomic, per-thread-private slot range --
+  no sort, no dedup, since retrograde summing wants every (parent, child)
+  edge counted once, not deduped. Both the next-player tag and a new
+  color-flip tag are tracked **per child, not per parent**: canonicalization's
+  16-way symmetry search includes a color-swap family, and which family
+  wins is data-dependent per child, so two children of the same parent can
+  differ here (caught during review; the first draft wrongly assumed one
+  next-player per parent).
+- **Color-flip correctness**: a child whose canonical form came from the
+  color-swap symmetry has its stored black/white win counts swapped
+  relative to the real, played-out continuation -- must be swapped back
+  before summing into the parent (tie count unaffected). Independently
+  validated against `OthelloLevelBlaster`'s own `OthelloLevelBlasterWinCalculator/
+  RetroKernels.cu`, which already discovered and fixed this exact issue
+  against real 4x4 data (`dev_swapColors`) -- confirms both the bug and the fix.
+- New `OthelloRingMasterCalculator/TerminalClassify.h`: `ClassifyTerminalOutcome`,
+  factored out of Phase 2's `TerminalLevelBootstrap.cpp` so the non-terminal
+  step can classify individual terminal boards at any level the same way
+  (a board can be terminal well before the deepest level).
+- New `OthelloRingMasterCalculator/NonTerminalLevelStep.h`/`.cpp`:
+  `ProcessNonTerminalLevel` -- the real Phase 3 driver. Loads level+1's
+  nested-index lookup structures and already-computed counts (both
+  colors, fully in memory -- level+1's compact board-key representation
+  and finished counts array, not a wide scratch buffer), streams level's
+  own boards through the GPU in batches, classifies terminal boards
+  directly or sums non-terminal boards' children (with the color-flip
+  swap applied), and writes results out in original board order -- no
+  re-serialization step needed, since one thread per parent naturally
+  preserves order. Overflow triggers an abort-and-retry of the WHOLE
+  level (both colors) at the next-wider tier, per the design's abort-and-
+  retry mechanism; a successful completion calls
+  `CounterWidthConfigBumpLevel` to propagate this level's confirmed width
+  as a floor to shallower, not-yet-processed levels.
+- `OthelloRingMasterCalculator.cpp`'s `main()` now runs the Phase 2
+  terminal bootstrap followed by exactly one Phase 3 non-terminal step
+  (the next-shallower level), then exits -- looping this over every
+  remaining level down to level 0 is Phase 4's job, not yet built.
+- Known, deliberate limitation carried forward from the design
+  discussion: level+1's counts array is loaded wholesale into memory for
+  lookups, which is fine at the 4x4 validation scale (Phase 6) but not
+  yet scale-safe for real 6x6's largest middle levels -- revisit before
+  Phase 7, alongside the user's drive-sharded lookup idea already
+  recorded in `project_retrograde_calculator_implementation_plan` memory.
+
 ## [0.20.0] - 2026-07-08
 
 ### Calculator Phase 2: terminal-level bootstrap -- the first real end-to-end slice

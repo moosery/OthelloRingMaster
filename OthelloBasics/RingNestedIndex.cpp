@@ -367,6 +367,94 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
 }
 
 /*
+** Function: BinarySearchPattern
+** @brief    Binary searches vec[lo, hi) for an element whose pattern field
+**           equals target.
+** @param    vec    - vector to search (elements must expose a `pattern` field)
+** @param    lo     - inclusive start of the sub-range to search
+** @param    hi     - exclusive end of the sub-range to search
+** @param    target - pattern value to find
+** @param    pOutIdx - out: the matching index, if found
+** @return   true if a match was found within [lo, hi).
+*/
+template <typename T>
+static bool BinarySearchPattern(const std::vector<T>& vec, uint64_t lo, uint64_t hi,
+                                 decltype(T::pattern) target, uint64_t* pOutIdx)
+{
+    uint64_t searchEnd = hi;
+
+    while (lo < hi)
+    {
+        uint64_t mid = lo + (hi - lo) / 2;
+        if (vec[mid].pattern < target) lo = mid + 1;
+        else                           hi = mid;
+    }
+
+    if (lo < searchEnd && vec[lo].pattern == target)
+    {
+        *pOutIdx = lo;
+        return true;
+    }
+    return false;
+}
+
+/*
+** Method: RingNestedIndexReader::FindBoardPosition
+** @brief  See RingNestedIndex.h.
+*/
+bool RingNestedIndexReader::FindBoardPosition(const BOARD_KEY& key, uint64_t* pOutPosition) const
+{
+    uint32_t ring1Pattern  = (uint32_t)((key.ullCellColors >> RING1_SHIFT)  & ((1u << RING1_BITS) - 1));
+    uint32_t ring2Pattern  = (uint32_t)((key.ullCellColors >> RING2_SHIFT)  & ((1u << RING2_BITS) - 1));
+    uint16_t ring34Pattern = (uint16_t)((key.ullCellColors >> RING34_SHIFT) & ((1u << RING34_BITS) - 1));
+
+    size_t numCellsInUse = cellsInUse.size();
+
+    uint64_t i;
+    if (!BinarySearchPattern(cellsInUse, 0, numCellsInUse, key.ullCellsInUse, &i))
+        return false;
+
+    uint64_t begin, end;
+
+    if (hasRing1)
+    {
+        begin = cellsInUse[i].offset;
+        end   = (i + 1 < numCellsInUse) ? cellsInUse[i + 1].offset : (uint64_t)ring1.size();
+
+        uint64_t j;
+        if (!BinarySearchPattern(ring1, begin, end, ring1Pattern, &j))
+            return false;
+
+        begin = ring1[j].offset;
+        end   = begin + ring1[j].count;
+    }
+    else
+    {
+        begin = cellsInUse[i].offset;
+        end   = (i + 1 < numCellsInUse) ? cellsInUse[i + 1].offset
+              : hasRing2               ? (uint64_t)ring2.size()
+                                        : (uint64_t)ring34.size();
+    }
+
+    if (hasRing2)
+    {
+        uint64_t k;
+        if (!BinarySearchPattern(ring2, begin, end, ring2Pattern, &k))
+            return false;
+
+        begin = ring2[k].offset;
+        end   = begin + ring2[k].count;
+    }
+
+    uint64_t m;
+    if (!BinarySearchPattern(ring34, begin, end, ring34Pattern, &m))
+        return false;
+
+    *pOutPosition = m;
+    return true;
+}
+
+/*
 ** Function: RingNestedIndexFileCount
 ** @brief    Counts how many of the applicable nested-index files exist on disk.
 ** @param    cellsInUsePath - path to the CellsInUse file

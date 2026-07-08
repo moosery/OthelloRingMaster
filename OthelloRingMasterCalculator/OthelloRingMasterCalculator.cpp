@@ -22,6 +22,8 @@
 #include "CalculatorInitLogger.h"
 #include "StoreLevelScan.h"
 #include "TerminalLevelBootstrap.h"
+#include "NonTerminalLevelStep.h"
+#include "CounterWidthConfig.h"
 #include <windows.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -103,8 +105,11 @@ static void ParseArgs(int argc, char* argv[])
 /*
 ** Function: main
 ** @brief    Parses CLI args, opens the logger, finds the deepest completed
-**           level in RingMaster's store, and runs the Phase 2
-**           terminal-level bootstrap against it.
+**           level in RingMaster's store, runs the Phase 2 terminal-level
+**           bootstrap against it, then (if a shallower level exists) runs
+**           the Phase 3 non-terminal backward step for exactly the next
+**           level up. Looping this over every remaining level is Phase 4's
+**           job, not this file's.
 ** @param    argc - argument count
 ** @param    argv - argument values
 ** @return   0 on success, 1 on argument or precondition error.
@@ -135,9 +140,17 @@ int main(int argc, char* argv[])
     }
 
     LoggerLog("Deepest completed level: %d\n", deepestLevel);
-    LoggerLog("(Phase 2: terminal-level bootstrap only -- the non-terminal backward walk is not yet implemented.)\n");
+
+    CounterWidthConfig widthConfig;
+    CounterWidthConfigLoad(&widthConfig, g_state.cacheDirectory, g_config.boardSize);
 
     ProcessTerminalLevel(&g_config, &g_state, deepestLevel);
+
+    if (deepestLevel > 0)
+    {
+        LoggerLog("(Phase 3: processing exactly one non-terminal level -- the full backward walk driver is not yet implemented.)\n");
+        ProcessNonTerminalLevel(&g_config, &g_state, &widthConfig, deepestLevel - 1);
+    }
 
     return 0;
 }
