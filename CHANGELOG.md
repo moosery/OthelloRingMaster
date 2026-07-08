@@ -4,6 +4,31 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.14.0] - 2026-07-07
+
+### Wire main() into the real per-level solve loop -- Phase 4 complete
+
+- Rewrote `OthelloRingMaster.cpp`: CLI arg parsing (`--board-size`,
+  `--drives`, `--store-drive`, `--store-dir`, `--cache-dir`, `--port`,
+  `--compress`/`--compress-store-only`/`--no-compress`, `--lz4-drives`),
+  Ctrl+C graceful-shutdown handling, and the real per-level driver loop
+  (GPU solve -> merge-writer drain -> flush -> end-of-level merge -> stats
+  snapshot -> `_complete` sentinel write), replacing the round-trip-test-only stub.
+- The Phase 2 ring boundary-conversion self-test (`OBCuda_InitRingPermutationTables`
+  + `OBCuda_TestRingRoundTrip`) now runs once at startup, before `InitSolver`,
+  as a real safety gate -- a silently wrong permutation table would corrupt
+  every board from that point on with no other symptom, so `main()` now
+  fatals (exit 1) if it fails, instead of that being the program's entire purpose.
+- Defaults changed from Blaster's: stats port **17532** (not 17432), cache
+  dir `C:\OthelloRingMaster\Cache`, store dir `\OthelloRingMaster\Store`.
+  Usage text and sentinel magic (`RSF_SENTINEL_STATS_MAGIC`) updated to
+  match the `RSF` naming established in earlier steps.
+- **This completes Phase 4** (porting the live-solver pipeline from
+  `OthelloLevelBlaster`): `OthelloRingMaster` is now a real GPU-solving,
+  ring-ordered-storage Othello level blaster, not just an offline
+  board-key/ring-conversion toolkit. See project memory for the full
+  8-step history (v0.6.0 through this release).
+
 ## [0.13.0] - 2026-07-07
 
 ### Port StatsListener; add new OthelloRingMasterStatus client project (Phase 4 Step 7)
