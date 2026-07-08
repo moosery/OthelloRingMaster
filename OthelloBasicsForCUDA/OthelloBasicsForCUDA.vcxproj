@@ -156,9 +156,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="OthelloBasicsForCUDA.cu" />
+    <CudaCompile Include="RingConversion.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloBasicsForCUDA.h" />
+    <ClInclude Include="RingConversion.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

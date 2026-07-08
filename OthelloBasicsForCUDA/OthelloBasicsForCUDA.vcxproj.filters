@@ -18,9 +18,15 @@
     <CudaCompile Include="OthelloBasicsForCUDA.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
+    <CudaCompile Include="RingConversion.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OthelloBasicsForCUDA.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RingConversion.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

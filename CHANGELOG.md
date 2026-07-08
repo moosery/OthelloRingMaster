@@ -4,6 +4,35 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.4.0] - 2026-07-07
+
+### Add GPU ring<->row-major boundary conversion (RingConversion)
+
+- Added `OthelloBasicsForCUDA/RingConversion.h`/`.cu`: `dev_RowMajorToRing`/
+  `dev_RingToRowMajor`, the only place in the whole solution allowed to know
+  both bit orderings exist. Table-based (`dev_GatherByRingPermutation`, a
+  single primitive reused for both directions via constant-memory forward/
+  inverse tables), not the analyzer's original 64-iteration-per-call
+  approach -- appropriate now since this is real, permanent per-board GPU
+  code, not a one-shot offline tool.
+- `OBCuda_InitRingPermutationTables` builds the tables on the CPU (via
+  `OthelloBasics/RingPermutation.h`, which never touches an actual board's
+  bits) and uploads them to GPU constant memory once at startup.
+- Added `OBCuda_TestRingRoundTrip`, a validation kernel checking (a) the
+  forward/inverse tables are true inverses of each other across several
+  edge-case bit patterns, and (b) the known Othello starting position
+  forward-converts to the exact ring-ordered constant already hand-verified
+  on the CPU side (`BoardKeyAllocate.cpp`) -- catches a table that's
+  internally consistent but simply wrong, which a round-trip check alone
+  can't.
+- Wired `OthelloRingMaster` up to actually call into the rest of the
+  solution for the first time: added the missing `OthelloBasicsForCUDA`
+  project reference (transitively pulling in `OthelloBasics`/`Utility`),
+  the CUDA build customization import (needed for the final EXE to link
+  against the CUDA runtime pulled in by `OthelloBasicsForCUDA.lib`), and
+  the necessary include directories. `main()` now runs the round-trip test
+  and reports PASS/FAIL instead of just printing a greeting.
+
 ## [0.3.0] - 2026-07-07
 
 ### Re-scope OthelloBasics / OthelloBasicsForCUDA to the CPU-organizes/GPU-solves boundary
