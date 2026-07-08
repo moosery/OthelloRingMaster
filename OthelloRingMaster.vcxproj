@@ -156,6 +156,7 @@
     <ClCompile Include="CreateSeedFile.cpp" />
     <ClCompile Include="LevelSolverThread.cpp" />
     <ClCompile Include="MergeFiles.cpp" />
+    <ClCompile Include="InitSolver.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="GpuInfo.cu" />
@@ -172,6 +173,7 @@
     <ClInclude Include="GpuKernels.h" />
     <ClInclude Include="LevelSolverThread.h" />
     <ClInclude Include="MergeFiles.h" />
+    <ClInclude Include="InitSolver.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">

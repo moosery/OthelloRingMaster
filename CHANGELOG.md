@@ -4,6 +4,26 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.12.0] - 2026-07-07
+
+### Port InitSolver: startup sequence and teardown (Phase 4 Step 6)
+
+- Added `InitSolver.h`/`.cpp`: the one-time startup sequence
+  (`computeState` buffer sizing, `ScanForResumeLevel` sentinel-based resume
+  scan, `cleanUpDrives`/`createDirectories` ephemeral working-directory
+  purge/recreate, drive-ledger seeding, thread-pool creation/start/wait-ready)
+  and matching `CleanupSolver` teardown. Mechanical rename
+  (`BOARD_KEY_DISK`->`UINT64_PAIR`, `BLF*`->`RSF*`, extensions
+  `.blf`/`.blfz`/`.blfzl`->`.rsf`/`.rsfz`/`.rsfzl`).
+- **Renamed the single-instance mutex** from `Local\OLB_SingleInstance` to
+  `Local\OthelloRingMaster_SingleInstance` -- nothing in this project
+  should reference Blaster naming, even in an OS-level name nobody but this
+  process ever reads.
+- With this step, every piece Step 8 needs to wire into `main()` now
+  exists: config/state types, machine/GPU probes, seed file, GPU kernels,
+  feeder/merge-writer jobs, merge/cross-drive consolidation, and
+  startup/teardown.
+
 ## [0.11.0] - 2026-07-07
 
 ### Port MergeFiles: k-way merge, cross-drive consolidation, end-of-level merge (Phase 4 Step 5)
