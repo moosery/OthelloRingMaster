@@ -3,9 +3,9 @@
 **
 ** Purpose:
 **   Declares GpuInformation, a snapshot of the first CUDA device's identity,
-**   compute, memory, and concurrency characteristics, plus derived
-**   scheduling hints (optimalBatchSize/recommendedWorkerCount) used to size
-**   the live solver's GPU batches and CPU worker-thread counts.
+**   compute, memory, and concurrency characteristics, plus a derived
+**   scheduling hint (optimalBatchSize) used to size the live solver's GPU
+**   batches.
 **
 ** Notes:
 **   Adapted from an earlier solver implementation, unchanged -- pure
@@ -23,7 +23,7 @@
 /*
 ** Type:    GpuInformation
 ** @brief   Identity, compute, memory, and concurrency characteristics of one
-**          CUDA device, plus derived batch/worker-count scheduling hints.
+**          CUDA device, plus a derived batch-size scheduling hint.
 */
 typedef struct __GpuInformation
 {
@@ -34,7 +34,7 @@ typedef struct __GpuInformation
     int   computeCapabilityMinor;
 
     /* --- Compute --- */
-    int  smCount;          /* streaming multiprocessor count */
+    int  smCount;           /* streaming multiprocessor count */
     int  maxThreadsPerSM;   /* max resident threads per SM    */
     int  warpSize;
 
@@ -46,8 +46,7 @@ typedef struct __GpuInformation
     int  asyncEngineCount;   /* hardware DMA copy engines */
 
     /* --- Derived --- */
-    int  optimalBatchSize;        /* boards per GPU batch to saturate SMs               */
-    int  recommendedWorkerCount;  /* suggested CPU worker threads (from async engine count) */
+    int  optimalBatchSize;   /* boards per GPU batch to saturate SMs */
 } GpuInformation, * PGpuInformation;
 
 /* Functions */

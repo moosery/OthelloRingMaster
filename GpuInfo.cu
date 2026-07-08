@@ -63,14 +63,6 @@ void GetGpuInformation(GpuInformation* pInfo)
     */
     int sat = p.multiProcessorCount * (p.maxThreadsPerMultiProcessor / 256) * 256;
     pInfo->optimalBatchSize = (sat < 65536) ? sat : 65536;
-
-    /* Worker count: 2 per async engine (enough to keep each DMA engine fed),
-    ** clamped to a sane [2, 8] range regardless of hardware.
-    */
-    int w = p.asyncEngineCount * 2;
-    if (w < 2) w = 2;
-    if (w > 8) w = 8;
-    pInfo->recommendedWorkerCount = w;
 }
 
 /*
@@ -92,5 +84,4 @@ void PrintGpuInformation(const GpuInformation* p)
     LoggerLog("  L2 Cache           : %.0f MB\n", l2MB);
     LoggerLog("  Async Engines      : %d\n", p->asyncEngineCount);
     LoggerLog("  Optimal Batch Size : %d\n", p->optimalBatchSize);
-    LoggerLog("  Worker Count       : %d\n", p->recommendedWorkerCount);
 }

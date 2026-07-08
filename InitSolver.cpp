@@ -636,8 +636,17 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     DriveInitLedger(pState, pConfig->storeDrive);
 
     int numMWThreads        = pState->numMergeWriters;
-    int numGPUFeederThreads = 1;
     int numStatsThreads     = 1;
+
+    /* Exactly one feeder thread: GpuAccumulatorCreate makes one accumulator
+    ** owning all GPU device buffers for the whole level, so there is only
+    ** ever one thread to size regardless of the GPU's own hardware
+    ** concurrency (async engine count, etc.) -- if a future design ever
+    ** needs more than one, that's a decision this project makes from its
+    ** own requirements, not something a generic GPU capability query can
+    ** answer on its behalf.
+    */
+    int numGPUFeederThreads = 1;
 
     InitializeCriticalSection(&pState->imergeCS);
 

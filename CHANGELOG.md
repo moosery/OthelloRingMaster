@@ -4,6 +4,21 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.16.6] - 2026-07-07
+
+### Remove GpuInformation.recommendedWorkerCount -- computed, never consumed
+
+- `GpuInfo.cu` computed `recommendedWorkerCount` (2 per async engine,
+  clamped [2,8]) as sizing guidance for concurrent GPU-feeder threads, but
+  `InitSolver.cpp` hardcodes `numGPUFeederThreads = 1` and never reads it --
+  this project creates exactly one `GpuAccumulator` per level (one thread
+  ever needs sizing), so the field implied a flexibility nothing in this
+  design uses. Removed the field, its computation, and its log line.
+- Added a comment at `InitSolver.cpp`'s `numGPUFeederThreads = 1` explaining
+  why: if a future design ever needs more than one feeder thread, that's a
+  decision this project makes from its own requirements, not something a
+  generic GPU capability query should hand it a number for.
+
 ## [0.16.5] - 2026-07-07
 
 ### Never silently drop data on a capacity/read failure -- fatal loudly instead
