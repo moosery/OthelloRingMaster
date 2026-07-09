@@ -33,15 +33,26 @@ than just read an already-finished store.
 
 ## Status
 
-Early stage. So far:
-- Solution scaffolded; `Utility` subproject ported over from
-  `OthelloLevelBlaster` (general-purpose infra: memory arena, binary search,
-  clock/timing, drive detection+benchmarking, error handling, file/dir
-  helpers, logging, tracked heap allocation, reader/writer locking, thread
-  pool).
-- The ring-split storage layout, GPU boundary conversion, and retrograde
-  counter work described above are designed (see project history / internal
-  notes) but not yet implemented in this solution.
+Core pipeline implemented and validated on 4x4:
+- **`OthelloRingMaster`** -- the forward solver. Ring-gathered nested-index
+  storage (`CellsInUse` -> `Ring_1` -> `Ring_2` -> `Ring_3_4`), row-major GPU
+  move-generation/dedup with ring<->row-major boundary conversion,
+  drive-spanning multi-writer/merge pipeline, whole-level resumability via
+  sentinel files, live TCP status querying (`OthelloRingMasterStatus`).
+- **`OthelloRingMasterCalculator`** -- the retrograde win/tie/loss
+  calculator. Walks a completed `OthelloRingMaster` store backward from its
+  deepest level to level 0: classifies terminal boards directly, sums
+  non-terminal ones by regenerating children on the GPU and looking each
+  one up against level+1's already-computed results (via drive-spanning
+  segmented scratch, never holding a whole level resident in memory), with
+  adaptive per-level counter width (nibble through arbitrary byte widths,
+  widening automatically on overflow). Whole-level resumability, live TCP
+  status querying (`OthelloRingMasterCalculatorStatus`), table-ized
+  per-level logging, `--force` to force a clean recompute.
+- **Validated end to end on 4x4**: a full `OthelloRingMaster` +
+  `OthelloRingMasterCalculator` run reproduces the known-correct whole-tree
+  result exactly -- 24,632 black wins / 30,116 white wins / 5,312 ties.
+- Not yet run at 6x6 or 8x8 scale.
 
 ## Related
 
