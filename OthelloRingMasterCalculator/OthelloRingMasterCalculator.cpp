@@ -33,6 +33,48 @@
 OthelloRingMasterCalculatorConfig g_config = {};
 OthelloRingMasterCalculatorState  g_state  = {};
 
+/* Internal Helpers */
+
+/*
+** Function: PurgeCalculatorOutput
+** @brief    Deletes every one of this board size's own sentinel and
+**           counts files in countsDir -- both share the "Level_NNNN_
+**           WxH_" filename prefix (CalculatorFileName.h's CalcNameCountsFile/
+**           CalcSentinelNameComplete), so one wildcard sweep catches both.
+**           Only matches THIS board size, since countsDir can legitimately
+**           hold more than one board size's completed results at once
+**           (board size is embedded in every filename, not the directory).
+** @param    countsDir - this calculator's own output directory
+** @param    boardSize - exact board size to purge (others untouched)
+*/
+static void PurgeCalculatorOutput(const char* countsDir, int boardSize)
+{
+    char pattern[MAX_FULL_PATH_NAME];
+    snprintf(pattern, sizeof(pattern), "%s\\Level_*_%dx%d_*", countsDir, boardSize, boardSize);
+
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        LoggerLog("--force: no existing %dx%d output found under '%s'\n", boardSize, boardSize, countsDir);
+        return;
+    }
+
+    int deleted = 0;
+    do
+    {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        char fullPath[MAX_FULL_PATH_NAME];
+        snprintf(fullPath, sizeof(fullPath), "%s\\%s", countsDir, fd.cFileName);
+        DeleteFileA(fullPath);
+        deleted++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    LoggerLog("--force: deleted %d existing %dx%d sentinel/counts file(s) under '%s'\n",
+              deleted, boardSize, boardSize, countsDir);
+}
+
 /* Functions */
 
 /*
@@ -58,6 +100,9 @@ static void PrintUsage(const char* prog)
     printf("  --use-drives STR  Drive letters available for segmented scratch (e.g. DEFG) [default: DEFY, same as RingMaster's own default]\n");
     printf("  --scratch-dir PATH Sub-path (on whichever scratch drive) segments are written under [default: \\OthelloRingMasterCalculator\\Scratch]\n");
     printf("  --port N          Stats listener TCP port                    [default: 17632]\n");
+    printf("  --force           Delete this board size's own sentinel/counts files before starting,\n");
+    printf("                    ignoring any prior run's completed levels (RingMaster's store under\n");
+    printf("                    --store-dir is never touched -- only this calculator's own output)\n");
     printf("  --help            Show this help\n\n");
 }
 
@@ -89,6 +134,7 @@ static void ParseArgs(int argc, char* argv[])
     strncpy(g_config.useDrives, "DEFY", sizeof(g_config.useDrives) - 1);
     strncpy(g_config.scratchDirNameNoDrive, "\\OthelloRingMasterCalculator\\Scratch", sizeof(g_config.scratchDirNameNoDrive) - 1);
     g_config.statsPort = 17632;
+    g_config.force = false;
 
     for (int i = 1; i < argc; i++)
     {
@@ -121,6 +167,8 @@ static void ParseArgs(int argc, char* argv[])
             strncpy(g_config.scratchDirNameNoDrive, argv[++i], sizeof(g_config.scratchDirNameNoDrive) - 1);
         else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             g_config.statsPort = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--force") == 0)
+            g_config.force = true;
         else
         {
             fprintf(stderr, "ERROR: unknown argument '%s'\n\n", argv[i]);
@@ -163,6 +211,19 @@ int main(int argc, char* argv[])
     LoggerLog("  Cache dir     : %s\n", g_state.cacheDirectory);
     LoggerLog("  Drive cache   : %s\n", g_config.driveCacheDirName);
     LoggerLog("  Stats port    : %d\n", g_config.statsPort);
+
+    /* --force: wipe this board size's own sentinels/counts before doing
+    ** anything else, so every level below gets genuinely reprocessed
+    ** instead of skipped as already-complete. Only this calculator's own
+    ** output is touched -- RingMaster's store under storeDirectory (read-
+    ** only to this program) is never affected. The width-config cache
+    ** (counterwidthconfig_WxH.json) is deliberately NOT reset here: the
+    ** minimum-safe-width knowledge it holds is still valid even when the
+    ** counts themselves are being recomputed, and clearing it would just
+    ** cause wasted overflow-retry churn re-learning the same widths.
+    */
+    if (g_config.force)
+        PurgeCalculatorOutput(g_state.countsDirectory, g_config.boardSize);
 
     int deepestLevel = FindDeepestCompleteLevel(g_state.storeDirectory, g_config.boardSize);
     if (deepestLevel < 0)

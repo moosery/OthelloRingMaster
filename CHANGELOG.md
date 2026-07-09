@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.6] - 2026-07-09
+
+### New --force option to force a clean re-run
+
+- `OthelloRingMasterCalculator` gains `--force`: deletes this board size's own `_calc_complete` sentinels and `.counts` files (a single wildcard sweep on the `Level_NNNN_WxH_` filename prefix shared by both) before starting, so every level is genuinely reprocessed instead of skipped as already-complete. Only matches the exact board size being run -- `countsDir` can legitimately hold more than one board size's results at once, since board size is embedded in every filename rather than the directory. RingMaster's own store (read-only input under `--store-dir`) is never touched. The width-config cache (`counterwidthconfig_WxH.json`) is deliberately left alone -- its learned minimum-safe-width knowledge is still valid even when recomputing counts, and clearing it would just cause wasted overflow-retry churn re-learning the same widths.
+
+
 ## [0.25.5] - 2026-07-09
 
 ### Shared drive-benchmark cache with RingMaster, and sentinel-persisted level stats (resume no longer loses the FINAL RESULT)
