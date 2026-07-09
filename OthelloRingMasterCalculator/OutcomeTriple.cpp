@@ -128,3 +128,56 @@ bool OutcomeTripleAdd(OutcomeTriple* pAccum, const OutcomeTriple* pAddend, int b
     memcpy(pAccum->tie,   tieOut,   byteWidth);
     return true;
 }
+
+/*
+** Function: WinTieLossTripleAccumulateNibble
+** @brief    See OutcomeTriple.h.
+*/
+void WinTieLossTripleAccumulateNibble(WinTieLossTriple* pAccum, const NibbleOutcomeTriple* pAddend, int level)
+{
+    uint64_t newBlack = pAccum->blackWins + pAddend->black;
+    uint64_t newWhite = pAccum->whiteWins + pAddend->white;
+    uint64_t newTie   = pAccum->ties      + pAddend->tie;
+
+    if (newBlack < pAccum->blackWins || newWhite < pAccum->whiteWins || newTie < pAccum->ties)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "WinTieLossTripleAccumulateNibble: level %d display total overflowed uint64_t -- "
+              "true count exceeds what this log format can represent", level);
+
+    pAccum->blackWins = newBlack;
+    pAccum->whiteWins = newWhite;
+    pAccum->ties      = newTie;
+}
+
+/*
+** Function: WinTieLossTripleAccumulateWide
+** @brief    See OutcomeTriple.h.
+*/
+void WinTieLossTripleAccumulateWide(WinTieLossTriple* pAccum, const OutcomeTriple* pAddend, int byteWidth, int level)
+{
+    if (byteWidth > 8)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "WinTieLossTripleAccumulateWide: level %d value needs %d bytes, wider than "
+              "this display total's 8-byte (uint64_t) capacity", level, byteWidth);
+
+    uint64_t black = 0, white = 0, tie = 0;
+    for (int i = byteWidth - 1; i >= 0; i--)
+    {
+        black = (black << 8) | pAddend->black[i];
+        white = (white << 8) | pAddend->white[i];
+        tie   = (tie   << 8) | pAddend->tie[i];
+    }
+
+    uint64_t newBlack = pAccum->blackWins + black;
+    uint64_t newWhite = pAccum->whiteWins + white;
+    uint64_t newTie   = pAccum->ties      + tie;
+
+    if (newBlack < pAccum->blackWins || newWhite < pAccum->whiteWins || newTie < pAccum->ties)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "WinTieLossTripleAccumulateWide: level %d display total overflowed uint64_t -- "
+              "true count exceeds what this log format can represent", level);
+
+    pAccum->blackWins = newBlack;
+    pAccum->whiteWins = newWhite;
+    pAccum->ties      = newTie;
+}

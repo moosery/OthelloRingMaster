@@ -20,6 +20,7 @@
 
 /* Includes */
 #include "Utility.h"
+#include "CalculatorTypes.h"   /* WinTieLossTriple */
 
 /* Structures and Types */
 
@@ -121,3 +122,38 @@ void OutcomeTripleSetOneHot(OutcomeTriple* pTriple, int byteWidth, int outcome);
 **           reserved all-ones sentinel for byteWidth. true if the add succeeded.
 */
 bool OutcomeTripleAdd(OutcomeTriple* pAccum, const OutcomeTriple* pAddend, int byteWidth);
+
+/*
+** Function: WinTieLossTripleAccumulateNibble
+** @brief    Adds pAddend (one board's own final nibble-tier outcome --
+**           a direct terminal one-hot value, or the recursively-summed
+**           result of a non-terminal board) into pAccum's running
+**           uint64_t display total. Unlike the old terminal-only
+**           approximation this replaces, accumulating every processed
+**           board's own value this way makes the running total exact --
+**           in particular, level 0 always has exactly one (non-terminal)
+**           board, so its accumulated total after this call IS the real,
+**           fully validated game count, not an approximation.
+** @param    pAccum  - in/out: running WinTieLossTriple display total
+** @param    pAddend - one board's own nibble-tier outcome triple
+** @param    level   - for the Fatal message only, if this ever overflows
+*/
+void WinTieLossTripleAccumulateNibble(WinTieLossTriple* pAccum, const NibbleOutcomeTriple* pAddend, int level);
+
+/*
+** Function: WinTieLossTripleAccumulateWide
+** @brief    Same as WinTieLossTripleAccumulateNibble, for a wide-tier
+**           OutcomeTriple. Fatals if byteWidth exceeds 8 (pAddend's own
+**           value can't fit in a uint64_t at all) or if adding it would
+**           overflow pAccum -- a display-only limit, unrelated to the
+**           persisted counts file's own arbitrary-precision correctness
+**           (see OutcomeTriple's own comments); reachable only at scales
+**           far beyond anything this project has run so far, and a real
+**           signal to revisit this display mechanism if it ever fires,
+**           not something to silently truncate around.
+** @param    pAccum     - in/out: running WinTieLossTriple display total
+** @param    pAddend    - one board's own wide-tier outcome triple
+** @param    byteWidth  - pAddend's tier width in bytes
+** @param    level      - for the Fatal message only
+*/
+void WinTieLossTripleAccumulateWide(WinTieLossTriple* pAccum, const OutcomeTriple* pAddend, int byteWidth, int level);

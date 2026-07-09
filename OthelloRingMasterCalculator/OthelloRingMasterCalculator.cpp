@@ -51,7 +51,7 @@ static void PrintUsage(const char* prog)
     printf("  --counts-drive L  Drive letter this calculator writes its own counts files to [default: Y]\n");
     printf("  --counts-dir PATH Sub-path on counts drive (no drive letter) [default: \\OthelloRingMasterCalculator\\Counts]\n");
     printf("  --cache-dir PATH  Full path for logs and the width-config file [default: C:\\OthelloRingMasterCalculator\\Cache]\n");
-    printf("  --use-drives STR  Drive letters available for segmented scratch (e.g. DEFG) [default: auto-enumerate all fixed local drives]\n");
+    printf("  --use-drives STR  Drive letters available for segmented scratch (e.g. DEFG) [default: DEFY, same as RingMaster's own default]\n");
     printf("  --scratch-dir PATH Sub-path (on whichever scratch drive) segments are written under [default: \\OthelloRingMasterCalculator\\Scratch]\n");
     printf("  --port N          Stats listener TCP port                    [default: 17632]\n");
     printf("  --help            Show this help\n\n");
@@ -71,7 +71,13 @@ static void ParseArgs(int argc, char* argv[])
     g_config.countsDrive = 'Y';
     strncpy(g_config.countsDirNameNoDrive, "\\OthelloRingMasterCalculator\\Counts", sizeof(g_config.countsDirNameNoDrive) - 1);
     strncpy(g_config.cacheDirName, "C:\\OthelloRingMasterCalculator\\Cache", sizeof(g_config.cacheDirName) - 1);
-    g_config.useDrives[0] = '\0';
+    /* Matches RingMaster's own default (OthelloRingMaster.cpp) exactly --
+    ** an explicit drive list, never the boot/system drive. An empty
+    ** string here would fall through to GetDriveInformation's "NULL ->
+    ** auto-enumerate every fixed local drive" behavior, which includes
+    ** C: -- never appropriate as scratch space.
+    */
+    strncpy(g_config.useDrives, "DEFY", sizeof(g_config.useDrives) - 1);
     strncpy(g_config.scratchDirNameNoDrive, "\\OthelloRingMasterCalculator\\Scratch", sizeof(g_config.scratchDirNameNoDrive) - 1);
     g_config.statsPort = 17632;
 

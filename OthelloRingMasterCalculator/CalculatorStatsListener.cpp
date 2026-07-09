@@ -115,8 +115,7 @@ static void BuildCalculatorStatusResponse(PCalculatorContext pCtx, char* buf, in
                   (unsigned long long)cur->whiteToMoveTotals.whiteWins,
                   (unsigned long long)cur->whiteToMoveTotals.ties);
     n += snprintf(buf + n, bufSize - n,
-                  "  Combined so far        : blackWins=%llu whiteWins=%llu ties=%llu"
-                  "  (running census through this level -- best-effort display value, see file Notes)\n",
+                  "  Combined so far        : blackWins=%llu whiteWins=%llu ties=%llu\n",
                   (unsigned long long)cur->combinedTotals.blackWins,
                   (unsigned long long)cur->combinedTotals.whiteWins,
                   (unsigned long long)cur->combinedTotals.ties);

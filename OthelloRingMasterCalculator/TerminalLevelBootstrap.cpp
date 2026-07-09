@@ -46,8 +46,9 @@ struct TerminalPlayerResult
 ** @param    pState  - calculator state (storeDirectory, driveInfo, driveLedger, levelStats)
 ** @param    level   - the level to process
 ** @param    player  - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @return   This color's result (board count, best-effort totals, and --
-**           if this color has any boards -- the scratch segments holding the result).
+** @return   This color's result (board count, exact win/tie/loss totals,
+**           and -- if this color has any boards -- the scratch segments
+**           holding the result).
 */
 static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMasterCalculatorState pState,
                                                             int level, int player)
@@ -124,13 +125,12 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
         ** decides the outcome.
         */
         int outcome = ClassifyTerminalOutcome(key);
-        if (outcome == OUTCOME_BLACK_WIN)      result.totals.blackWins++;
-        else if (outcome == OUTCOME_WHITE_WIN) result.totals.whiteWins++;
-        else                                   result.totals.ties++;
 
         NibbleOutcomeTriple triple;
         NibbleOutcomeTripleSetOneHot(&triple, outcome);
         writer.WriteNibbleTriple(triple);
+
+        WinTieLossTripleAccumulateNibble(&result.totals, &triple, level);
 
         result.boardsProcessed++;
 

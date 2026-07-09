@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.4] - 2026-07-09
+
+### Per-level win/tie/loss totals are now exact (not terminal-only), plus a final-tally line and a drive-safety fix
+
+- **The real gap**: per-level `blackWins`/`whiteWins`/`ties` totals only ever counted boards directly terminal AT that level (a one-hot `if (isTerminal) blackWins++`), silently ignoring the actual recursively-summed value already computed and persisted for every non-terminal board. Since most boards at most levels are non-terminal, this total was near-meaningless everywhere except the single deepest level -- and for level 0 specifically (always exactly one board, always non-terminal, the true starting position) it always showed zero, even though the real, fully-validated answer was sitting right there in that board's own computed triple.
+- New `OutcomeTriple.h`/`.cpp`: `WinTieLossTripleAccumulateNibble`/`WinTieLossTripleAccumulateWide` -- adds a board's own final value (terminal or summed) into the level's running `uint64_t` display total, Fatal (never silent truncation) if a single value needs more than 8 bytes or if the running sum would overflow uint64_t -- unreachable at any board size this project runs today, and a deliberate signal to revisit this display mechanism if it ever does fire at real 8x8 scale.
+- `TerminalLevelBootstrap.cpp`/`NonTerminalLevelStep.cpp` now accumulate every processed board's own value this way, not just terminal ones. For level 0 this makes the level's `combinedTotals` the exact, fully validated final game-tree result the moment the whole backward walk reaches it.
+- `BackwardWalkDriver.cpp`'s `RunBackwardWalk` now logs a `FINAL RESULT` line once the walk reaches level 0 -- resume-safe: only printed when level 0 was actually (re)processed by THIS run, not silently assumed valid when a prior run had already completed it.
+- Removed now-stale "best-effort display approximation" wording from `PlayerLevelResult`, `TerminalLevelBootstrap.cpp`, and `CalculatorStatsListener.cpp`'s live status text -- these totals are exact now, not approximated.
+- **Drive-safety fix, caught by the user**: `OthelloRingMasterCalculator`'s default `--use-drives` was an empty string, which `GetDriveInformation` interprets as "auto-enumerate every fixed local drive" -- including C:, the boot/system drive, which RingMaster's own default (`DEFY`) never touches. Fixed the Calculator's default to match RingMaster's exactly.
+
+
 ## [0.25.3] - 2026-07-09
 
 ### NonTerminalLevelStep's completion log lines were missing win/tie/loss counts

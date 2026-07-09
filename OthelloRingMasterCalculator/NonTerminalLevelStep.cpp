@@ -34,7 +34,7 @@ struct PlayerLevelResult
 {
     bool             overflowed      = false;
     uint64_t         boardsProcessed = 0;
-    WinTieLossTriple totals          = {};   /* best-effort display approximation -- see file Notes */
+    WinTieLossTriple totals          = {};   /* exact running sum of every processed board's own value -- see WinTieLossTripleAccumulateNibble/Wide */
 
     SegmentList                           scratchSegments;
     std::vector<std::pair<char, int64_t>> scratchPlan;
@@ -101,8 +101,9 @@ struct ParentJobResult
 ** @param    byteWidth        - level's tier width for this attempt
 ** @param    maxMovesPerBoard - GetMaxMovesForBoardSize(boardSize)
 ** @param    gpuBatchSize     - parents per GPU round trip
-** @return   This color's result (overflowed flag, board count, best-effort
-**           totals, and -- on success -- the scratch segments holding the result).
+** @return   This color's result (overflowed flag, board count, exact
+**           running win/tie/loss totals, and -- on success -- the
+**           scratch segments holding the result).
 */
 static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
     POthelloRingMasterCalculatorConfig pConfig, POthelloRingMasterCalculatorState pState,
@@ -265,16 +266,18 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
             if (byteWidth == COUNTER_WIDTH_NIBBLE) writer.WriteNibbleTriple(jr.nibble);
             else                                    writer.WriteTriple(jr.wide);
 
-            /* Matches Phase 3's original scope exactly: totals is a count
-            ** of TERMINAL boards' one-hot classification, not a running
-            ** sum of the wide census (see file Notes on best-effort display).
+            /* Accumulate this board's own resulting value -- a direct
+            ** terminal one-hot classification, or the recursively-summed
+            ** result of a non-terminal board's children -- into the
+            ** level's running display total. This makes the total exact,
+            ** not an approximation: level 0 always has exactly one
+            ** (non-terminal) board, so its accumulated total after the
+            ** whole walk finishes IS the real, fully validated game count.
             */
-            if (jr.isTerminal)
-            {
-                if (jr.outcome == OUTCOME_BLACK_WIN)      result.totals.blackWins++;
-                else if (jr.outcome == OUTCOME_WHITE_WIN) result.totals.whiteWins++;
-                else                                       result.totals.ties++;
-            }
+            if (byteWidth == COUNTER_WIDTH_NIBBLE)
+                WinTieLossTripleAccumulateNibble(&result.totals, &jr.nibble, level);
+            else
+                WinTieLossTripleAccumulateWide(&result.totals, &jr.wide, byteWidth, level);
 
             result.boardsProcessed++;
         }
