@@ -309,8 +309,9 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
     {
         result.scratchSegments = writer.store.segments;
         result.scratchPlan     = writer.store.plan;
-        LoggerLog("ProcessNonTerminalLevel: level %d %s-to-move: %llu boards\n",
-                  level, RSFPlayerStr(player), (unsigned long long)result.boardsProcessed);
+        LoggerLog("ProcessNonTerminalLevel: level %d %s-to-move: %llu boards (blackWins=%llu whiteWins=%llu ties=%llu)\n",
+                  level, RSFPlayerStr(player), (unsigned long long)result.boardsProcessed,
+                  (unsigned long long)result.totals.blackWins, (unsigned long long)result.totals.whiteWins, (unsigned long long)result.totals.ties);
     }
 
     return result;
@@ -424,8 +425,11 @@ void ProcessNonTerminalLevel(POthelloRingMasterCalculatorConfig pConfig, POthell
     snprintf(pStats->completedAt, sizeof(pStats->completedAt), "%04d-%02d-%02d %02d:%02d:%02d",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
-    LoggerLog("ProcessNonTerminalLevel: level %d complete at width %d, %llu boards total, %lld ns\n",
+    LoggerLog("ProcessNonTerminalLevel: level %d complete at width %d: %llu boards total (blackWins=%llu whiteWins=%llu ties=%llu), %lld ns\n",
               level, finalWidth,
               (unsigned long long)(pStats->boardsProcessedBlack + pStats->boardsProcessedWhite),
+              (unsigned long long)pStats->combinedTotals.blackWins,
+              (unsigned long long)pStats->combinedTotals.whiteWins,
+              (unsigned long long)pStats->combinedTotals.ties,
               (long long)pStats->totalNanos);
 }

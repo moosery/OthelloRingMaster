@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.3] - 2026-07-09
+
+### NonTerminalLevelStep's completion log lines were missing win/tie/loss counts
+
+- Caught by the user's first clean 4x4 run: `TerminalLevelBootstrap.cpp` already logged per-color and combined black/white/tie totals on every level's completion (per the already-agreed Phase 5 design -- "per-level completion log line: boards processed, total wins for the level, both per-color and combined, duration"), but `NonTerminalLevelStep.cpp` -- which handles every level except the deepest -- only ever logged board counts, never the win/tie/loss numbers. Fixed both of its `LoggerLog` calls (per-color, and the level-complete summary) to match `TerminalLevelBootstrap.cpp`'s exact format.
+- Fixed also this turn (build-fix, not a new feature): `CounterWidthConfig.cpp`'s `newLabel` was accidentally scoped inside the previous turn's overflow-only `if` block, but the shallower-level propagation loop below still needs it -- hoisted back out; the propagation log line's own missing trailing `\n` was fixed at the same time.
+
+
 ## [0.25.2] - 2026-07-09
 
 ### First real 4x4 run: fixed a drive-ledger exhaustion crash, a level-scan bug, a misleading log message, and a CLI ergonomics gap
