@@ -82,10 +82,7 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
     */
     int foundCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
     if (foundCount == 0)
-    {
-        LoggerLog("ProcessTerminalLevel: level %d has no %s-to-move boards, skipping\n", level, RSFPlayerStr(player));
         return result;
-    }
 
     if (foundCount != expectedCount)
         Fatal(FATAL_MERGE_LOGIC_ERROR,

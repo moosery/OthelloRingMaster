@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.26.2] - 2026-07-09
+
+### Removed the remaining "no X-to-move boards" log line
+
+- Removed `"level %d has no %s-to-move boards, skipping"` from `TerminalLevelBootstrap.cpp`/`NonTerminalLevelStep.cpp` -- the last leftover from the pre-table log style (v0.26.0 already removed the per-color/per-level summary sentences). A color genuinely having zero boards at a level is expected, not exceptional: verified against `GpuKernels.cu`'s pass-handling (`ExpandKernel`) that a 100%/0% color split at a level is a structurally normal outcome of the game tree, not data loss -- level 1 is 100% white-to-move (black always has a legal opening move), and level 2 came out 100% black-to-move in a real 4x4 run because none of level 1's boards triggered a pass either.
+
+
 ## [0.26.1] - 2026-07-09
 
 ### Phase 6 validated (4x4 matches known B=24632/W=30116/T=5312), cleaner log output, and a duration row
