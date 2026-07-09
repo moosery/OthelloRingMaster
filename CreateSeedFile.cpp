@@ -8,9 +8,9 @@
 **   Writes the seed board in the ring nested-index format (see
 **   OthelloBasics/RingNestedIndex.h) rather than a flat RSF file, so
 **   level 0's input matches every later level's output format (see
-**   MergeFiles.cpp's ConvertLevelOutputToNestedIndex, and
-**   LevelSolverThread.cpp's FeedNestedIndexLevel, which is what actually
-**   reads it back).
+**   MergeFiles.cpp's DoEndOfLevelMerge, which merges directly into that
+**   same format, and LevelSolverThread.cpp's FeedNestedIndexLevel, which
+**   is what actually reads it back).
 */
 
 /* Includes */
@@ -75,10 +75,10 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
         if (!pRoot)
             Fatal(FATAL_ALLOCATION_FAILED, "CreateSeedFile: BoardKeyAllocateFirstBoard failed");
 
-        RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
-        Lz4StreamWriter* pRing1Writer      = hasRing1 ? Lz4StreamWriterOpen(ring1Path) : nullptr;
-        Lz4StreamWriter* pRing2Writer      = hasRing2 ? Lz4StreamWriterOpen(ring2Path) : nullptr;
-        Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
+        RSFWriter* pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
+        RSFWriter* pRing1Writer      = hasRing1 ? RSFWriterOpenZLShaped(ring1Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing2Writer      = hasRing2 ? RSFWriterOpenZLShaped(ring2Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing34Writer     = RSFWriterOpenZLShaped(ring34Path, RSF_SHAPE_LEAF16);
 
         RingNestedIndexBuilder builder;
         builder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
@@ -86,9 +86,9 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
         builder.Finish();
 
         RSFWriterClose(pCellsInUseWriter);
-        if (pRing1Writer) Lz4StreamWriterClose(pRing1Writer);
-        if (pRing2Writer) Lz4StreamWriterClose(pRing2Writer);
-        Lz4StreamWriterClose(pRing34Writer);
+        if (pRing1Writer) RSFWriterClose(pRing1Writer);
+        if (pRing2Writer) RSFWriterClose(pRing2Writer);
+        RSFWriterClose(pRing34Writer);
 
         MemFree(pRoot);
 

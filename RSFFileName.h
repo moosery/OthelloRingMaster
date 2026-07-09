@@ -128,6 +128,13 @@ static inline void RSFPatternAnyStoreFiles(char* out, size_t outSize,
 ** RingNestedIndexHasRing1/HasRing2), always fileIdx 0 -- sharding into
 ** multiple files per level/player was never actually used by any caller of
 ** the plain .rsf naming above either.
+**
+** Each name carries TWO extension parts: the role (.cellsinuse/.ring1/
+** .ring2/.ring34) and, appended after it, the compression tier actually
+** used on disk (.rsfzl -- all four always go through the same
+** delta+varint+LZ4 tier via RSFWriterOpenZL/RSFWriterOpenZLShaped, see
+** RingNestedIndex.h Notes), the same way the plain .rsf/.rsfz/.rsfzl
+** naming above signals tier for flat files.
 ** ============================================================
 */
 
@@ -139,7 +146,7 @@ static inline void RSFNameCellsInUseFile(char* out, size_t outSize,
                                           const char* dir, int boardSize,
                                           int level, int player, int fileIdx)
 {
-    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.cellsinuse",
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.cellsinuse.rsfzl",
              dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
 }
 
@@ -151,7 +158,7 @@ static inline void RSFNameRing1File(char* out, size_t outSize,
                                      const char* dir, int boardSize,
                                      int level, int player, int fileIdx)
 {
-    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring1",
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring1.rsfzl",
              dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
 }
 
@@ -163,7 +170,7 @@ static inline void RSFNameRing2File(char* out, size_t outSize,
                                      const char* dir, int boardSize,
                                      int level, int player, int fileIdx)
 {
-    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring2",
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring2.rsfzl",
              dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
 }
 
@@ -175,7 +182,7 @@ static inline void RSFNameRing34File(char* out, size_t outSize,
                                       const char* dir, int boardSize,
                                       int level, int player, int fileIdx)
 {
-    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring34",
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_%04d.ring34.rsfzl",
              dir, level, boardSize, boardSize, RSFPlayerStr(player), fileIdx);
 }
 
@@ -292,6 +299,44 @@ static inline void RSFNameCascadeTemp(char* out, size_t outSize,
 {
     snprintf(out, outSize, "%s\\cascade_temp_L%03d_%s_%04d.rsf",
              dir, level, RSFPlayerStr(player), fileIdx);
+}
+
+/*
+** ============================================================
+** Ring nested-index cascade group temp files -- one cascade GROUP's own
+** merged output, when CascadingMerge writes ring format for its group
+** temps too (see MergeFiles.cpp's ring-mode cascade path). Same 4-file
+** shape as the final per-level store files further below, just scoped to
+** one cascade group instead of a whole level.
+** ============================================================
+*/
+
+static inline void RSFNameCascadeRingCellsInUseFile(char* out, size_t outSize,
+                                                     const char* dir, int level, int player, int groupIdx)
+{
+    snprintf(out, outSize, "%s\\cascade_ring_L%03d_%s_%04d.cellsinuse.rsfzl",
+             dir, level, RSFPlayerStr(player), groupIdx);
+}
+
+static inline void RSFNameCascadeRingRing1File(char* out, size_t outSize,
+                                                const char* dir, int level, int player, int groupIdx)
+{
+    snprintf(out, outSize, "%s\\cascade_ring_L%03d_%s_%04d.ring1.rsfzl",
+             dir, level, RSFPlayerStr(player), groupIdx);
+}
+
+static inline void RSFNameCascadeRingRing2File(char* out, size_t outSize,
+                                                const char* dir, int level, int player, int groupIdx)
+{
+    snprintf(out, outSize, "%s\\cascade_ring_L%03d_%s_%04d.ring2.rsfzl",
+             dir, level, RSFPlayerStr(player), groupIdx);
+}
+
+static inline void RSFNameCascadeRingRing34File(char* out, size_t outSize,
+                                                 const char* dir, int level, int player, int groupIdx)
+{
+    snprintf(out, outSize, "%s\\cascade_ring_L%03d_%s_%04d.ring34.rsfzl",
+             dir, level, RSFPlayerStr(player), groupIdx);
 }
 
 /*

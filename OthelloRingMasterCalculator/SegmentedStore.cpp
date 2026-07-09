@@ -68,8 +68,6 @@ static void OpenNextSegment(SegmentedStoreWriter* pWriter)
 
     pWriter->currentBytesUsed   = 0;
     pWriter->currentRecordCount = 0;
-    pWriter->currentMinKeyHi = pWriter->currentMinKeyLo = 0;
-    pWriter->currentMaxKeyHi = pWriter->currentMaxKeyLo = 0;
 }
 
 /*
@@ -117,28 +115,7 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
     strncpy(seg.path, pWriter->currentPath, sizeof(seg.path) - 1);
     seg.driveLetter = pWriter->currentDriveLetter;
     seg.recordCount = pWriter->currentRecordCount;
-    if (pWriter->isKeySorted)
-    {
-        seg.minKeyHi = pWriter->currentMinKeyHi;
-        seg.minKeyLo = pWriter->currentMinKeyLo;
-        seg.maxKeyHi = pWriter->currentMaxKeyHi;
-        seg.maxKeyLo = pWriter->currentMaxKeyLo;
-    }
     pWriter->segments.push_back(seg);
-}
-
-/*
-** Function: CompareUint64PairRecord
-** @brief    BinarySearchFile-compatible 3-way comparator over 16-byte
-**           UINT64_PAIR records (board keys): compares hi first, then lo.
-*/
-static int CompareUint64PairRecord(void* /*pContext*/, const void* pEntry, const void* pKey)
-{
-    const UINT64_PAIR* e = (const UINT64_PAIR*)pEntry;
-    const UINT64_PAIR* k = (const UINT64_PAIR*)pKey;
-    if (e->hi != k->hi) return (e->hi < k->hi) ? -1 : 1;
-    if (e->lo != k->lo) return (e->lo < k->lo) ? -1 : 1;
-    return 0;
 }
 
 /* Functions */
@@ -196,20 +173,15 @@ void ReleaseScratchPlan(POthelloRingMasterCalculatorState pState, const ScratchP
 ** @brief  See SegmentedStore.h.
 */
 void SegmentedStoreWriter::Init(POthelloRingMasterCalculatorState pStateIn, char excludeDrive1In, char excludeDrive2In,
-                                 int recordSizeIn, bool isKeySortedIn,
+                                 int recordSizeIn,
                                  const char* scratchDirNoDriveIn, const char* baseNameIn)
 {
     pState        = pStateIn;
     excludeDrive1 = excludeDrive1In;
     excludeDrive2 = excludeDrive2In;
     recordSize    = recordSizeIn;
-    isKeySorted   = isKeySortedIn;
     strncpy(scratchDirNoDrive, scratchDirNoDriveIn, sizeof(scratchDirNoDrive) - 1);
     strncpy(baseName, baseNameIn, sizeof(baseName) - 1);
-
-    if (isKeySorted && recordSize != (int)sizeof(UINT64_PAIR))
-        Fatal(FATAL_MERGE_LOGIC_ERROR, "SegmentedStoreWriter::Init: isKeySorted requires recordSize==%d, got %d",
-              (int)sizeof(UINT64_PAIR), recordSize);
 
     writeBuffer.reserve(SEGMENTED_STORE_WRITE_BUFFER_BYTES);
 
@@ -230,23 +202,6 @@ void SegmentedStoreWriter::Write(const void* pRecord)
 
     const uint8_t* pBytes = (const uint8_t*)pRecord;
     writeBuffer.insert(writeBuffer.end(), pBytes, pBytes + recordSize);
-
-    if (isKeySorted)
-    {
-        const UINT64_PAIR* pKey = (const UINT64_PAIR*)pRecord;
-        if (currentRecordCount == 0)
-        {
-            currentMinKeyHi = currentMaxKeyHi = pKey->hi;
-            currentMinKeyLo = currentMaxKeyLo = pKey->lo;
-        }
-        else
-        {
-            /* Records arrive in sorted order, so the most recently written
-            ** one is always this segment's max so far. */
-            currentMaxKeyHi = pKey->hi;
-            currentMaxKeyLo = pKey->lo;
-        }
-    }
 
     currentBytesUsed += recordSize;
     currentRecordCount++;
@@ -323,36 +278,77 @@ bool SegmentedStoreReader::ReadAt(uint64_t globalPosition, void* pOutRecord) con
 }
 
 /*
-** Method: SegmentedStoreReader::FindByKey
-** @brief  See SegmentedStore.h.
+** Function: FindSegmentIndex
+** @brief    Finds which segment holds globalPosition, and that segment's
+**           own base (the global position of its first record). Shared by
+**           FindPatternInRange's single-segment fast-path check.
+** @param    cumulativeCounts - running total of records through segment i, inclusive
+** @param    globalPosition   - 0-based record index across the whole dataset
+** @param    pOutBase         - out: globalPosition of segment i's first record
+** @return   Index into segments/cumulativeCounts, or -1 if out of range.
 */
-bool SegmentedStoreReader::FindByKey(uint64_t keyHi, uint64_t keyLo, uint64_t* pOutGlobalPosition) const
+static long long FindSegmentIndex(const std::vector<uint64_t>& cumulativeCounts, uint64_t globalPosition, uint64_t* pOutBase)
 {
     uint64_t base = 0;
-    for (size_t i = 0; i < segments.size(); i++)
+    for (size_t i = 0; i < cumulativeCounts.size(); i++)
     {
-        const SegmentInfo& seg = segments[i];
-
-        bool afterMin  = (keyHi > seg.minKeyHi) || (keyHi == seg.minKeyHi && keyLo >= seg.minKeyLo);
-        bool beforeMax = (keyHi < seg.maxKeyHi) || (keyHi == seg.maxKeyHi && keyLo <= seg.maxKeyLo);
-
-        if (afterMin && beforeMax)
+        if (globalPosition < cumulativeCounts[i])
         {
-            FILE* f = fopen(seg.path, "rb");
-            if (!f) return false;
-
-            UINT64_PAIR target{ keyHi, keyLo };
-            UINT64_PAIR scratch{};
-            long long idx = BinarySearchFile(f, &target, &scratch, (long long)seg.recordCount,
-                                              sizeof(UINT64_PAIR), CompareUint64PairRecord, nullptr);
-            fclose(f);
-
-            if (idx < 0) return false;
-            *pOutGlobalPosition = base + (uint64_t)idx;
-            return true;
+            *pOutBase = base;
+            return (long long)i;
         }
+        base = cumulativeCounts[i];
+    }
+    return -1;
+}
 
-        base += seg.recordCount;
+/*
+** Method: SegmentedStoreReader::FindPatternInRange
+** @brief  See SegmentedStore.h.
+*/
+bool SegmentedStoreReader::FindPatternInRange(uint64_t lo, uint64_t hi, const void* pKey,
+                                               int (*pComp)(void* pContext, const void* pEntry, const void* pKey),
+                                               void* pContext, uint64_t* pOutGlobalPosition) const
+{
+    if (hi <= lo) return false;
+
+    uint64_t loBase = 0, hiBase = 0;
+    long long loSeg = FindSegmentIndex(cumulativeCounts, lo,     &loBase);
+    long long hiSeg = FindSegmentIndex(cumulativeCounts, hi - 1, &hiBase);
+    if (loSeg < 0 || hiSeg < 0) return false;
+
+    if (loSeg == hiSeg)
+    {
+        /* Fast path: the whole range lives in one segment file. */
+        FILE* f = fopen(segments[(size_t)loSeg].path, "rb");
+        if (!f) return false;
+
+        std::vector<uint8_t> scratch((size_t)recordSize);
+        long long startIdx = (long long)(lo - loBase);
+        long long count    = (long long)(hi - lo);
+        long long idx = BinarySearchFile(f, (void*)pKey, scratch.data(), count, recordSize, pComp, pContext, startIdx);
+        fclose(f);
+
+        if (idx < 0) return false;
+        *pOutGlobalPosition = loBase + (uint64_t)idx;
+        return true;
+    }
+
+    /* Rare: the range straddles a segment boundary -- fall back to a
+    ** manual binary search over global position via ReadAt, correct
+    ** regardless of how many segments [lo, hi) actually spans.
+    */
+    std::vector<uint8_t> rec((size_t)recordSize);
+    long long leftIdx = 0, rightIdx = (long long)(hi - lo) - 1;
+    while (leftIdx <= rightIdx)
+    {
+        long long mid = leftIdx + ((rightIdx - leftIdx) >> 1);
+        if (!ReadAt(lo + (uint64_t)mid, rec.data())) return false;
+
+        int cmpVal = pComp(pContext, rec.data(), pKey);
+        if (cmpVal < 0)      leftIdx  = mid + 1;
+        else if (cmpVal > 0) rightIdx = mid - 1;
+        else { *pOutGlobalPosition = lo + (uint64_t)mid; return true; }
     }
     return false;
 }

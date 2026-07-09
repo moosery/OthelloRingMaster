@@ -26,7 +26,7 @@ void ScratchCountsWriter::Init(POthelloRingMasterCalculatorState pState, char ex
     scratchByteWidth  = (officialByteWidth == COUNTER_WIDTH_NIBBLE) ? 1 : officialByteWidth;
 
     int recordSize = 3 * scratchByteWidth;
-    store.Init(pState, excludeDrive1, excludeDrive2, recordSize, /*isKeySorted=*/false, scratchDirNoDrive, baseName);
+    store.Init(pState, excludeDrive1, excludeDrive2, recordSize, scratchDirNoDrive, baseName);
 }
 
 /*

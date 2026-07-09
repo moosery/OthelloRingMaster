@@ -65,6 +65,33 @@ static inline size_t VarIntPut(uint64_t v, uint8_t* out)
 }
 
 /*
+** Function: RSFShapeMeta
+** @brief    Field count and per-field byte width for an RSFRecordShape --
+**           the one place that knowledge lives, so every shaped Open/Record/Read
+**           path stays in sync by construction instead of by convention.
+** @param    shape        - the shape to describe
+** @param    pNumFields   - out: number of fields (1 or 2)
+** @param    fieldBytes   - out: byte width of each field (index 0..RSF_SHAPE_MAX_FIELDS-1); unused slots left as-is
+** @param    pRecordBytes - out: total on-disk record size (sum of the active fieldBytes entries), or nullptr to skip
+*/
+static void RSFShapeMeta(RSFRecordShape shape, int* pNumFields, uint8_t fieldBytes[RSF_SHAPE_MAX_FIELDS], size_t* pRecordBytes)
+{
+    switch (shape)
+    {
+    case RSF_SHAPE_RING_LEVEL: *pNumFields = 2; fieldBytes[0] = 4; fieldBytes[1] = 8; break;
+    case RSF_SHAPE_LEAF16:     *pNumFields = 1; fieldBytes[0] = 2;                   break;
+    case RSF_SHAPE_PAIR64:
+    default:                   *pNumFields = 2; fieldBytes[0] = 8; fieldBytes[1] = 8; break;
+    }
+    if (pRecordBytes)
+    {
+        size_t bytes = 0;
+        for (int i = 0; i < *pNumFields; i++) bytes += fieldBytes[i];
+        *pRecordBytes = bytes;
+    }
+}
+
+/*
 ** ============================================================
 ** RSFWriter
 ** ============================================================
@@ -82,18 +109,26 @@ struct __RSFWriter
     FILE*         f;
     char          path[MAX_FULL_PATH_NAME];
     uint64_t      count;
-    UINT64_PAIR   firstRec;
-    UINT64_PAIR   lastRec;
+    uint8_t       firstRec[16];               /* raw bytes of the first record written, zero-padded past recordBytes */
+    uint8_t       lastRec[16];                /* raw bytes of the last  record written, zero-padded past recordBytes */
     bool          hasFirst;
     bool          compressed;
     bool          isLZ4;                     /* true when LZ4 frame is active (file or memory mode) */
+
+    /* record shape -- RSF_SHAPE_PAIR64 (the zero value) for every existing
+    ** UINT64_PAIR-based entry point; only the new *Shaped entry points set
+    ** anything else. See RSFShapeMeta.
+    */
+    RSFRecordShape  shape;
+    int             numFields;
+    uint8_t         fieldBytes[RSF_SHAPE_MAX_FIELDS];
+    size_t          recordBytes;
 
     /* compressed-only */
     uint8_t*  varBuf;
     size_t    varBufPos;
     uint64_t  compBytesTotal;
-    uint64_t  prevHi;
-    uint64_t  prevLo;
+    uint64_t  prevField[RSF_SHAPE_MAX_FIELDS];
 
     /* LZ4 layer (.rsfzl) -- only when lz4Cctx != nullptr */
     LZ4F_cctx*  lz4Cctx;
@@ -183,6 +218,7 @@ RSFWriter* RSFWriterOpen(const char* path)
     memset(pw, 0, sizeof(RSFWriter));
     pw->f = f;
     strncpy(pw->path, path, sizeof(pw->path) - 1);
+    RSFShapeMeta(RSF_SHAPE_PAIR64, &pw->numFields, pw->fieldBytes, &pw->recordBytes);
     return pw;
 }
 
@@ -193,9 +229,10 @@ RSFWriter* RSFWriterOpen(const char* path)
 **           LZ4 frame layer on top if forceLZ4 is set or path ends in ".rsfzl".
 ** @param    path     - file path to create (overwritten if it exists)
 ** @param    forceLZ4 - add the LZ4 layer regardless of path's extension
+** @param    shape    - record layout this writer will accept (default RSF_SHAPE_PAIR64, matching every pre-existing caller)
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4)
+static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordShape shape = RSF_SHAPE_PAIR64)
 {
     FILE* f = fopen(path, "wb");
     if (!f)
@@ -208,6 +245,8 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4)
     pw->f          = f;
     pw->compressed = true;
     strncpy(pw->path, path, sizeof(pw->path) - 1);
+    pw->shape = shape;
+    RSFShapeMeta(shape, &pw->numFields, pw->fieldBytes, &pw->recordBytes);
 
     pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
@@ -289,6 +328,19 @@ RSFWriter* RSFWriterOpenZL(const char* path)
 }
 
 /*
+** Function: RSFWriterOpenZLShaped
+** @brief    Opens path for streaming, delta+varint+LZ4 compressed output of
+**           shape-typed records instead of UINT64_PAIR.
+** @param    path  - file path to create (overwritten if it exists)
+** @param    shape - the record layout this writer will accept
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZLShaped(const char* path, RSFRecordShape shape)
+{
+    return RSFWriterOpenZImpl(path, true, shape);
+}
+
+/*
 ** Function: RSFWriterOpenZMem
 ** @brief    Opens a memory-backed writer producing delta+varint+LZ4
 **           compressed output directly into buf, instead of a file.
@@ -306,6 +358,7 @@ RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
     pw->memOut     = buf;
     pw->memOutMax  = maxBytes;
     strncpy(pw->path, "(memory)", sizeof(pw->path) - 1);
+    RSFShapeMeta(RSF_SHAPE_PAIR64, &pw->numFields, pw->fieldBytes, &pw->recordBytes);
 
     pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZMemVarBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
@@ -367,16 +420,58 @@ void RSFWriterRecord(RSFWriter* pw, const UINT64_PAIR* pRec)
         /* Ensure room for two max-length varints (10 bytes each) */
         if (pw->varBufPos + 20 > RSF_COMP_WRITE_BUFFER_SIZE)
             FlushVarBuf(pw);
-        uint64_t dHi = ZZEnc((int64_t)pRec->hi - (int64_t)pw->prevHi);
-        uint64_t dLo = ZZEnc((int64_t)pRec->lo - (int64_t)pw->prevLo);
+        uint64_t dHi = ZZEnc((int64_t)pRec->hi - (int64_t)pw->prevField[0]);
+        uint64_t dLo = ZZEnc((int64_t)pRec->lo - (int64_t)pw->prevField[1]);
         pw->varBufPos += VarIntPut(dHi, pw->varBuf + pw->varBufPos);
         pw->varBufPos += VarIntPut(dLo, pw->varBuf + pw->varBufPos);
-        pw->prevHi = pRec->hi;
-        pw->prevLo = pRec->lo;
+        pw->prevField[0] = pRec->hi;
+        pw->prevField[1] = pRec->lo;
     }
 
-    if (!pw->hasFirst) { pw->firstRec = *pRec; pw->hasFirst = true; }
-    pw->lastRec = *pRec;
+    if (!pw->hasFirst) { memcpy(pw->firstRec, pRec, sizeof(UINT64_PAIR)); pw->hasFirst = true; }
+    memcpy(pw->lastRec, pRec, sizeof(UINT64_PAIR));
+    pw->count++;
+}
+
+/*
+** Function: RSFWriterRecordShaped
+** @brief    Appends one shape-typed record to a shaped streaming writer.
+**           Always compressed (shaped output only ever targets .rsfzl --
+**           see RSFWriterOpenZLShaped); each field is delta+zigzag+varint
+**           encoded independently, same as RSFWriterRecord's hi/lo but
+**           generalized to pw's declared field count/widths.
+** @param    pw      - the writer to append to (opened via RSFWriterOpenZLShaped)
+** @param    pRecord - pointer to a tightly-packed (#pragma pack(push,1)) record matching pw's shape
+*/
+void RSFWriterRecordShaped(RSFWriter* pw, const void* pRecord)
+{
+    if (!pw->compressed)
+        Fatal(FATAL_FILE_OPEN, "RSFWriterRecordShaped: shaped records require a compressed (.rsfzl) writer");
+
+    /* Ensure room for numFields max-length varints (10 bytes each) */
+    if (pw->varBufPos + (size_t)pw->numFields * 10 > RSF_COMP_WRITE_BUFFER_SIZE)
+        FlushVarBuf(pw);
+
+    const uint8_t* src    = (const uint8_t*)pRecord;
+    size_t         offset = 0;
+    for (int i = 0; i < pw->numFields; i++)
+    {
+        uint64_t val = 0;
+        memcpy(&val, src + offset, pw->fieldBytes[i]);   /* zero-extend narrower field into a uint64_t */
+        uint64_t d = ZZEnc((int64_t)val - (int64_t)pw->prevField[i]);
+        pw->varBufPos += VarIntPut(d, pw->varBuf + pw->varBufPos);
+        pw->prevField[i] = val;
+        offset += pw->fieldBytes[i];
+    }
+
+    if (!pw->hasFirst)
+    {
+        memset(pw->firstRec, 0, sizeof(pw->firstRec));
+        memcpy(pw->firstRec, pRecord, pw->recordBytes);
+        pw->hasFirst = true;
+    }
+    memset(pw->lastRec, 0, sizeof(pw->lastRec));
+    memcpy(pw->lastRec, pRecord, pw->recordBytes);
     pw->count++;
 }
 
@@ -415,8 +510,8 @@ uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes)
     trailer.recordCount = pw->count;
     if (pw->hasFirst)
     {
-        memcpy(trailer.minKey, &pw->firstRec, sizeof(UINT64_PAIR));
-        memcpy(trailer.maxKey, &pw->lastRec,  sizeof(UINT64_PAIR));
+        memcpy(trailer.minKey, pw->firstRec, sizeof(trailer.minKey));
+        memcpy(trailer.maxKey, pw->lastRec,  sizeof(trailer.maxKey));
     }
 
     uint64_t fileBytes;
@@ -430,7 +525,7 @@ uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes)
     else
     {
         trailer.magic = RSF_MAGIC;
-        fileBytes     = pw->count * sizeof(UINT64_PAIR) + sizeof(RSFTrailer);
+        fileBytes     = pw->count * (uint64_t)pw->recordBytes + sizeof(RSFTrailer);
     }
 
     WriteOut(pw, &trailer, sizeof(trailer));
@@ -506,6 +601,15 @@ struct __RSFReader
     bool        compressed;
     bool        memMode;      /* true if compBuf is caller-owned; do not fread or free it */
 
+    /* record shape -- RSF_SHAPE_PAIR64 (the zero value) for every existing
+    ** UINT64_PAIR-based entry point; only the new *Shaped entry points set
+    ** anything else. See RSFShapeMeta.
+    */
+    RSFRecordShape  shape;
+    int             numFields;
+    uint8_t         fieldBytes[RSF_SHAPE_MAX_FIELDS];
+    size_t          recordBytes;
+
     /* compressed-only (.rsfz and .rsfzl) */
     uint8_t*  compBuf;
     size_t    compBufSize;
@@ -513,8 +617,7 @@ struct __RSFReader
     size_t    compBufFilled;
     uint64_t  compBytesTotal;
     uint64_t  compBytesConsumed;
-    uint64_t  prevHi;
-    uint64_t  prevLo;
+    uint64_t  prevField[RSF_SHAPE_MAX_FIELDS];
 
     /* LZ4 decompression layer (.rsfzl only) -- nullptr for .rsfz */
     LZ4F_dctx*  lz4Dctx;
@@ -707,6 +810,7 @@ RSFReader* RSFOpen(const char* path)
     r->f          = f;
     r->trailer    = trailer;
     r->compressed = compressed;
+    RSFShapeMeta(RSF_SHAPE_PAIR64, &r->numFields, r->fieldBytes, &r->recordBytes);
 
     if (!compressed)
         setvbuf(f, NULL, _IOFBF, RSF_COMP_READ_BUFFER_SIZE);
@@ -772,6 +876,7 @@ RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_
     r->trailer.recordCount = recordCount;
     r->trailer.magic       = RSFZL_MAGIC;
     memcpy(r->trailer._reserved, &compBytes, sizeof(uint64_t));
+    RSFShapeMeta(RSF_SHAPE_PAIR64, &r->numFields, r->fieldBytes, &r->recordBytes);
 
     /* Point directly at caller's buffer -- no copy, no ownership */
     r->compBuf           = (uint8_t*)compBuf;
@@ -827,10 +932,147 @@ int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount)
     {
         uint64_t dHi = RSFZReadVarInt(r);
         uint64_t dLo = RSFZReadVarInt(r);
-        r->prevHi = (uint64_t)((int64_t)r->prevHi + ZZDec(dHi));
-        r->prevLo = (uint64_t)((int64_t)r->prevLo + ZZDec(dLo));
-        pOut[got].hi = r->prevHi;
-        pOut[got].lo = r->prevLo;
+        r->prevField[0] = (uint64_t)((int64_t)r->prevField[0] + ZZDec(dHi));
+        r->prevField[1] = (uint64_t)((int64_t)r->prevField[1] + ZZDec(dLo));
+        pOut[got].hi = r->prevField[0];
+        pOut[got].lo = r->prevField[1];
+        got++;
+        r->recordsRead++;
+    }
+    return got;
+}
+
+/*
+** Function: RSFOpenShaped
+** @brief    Opens a .rsfzl ring-store file of shape-typed records for
+**           sequential reading. Shaped records only ever target the
+**           delta+varint+LZ4 tier (see RSFWriterOpenZLShaped), so unlike
+**           RSFOpen this doesn't auto-detect .rsf/.rsfz -- a bad magic is
+**           always treated as corrupt/incomplete.
+** @param    path  - file path to open for reading
+** @param    shape - the record layout stored in this file
+** @return   A new RSFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
+*/
+RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return nullptr;
+
+    if (_fseeki64(f, -(int64_t)sizeof(RSFTrailer), SEEK_END) != 0)
+    {
+        fclose(f);
+        LoggerLog("RSFOpenShaped: cannot seek to trailer in '%s'\n", path);
+        return nullptr;
+    }
+
+    RSFTrailer trailer = {};
+    if (fread(&trailer, sizeof(trailer), 1, f) != 1)
+    {
+        fclose(f);
+        LoggerLog("RSFOpenShaped: cannot read trailer in '%s'\n", path);
+        return nullptr;
+    }
+
+    if (trailer.magic != RSFZL_MAGIC)
+    {
+        fclose(f);
+        LoggerLog("RSFOpenShaped: bad magic in '%s' (expected .rsfzl; corrupt or incomplete)\n", path);
+        return nullptr;
+    }
+
+    _fseeki64(f, 0, SEEK_END);
+    int64_t  actualSize      = _ftelli64(f);
+    uint64_t compressedBytes = 0;
+    memcpy(&compressedBytes, trailer._reserved, sizeof(uint64_t));
+    int64_t expectedSize = (int64_t)compressedBytes + (int64_t)sizeof(RSFTrailer);
+    if (actualSize != expectedSize)
+    {
+        fclose(f);
+        LoggerLog("RSFOpenShaped: compressed size mismatch in '%s' (expected %lld, got %lld)\n",
+                  path, expectedSize, actualSize);
+        return nullptr;
+    }
+
+    if (_fseeki64(f, 0, SEEK_SET) != 0)
+    {
+        fclose(f);
+        return nullptr;
+    }
+
+    RSFReader* r = (RSFReader*)MemMalloc("RSFReaderShaped", sizeof(RSFReader));
+    if (!r)
+    {
+        fclose(f);
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate reader");
+        return nullptr;
+    }
+    memset(r, 0, sizeof(RSFReader));
+    r->f          = f;
+    r->trailer    = trailer;
+    r->compressed = true;
+    r->shape      = shape;
+    RSFShapeMeta(shape, &r->numFields, r->fieldBytes, &r->recordBytes);
+
+    r->compBuf        = (uint8_t*)MemMalloc("RSFReaderShapedZBuf", RSF_COMP_READ_BUFFER_SIZE);
+    r->compBufSize    = RSF_COMP_READ_BUFFER_SIZE;
+    r->compBytesTotal = compressedBytes;
+    if (!r->compBuf)
+    {
+        fclose(f); MemFree(r);
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate read buffer");
+        return nullptr;
+    }
+
+    LZ4F_errorCode_t lz4Err = LZ4F_createDecompressionContext(&r->lz4Dctx, LZ4F_VERSION);
+    if (LZ4F_isError(lz4Err))
+    {
+        fclose(f); MemFree(r->compBuf); MemFree(r);
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: LZ4 decomp context failed: %s", LZ4F_getErrorName(lz4Err));
+        return nullptr;
+    }
+    r->lz4DecBufSize = RSF_COMP_READ_BUFFER_SIZE;
+    r->lz4DecBuf = (uint8_t*)MemMalloc("RSFReaderShapedZLBuf", r->lz4DecBufSize);
+    if (!r->lz4DecBuf)
+    {
+        LZ4F_freeDecompressionContext(r->lz4Dctx);
+        fclose(f); MemFree(r->compBuf); MemFree(r);
+        Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate LZ4 decomp buffer");
+        return nullptr;
+    }
+
+    return r;
+}
+
+/*
+** Function: RSFReadShaped
+** @brief    Reads up to maxCount shape-typed records from r into pOut.
+**           Each field is delta+zigzag+varint decoded independently and
+**           written back at its declared byte width, same as RSFRead's
+**           hi/lo but generalized to r's declared field count/widths.
+** @param    r        - the reader to read from (opened via RSFOpenShaped)
+** @param    pOut     - destination buffer, at least maxCount records of r's shape
+** @param    maxCount - maximum number of records to read
+** @return   Number of records actually read; 0 means EOF.
+*/
+int RSFReadShaped(RSFReader* r, void* pOut, int maxCount)
+{
+    uint64_t remaining = r->trailer.recordCount - r->recordsRead;
+    if (remaining == 0 || maxCount <= 0) return 0;
+    int want = (remaining < (uint64_t)maxCount) ? (int)remaining : maxCount;
+
+    uint8_t* dst = (uint8_t*)pOut;
+    int got = 0;
+    while (got < want)
+    {
+        size_t offset = 0;
+        for (int i = 0; i < r->numFields; i++)
+        {
+            uint64_t d = RSFZReadVarInt(r);
+            r->prevField[i] = (uint64_t)((int64_t)r->prevField[i] + ZZDec(d));
+            memcpy(dst + offset, &r->prevField[i], r->fieldBytes[i]);
+            offset += r->fieldBytes[i];
+        }
+        dst += r->recordBytes;
         got++;
         r->recordsRead++;
     }

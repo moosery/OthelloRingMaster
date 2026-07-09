@@ -45,6 +45,11 @@ long long BinarySearch(void* dataArray, void* pKey, long long numElements, long 
 ** @param    sizeOfElementInArray  - size in bytes of one record
 ** @param    pComp                 - 3-way comparator: <0/0/>0 as *pEntry is less/equal/greater than *pKey
 ** @param    pContext              - opaque context passed through to pComp
+** @param    startIdx              - index of the first element of the searched sub-range within the
+**                                    file's own logical record array (0 = search from the start, the
+**                                    prior default/only behavior); every seek and the returned index
+**                                    are offset by this, so results stay in whole-file terms even when
+**                                    restricting the search to [startIdx, startIdx+numElements)
 ** @return   Index of the matching record if found; otherwise -(insertion point + 1).
 */
-long long BinarySearchFile(FILE* fpOut, void* pKey, void* pDataBuffer, long long numElements, long long sizeOfElementInArray, int (*pComp)(void* pContext, const void* pEntry, const void* pKey), void* pContext);
+long long BinarySearchFile(FILE* fpOut, void* pKey, void* pDataBuffer, long long numElements, long long sizeOfElementInArray, int (*pComp)(void* pContext, const void* pEntry, const void* pKey), void* pContext, long long startIdx = 0);

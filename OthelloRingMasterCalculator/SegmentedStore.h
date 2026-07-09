@@ -22,15 +22,15 @@
 **   is the right call here specifically (see CalculatorFileName.h's
 **   CalcNameCountsFile / CalculatorScratchCounts.h's join step for where
 **   the permanent, compressed representation still lives).
-**   FindByKey rides Utility/BinarySearchFile.h's existing
-**   BinarySearchFile (seek+read one record at a time, no bulk load)
-**   for the within-segment search.
+**   FindPatternInRange and ReadAt ride Utility/BinarySearch.h's existing
+**   BinarySearchFile (seek+read one record at a time, no bulk load) for
+**   the within-segment search.
 **
-**   Thread-safe by construction: ReadAt/FindByKey each open, read, and
-**   close their own FILE* handle per call, touching only the (read-only
-**   after Load) segment index otherwise -- safe to call from many
-**   threads concurrently with no locking, which matters since lookups
-**   are dispatched one thread-pool job per parent (see
+**   Thread-safe by construction: ReadAt/FindPatternInRange each open,
+**   read, and close their own FILE* handle per call, touching only the
+**   (read-only after Load) segment index otherwise -- safe to call from
+**   many threads concurrently with no locking, which matters since
+**   lookups are dispatched one thread-pool job per parent (see
 **   NonTerminalLevelStep.cpp).
 */
 
@@ -47,17 +47,13 @@
 /*
 ** Type:    SegmentInfo
 ** @brief   One physical segment: a plain fixed-size-record file on one
-**          drive, holding a contiguous slice of the original ordered
-**          stream. minKey/maxKey are only meaningful for key-sorted
-**          (board-key) stores -- left zero for positional (counts) stores.
+**          drive, holding a contiguous slice of the original ordered stream.
 */
 struct SegmentInfo
 {
     char     path[MAX_FULL_PATH_NAME];
     char     driveLetter;
     uint64_t recordCount;
-    uint64_t minKeyHi, minKeyLo;
-    uint64_t maxKeyHi, maxKeyLo;
 };
 
 typedef std::vector<SegmentInfo> SegmentList;
@@ -139,7 +135,6 @@ struct SegmentedStoreWriter
     POthelloRingMasterCalculatorState pState = nullptr;
     char     excludeDrive1 = 0, excludeDrive2 = 0;
     int      recordSize = 0;
-    bool     isKeySorted = false;   /* true only for board-key (16-byte UINT64_PAIR) stores */
     char     scratchDirNoDrive[MAX_FULL_PATH_NAME] = {};
     char     baseName[MAX_FULL_PATH_NAME] = {};
 
@@ -151,8 +146,6 @@ struct SegmentedStoreWriter
     uint64_t currentRecordCount  = 0;
     char     currentPath[MAX_FULL_PATH_NAME] = {};
     char     currentDriveLetter  = 0;
-    uint64_t currentMinKeyHi = 0, currentMinKeyLo = 0;
-    uint64_t currentMaxKeyHi = 0, currentMaxKeyLo = 0;
 
     /* Accumulates whole records until it reaches SEGMENTED_STORE_WRITE_
     ** BUFFER_BYTES, then one real fwrite flushes it all at once -- fixed
@@ -171,13 +164,11 @@ struct SegmentedStoreWriter
     ** @param  excludeDrive1In     - drive to never use as scratch (RingMaster's store drive), or 0
     ** @param  excludeDrive2In     - a second drive to exclude (the counts drive), or 0
     ** @param  recordSizeIn        - size in bytes of one record
-    ** @param  isKeySortedIn       - true if records are 16-byte UINT64_PAIR board keys in sorted order
     ** @param  scratchDirNoDriveIn - sub-path (on whichever drive) segments are written under
     ** @param  baseNameIn          - filename prefix identifying this dataset (level/color/purpose)
     */
     void Init(POthelloRingMasterCalculatorState pStateIn, char excludeDrive1In, char excludeDrive2In,
-              int recordSizeIn, bool isKeySortedIn,
-              const char* scratchDirNoDriveIn, const char* baseNameIn);
+              int recordSizeIn, const char* scratchDirNoDriveIn, const char* baseNameIn);
 
     /*
     ** Method: Write
@@ -204,8 +195,8 @@ struct SegmentedStoreWriter
 /*
 ** Type:    SegmentedStoreReader
 ** @brief   Holds only the small per-segment index in memory; ReadAt/
-**          FindByKey each do their own seek+read against exactly one
-**          segment file, never loading a whole level's worth of data.
+**          FindPatternInRange each do their own seek+read against segment
+**          file(s), never loading a whole level's worth of data.
 */
 struct SegmentedStoreReader
 {
@@ -233,19 +224,37 @@ struct SegmentedStoreReader
     bool ReadAt(uint64_t globalPosition, void* pOutRecord) const;
 
     /*
-    ** Method: FindByKey
-    ** @brief  Finds a 16-byte (keyHi, keyLo) key's global position. Coarse
-    **         step: segments are disjoint contiguous ranges of one sorted
-    **         stream, so at most one segment's [minKey, maxKey] can
-    **         contain the target -- a linear scan across the (small)
-    **         segment list finds it. Fine step: Utility's BinarySearchFile
-    **         seeks within just that one segment.
-    ** @param  keyHi               - high 64 bits of the target key (BOARD_KEY::ullCellsInUse)
-    ** @param  keyLo               - low 64 bits of the target key (BOARD_KEY::ullCellColors)
-    ** @param  pOutGlobalPosition  - out: the key's 0-based global position, if found
+    ** Method: FindPatternInRange
+    ** @brief  Binary-searches the sub-range of global positions [lo, hi)
+    **         for a record matching pKey, via the caller-supplied
+    **         comparator -- generic over record shape (CellsInUseRec/
+    **         RingLevelRec/Ring34Rec alike), same convention as Utility's
+    **         BinarySearch/BinarySearchFile. Used for the ring nested-
+    **         index's hierarchical lookup (CellsInUse -> Ring_1 -> Ring_2
+    **         -> Ring_3_4), where each level's search is restricted to its
+    **         parent group's own sub-range rather than the whole dataset --
+    **         see OthelloBasics/RingNestedIndex.h's RingNestedIndexReader::
+    **         FindBoardPosition for the in-memory equivalent this mirrors.
+    ** @details Fast path: if [lo, hi) falls entirely within one physical
+    **          segment (the common case -- a group is rarely larger than a
+    **          whole segment), does a single seek-based BinarySearchFile
+    **          call restricted to that local sub-range. Fallback: if the
+    **          range straddles a segment boundary (rare -- only when a
+    **          group happens to land exactly on one), falls back to a
+    **          manual binary search driven by ReadAt, which is correct
+    **          regardless of how many segments the range spans, just with
+    **          a little more per-comparison overhead.
+    ** @param  lo                 - inclusive start of the sub-range (global position)
+    ** @param  hi                 - exclusive end of the sub-range (global position)
+    ** @param  pKey               - the key to search for (passed through to pComp)
+    ** @param  pComp              - 3-way comparator: <0/0/>0 as *pEntry is less/equal/greater than *pKey
+    ** @param  pContext           - opaque context passed through to pComp
+    ** @param  pOutGlobalPosition - out: the match's 0-based global position, if found
     ** @return true if found.
     */
-    bool FindByKey(uint64_t keyHi, uint64_t keyLo, uint64_t* pOutGlobalPosition) const;
+    bool FindPatternInRange(uint64_t lo, uint64_t hi, const void* pKey,
+                             int (*pComp)(void* pContext, const void* pEntry, const void* pKey),
+                             void* pContext, uint64_t* pOutGlobalPosition) const;
 
     /*
     ** Method: GetRecordCount

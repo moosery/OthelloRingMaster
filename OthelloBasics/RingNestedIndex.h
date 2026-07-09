@@ -38,16 +38,28 @@
 **   passed to `Load()` are null. Callers decide via
 **   `RingNestedIndexHasRing1`/`RingNestedIndexHasRing2`.
 **
-**   Compression matches the intent behind what the original validation
-**   measured, adapted to stay fully streaming (no raw intermediate file,
-**   no whole-level-in-memory step, ever -- this matters at real data
-**   volumes): CellsInUse's (pattern, offset) shape is bit-identical to
-**   UINT64_PAIR, so it goes straight through Utility's RSFWriter/RSFReader
-**   (delta+varint+LZ4), the same compression the flat store format uses.
-**   Ring_1/Ring_2/Ring_3_4 don't fit that two-field shape; those go through
-**   Utility/Lz4Stream.h's Lz4StreamWriter/Reader instead -- LZ4-only
-**   framing (no delta/varint), with each record compressed as Process()
-**   produces it, so no raw file ever touches disk.
+**   All four files share the same delta+varint+LZ4 (.rsfzl) compression,
+**   via Utility/RingStoreFile.h's shaped writer/reader entry points
+**   (RSFWriterOpenZLShaped/RSFWriterRecordShaped/RSFOpenShaped/
+**   RSFReadShaped): CellsInUse's (pattern, offset) shape is bit-identical
+**   to RSF_SHAPE_PAIR64 (the plain UINT64_PAIR API also works for it, and
+**   is what's used); Ring_1/Ring_2 use RSF_SHAPE_RING_LEVEL (u32 pattern +
+**   u64 offset -- no count field, same reasoning as Ring_3_4 below);
+**   Ring_3_4 uses RSF_SHAPE_LEAF16. Nothing here holds a whole level in
+**   memory during a Process()/StreamAll() pass -- this matters at real
+**   data volumes.
+**
+**   Ring_1/Ring_2 carry no count field, mirroring CellsInUse: a group's
+**   span in the next level down is implied by the next record's offset
+**   (or "consume until that level's stream hits EOF" for the very last
+**   record in the WHOLE flat Ring_1/Ring_2 stream -- offsets are written
+**   monotonically non-decreasing across the entire level, not just within
+**   one parent group, so this lookahead is correct regardless of which
+**   parent group a record belongs to). Storing count explicitly would cost
+**   real disk space for zero benefit: nothing in this pipeline ever binary
+**   searches directly against a compressed ring file -- the retrograde
+**   calculator's binary search always runs against its own decompressed
+**   scratch copy, built via one unavoidable sequential pass regardless.
 */
 
 #pragma once
@@ -55,7 +67,6 @@
 /* Includes */
 #include "OthelloBasics.h"
 #include "RingStoreFile.h"
-#include "Lz4Stream.h"
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -122,14 +133,15 @@ struct CellsInUseRec
 
 /*
 ** Type:    RingLevelRec
-** @brief   Shared record shape for both Ring_1 and Ring_2: a count of
-**          member records in the next level down, this level's color
-**          subpattern, and the offset into the next level down where this
-**          group's records start.
+** @brief   Shared record shape for both Ring_1 and Ring_2: this level's
+**          color subpattern, and the offset into the next level down where
+**          this group's records start. No count field -- the span is
+**          implied by the next record's offset in this same flat stream
+**          (or "consume until EOF" for the last one), exactly like
+**          CellsInUseRec -- see file Notes.
 */
 struct RingLevelRec
 {
-    uint64_t count;     /* number of records in the next level down belonging to this group */
     uint32_t pattern;   /* low RING1_BITS or RING2_BITS meaningful, rest always 0            */
     uint64_t offset;    /* index into the next level down where this group's records start  */
 };
@@ -146,7 +158,7 @@ struct Ring34Rec
 };
 #pragma pack(pop)
 static_assert(sizeof(CellsInUseRec) == 16, "CellsInUseRec must be 16 bytes");
-static_assert(sizeof(RingLevelRec)  == 20, "RingLevelRec must be 20 bytes");
+static_assert(sizeof(RingLevelRec)  == 12, "RingLevelRec must be 12 bytes");
 static_assert(sizeof(Ring34Rec)     ==  2, "Ring34Rec must be 2 bytes");
 
 /*
@@ -175,10 +187,10 @@ struct RingNestedIndexStats
 */
 struct RingNestedIndexBuilder
 {
-    RSFWriter*        pCellsInUseWriter = nullptr;   /* compressed via RSF, see file Notes            */
-    Lz4StreamWriter*  pRing1Writer      = nullptr;   /* compressed via Lz4Stream, see file Notes       */
-    Lz4StreamWriter*  pRing2Writer      = nullptr;
-    Lz4StreamWriter*  pRing34Writer     = nullptr;
+    RSFWriter*  pCellsInUseWriter = nullptr;   /* RSF_SHAPE_PAIR64, opened via RSFWriterOpenZL      */
+    RSFWriter*  pRing1Writer      = nullptr;   /* RSF_SHAPE_RING_LEVEL, opened via RSFWriterOpenZLShaped */
+    RSFWriter*  pRing2Writer      = nullptr;   /* RSF_SHAPE_RING_LEVEL, opened via RSFWriterOpenZLShaped */
+    RSFWriter*  pRing34Writer     = nullptr;   /* RSF_SHAPE_LEAF16, opened via RSFWriterOpenZLShaped      */
 
     bool      havePattern            = false;
     uint64_t  curPattern             = 0;
@@ -201,14 +213,14 @@ struct RingNestedIndexBuilder
     ** Method: Init
     ** @brief  Attaches the already-open outputs this builder writes to.
     ** @param  pCellsInUseWriterIn - already-open RSFWriter for the CellsInUse output (via RSFWriterOpenZL)
-    ** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output, or nullptr if
+    ** @param  pRing1WriterIn      - already-open RSFWriter (RSF_SHAPE_RING_LEVEL, via RSFWriterOpenZLShaped) for the Ring_1 output, or nullptr if
     **                               RingNestedIndexHasRing1(boardSize) is false (that level isn't stored)
-    ** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output, or nullptr if
+    ** @param  pRing2WriterIn      - already-open RSFWriter (RSF_SHAPE_RING_LEVEL, via RSFWriterOpenZLShaped) for the Ring_2 output, or nullptr if
     **                               RingNestedIndexHasRing2(boardSize) is false (that level isn't stored)
-    ** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output (always required)
+    ** @param  pRing34WriterIn     - already-open RSFWriter (RSF_SHAPE_LEAF16, via RSFWriterOpenZLShaped) for the Ring_3_4 output (always required)
     */
-    void Init(RSFWriter* pCellsInUseWriterIn, Lz4StreamWriter* pRing1WriterIn,
-              Lz4StreamWriter* pRing2WriterIn, Lz4StreamWriter* pRing34WriterIn);
+    void Init(RSFWriter* pCellsInUseWriterIn, RSFWriter* pRing1WriterIn,
+              RSFWriter* pRing2WriterIn, RSFWriter* pRing34WriterIn);
 
     /*
     ** Method: Process
@@ -297,18 +309,17 @@ struct RingNestedIndexReader
 **           board -- never holding a whole level resident, regardless of
 **           board count (unlike RingNestedIndexReader::Load()/ExpandAll(),
 **           which load all four files into memory first).
-** @details  Reads CellsInUse (via RSFReader), Ring_1/Ring_2 (if
-**           applicable) and Ring_3_4 (via Lz4StreamReader) in lockstep,
-**           one record at a time from each. Only CellsInUse needs a
-**           one-record lookahead (to know where its current group ends);
-**           Ring_1/Ring_2 records each carry their own explicit child
-**           count (RingLevelRec::count), so no lookahead is needed at
-**           those levels -- and the LAST CellsInUse group's span is
+** @details  Reads CellsInUse, Ring_1/Ring_2 (if applicable) and Ring_3_4
+**           (all via RSFReader/RSFReaderShaped) in lockstep, one record at
+**           a time from each. Every non-leaf level (CellsInUse, Ring_1,
+**           Ring_2) needs a one-record lookahead to know where its current
+**           group ends -- none of them carry an explicit child count (see
+**           file Notes) -- and each level's very last group's span is
 **           simply "keep consuming from the next stored level until it
 **           hits EOF," which needs no upfront total count either. Total
 **           memory held at any moment is a small, fixed handful of
-**           records (2 CellsInUse + 1 each of whichever of Ring_1/Ring_2/
-**           Ring_3_4 apply), never proportional to the level's board count.
+**           records (2 each of CellsInUse/Ring_1/Ring_2 that apply, plus 1
+**           Ring_3_4), never proportional to the level's board count.
 ** @param    cellsInUsePath - path to the CellsInUse file
 ** @param    ring1Path      - path to the Ring_1 file, or nullptr if not applicable
 ** @param    ring2Path      - path to the Ring_2 file, or nullptr if not applicable
@@ -319,6 +330,113 @@ struct RingNestedIndexReader
 */
 bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
                               const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard);
+
+/*
+** Type:    RingNestedIndexPullReader
+** @brief   Pull-style counterpart to RingNestedIndexStreamAll -- Peek()/
+**          Advance() give one board at a time on demand instead of a
+**          callback run to completion, so a k-way merge heap can
+**          interleave several of these (one per merge input) alongside
+**          each other. Needed once merge inputs are themselves ring-
+**          format (cascade's own intermediate/grouped temp files, once
+**          those become ring-format too) -- StreamAll's callback shape
+**          can't participate in a heap that pops one record at a time
+**          across many sources.
+** @details Internally mirrors RingNestedIndexBuilder's own cascading
+**          CloseRing1Group/CloseRing2Group/CloseRing34Group logic, but in
+**          reverse: instead of counters that trigger a WRITE when a group
+**          closes, running consumed-record counts per level (ring1Count/
+**          ring2Count/ring34Count) trigger advancing that level's READ
+**          cursor once the count reaches the next record's offset (the
+**          same boundary the builder itself wrote) -- a cascading carry,
+**          like an odometer. The one-record lookahead on CellsInUse/
+**          Ring_1/Ring_2 plus an ADDITIONAL one on Ring_3_4 (needed here,
+**          unlike StreamAll, so Peek() can report the current board without
+**          having consumed it) are the only records ever held in memory.
+**          Same O(1)-memory guarantee as StreamAll, regardless of board count.
+*/
+struct RingNestedIndexPullReader
+{
+    RSFReader* pCellsInUse = nullptr;
+    RSFReader* pRing1      = nullptr;
+    RSFReader* pRing2      = nullptr;
+    RSFReader* pRing34     = nullptr;
+    bool       hasRing1    = false;
+    bool       hasRing2    = false;
+
+    UINT64_PAIR   curCells{}, nextCells{};
+    bool          haveCurCells = false, haveNextCells = false;
+
+    RingLevelRec  curRing1{}, nextRing1{};
+    bool          haveCurRing1 = false, haveNextRing1 = false;
+
+    RingLevelRec  curRing2{}, nextRing2{};
+    bool          haveCurRing2 = false, haveNextRing2 = false;
+
+    Ring34Rec     curRing34{};
+    bool          haveCurRing34 = false;
+
+    /* Running counts of records consumed so far from each level -- the
+    ** "position" half of the odometer-style carry logic described above.
+    */
+    uint64_t ring1Count  = 0;
+    uint64_t ring2Count  = 0;
+    uint64_t ring34Count = 0;
+
+    bool      haveCurrent = false;   /* true if currentBoard is a real, not-yet-consumed board */
+    bool      corrupted   = false;   /* true if an expected-more-data boundary hit EOF early -- see Advance() */
+    BOARD_KEY currentBoard{};
+
+    /*
+    ** Method: Open
+    ** @brief  Opens the applicable nested-index files and primes the
+    **         lookahead so Peek() immediately reports the first board.
+    ** @param  cellsInUsePath - path to the CellsInUse file
+    ** @param  ring1Path      - path to the Ring_1 file, or nullptr if not applicable
+    ** @param  ring2Path      - path to the Ring_2 file, or nullptr if not applicable
+    ** @param  ring34Path     - path to the Ring_3_4 file (always required)
+    ** @return true if every applicable file opened successfully (even if it
+    **         turns out to hold zero boards); false only on a missing/
+    **         unreadable file.
+    */
+    bool Open(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path, const char* ring34Path);
+
+    /*
+    ** Method: Peek
+    ** @brief  Reports the current board without consuming it.
+    ** @param  pOutKey - out: the current ring-ordered BOARD_KEY
+    ** @return true if a board is available (false at clean EOF or after IsCorrupted()).
+    */
+    bool Peek(BOARD_KEY* pOutKey) const;
+
+    /*
+    ** Method: Advance
+    ** @brief  Consumes the current board and reads/computes the next one.
+    ** @return true if another board is now available (matches what Peek() would return next).
+    */
+    bool Advance();
+
+    /*
+    ** Method: IsCorrupted
+    ** @brief  True if Advance() ever hit EOF on a level where a further
+    **         record was expected (a higher level's lookahead already
+    **         promised more) -- a truncated/corrupt file, never a
+    **         legitimate "no more boards" case. Callers must check this
+    **         once Peek() returns false, the same way
+    **         RingNestedIndexStreamAll's own false return is never treated
+    **         as "no data."
+    */
+    bool IsCorrupted() const { return corrupted; }
+
+    /*
+    ** Method: Close
+    ** @brief  Closes every open reader. Safe to call even if Open() failed partway through.
+    */
+    void Close();
+
+private:
+    bool FillCurrent();
+};
 
 /*
 ** Function: RingNestedIndexFileCount

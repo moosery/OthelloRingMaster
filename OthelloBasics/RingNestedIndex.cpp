@@ -17,12 +17,12 @@
 ** Method: RingNestedIndexBuilder::Init
 ** @brief  Attaches the already-open outputs this builder writes to.
 ** @param  pCellsInUseWriterIn - already-open RSFWriter for the CellsInUse output
-** @param  pRing1WriterIn      - already-open Lz4StreamWriter for the Ring_1 output, or nullptr if not applicable
-** @param  pRing2WriterIn      - already-open Lz4StreamWriter for the Ring_2 output, or nullptr if not applicable
-** @param  pRing34WriterIn     - already-open Lz4StreamWriter for the Ring_3_4 output (always required)
+** @param  pRing1WriterIn      - already-open RSFWriter (RSF_SHAPE_RING_LEVEL) for the Ring_1 output, or nullptr if not applicable
+** @param  pRing2WriterIn      - already-open RSFWriter (RSF_SHAPE_RING_LEVEL) for the Ring_2 output, or nullptr if not applicable
+** @param  pRing34WriterIn     - already-open RSFWriter (RSF_SHAPE_LEAF16) for the Ring_3_4 output (always required)
 */
-void RingNestedIndexBuilder::Init(RSFWriter* pCellsInUseWriterIn, Lz4StreamWriter* pRing1WriterIn,
-                                   Lz4StreamWriter* pRing2WriterIn, Lz4StreamWriter* pRing34WriterIn)
+void RingNestedIndexBuilder::Init(RSFWriter* pCellsInUseWriterIn, RSFWriter* pRing1WriterIn,
+                                   RSFWriter* pRing2WriterIn, RSFWriter* pRing34WriterIn)
 {
     pCellsInUseWriter = pCellsInUseWriterIn;
     pRing1Writer      = pRing1WriterIn;
@@ -44,7 +44,7 @@ void RingNestedIndexBuilder::CloseRing34Group()
     ** instead of silently losing data.
     */
     Ring34Rec rec{ curRing34Pattern };
-    Lz4StreamWriterWrite(pRing34Writer, &rec, sizeof(rec));
+    RSFWriterRecordShaped(pRing34Writer, &rec);
     if (ring34GroupCount != 1)
         stats.ring34GroupsWithCountNot1++;
     stats.ring34Records++;
@@ -57,16 +57,16 @@ void RingNestedIndexBuilder::CloseRing34Group()
 **         Ring_2 group's record and closes it -- unless pRing2Writer is
 **         null (this board size never touches Ring_2, see file Notes), in
 **         which case this only cascades down and haveRing2Group can never
-**         have been set true in the first place.
+**         have been set true in the first place. No count field written --
+**         see RingNestedIndex.h Notes (span derived via lookahead on read).
 */
 void RingNestedIndexBuilder::CloseRing2Group()
 {
     CloseRing34Group();
     if (!pRing2Writer || !haveRing2Group) return;
 
-    uint64_t      count = stats.ring34Records - ring2GroupRing34Start;
-    RingLevelRec  rec{ count, curRing2Pattern, ring2GroupRing34Start };
-    Lz4StreamWriterWrite(pRing2Writer, &rec, sizeof(rec));
+    RingLevelRec rec{ curRing2Pattern, ring2GroupRing34Start };
+    RSFWriterRecordShaped(pRing2Writer, &rec);
     stats.ring2Records++;
     haveRing2Group = false;
 }
@@ -76,16 +76,16 @@ void RingNestedIndexBuilder::CloseRing2Group()
 ** @brief  Closes the current Ring_2 group (which cascades to Ring_3_4),
 **         then writes the current Ring_1 group's record and closes it --
 **         unless pRing1Writer is null (see CloseRing2Group's comment; same
-**         reasoning applies one level up).
+**         reasoning applies one level up). No count field written -- see
+**         RingNestedIndex.h Notes (span derived via lookahead on read).
 */
 void RingNestedIndexBuilder::CloseRing1Group()
 {
     CloseRing2Group();
     if (!pRing1Writer || !haveRing1Group) return;
 
-    uint64_t      count = stats.ring2Records - ring1GroupRing2Start;
-    RingLevelRec  rec{ count, curRing1Pattern, ring1GroupRing2Start };
-    Lz4StreamWriterWrite(pRing1Writer, &rec, sizeof(rec));
+    RingLevelRec rec{ curRing1Pattern, ring1GroupRing2Start };
+    RSFWriterRecordShaped(pRing1Writer, &rec);
     stats.ring1Records++;
     haveRing1Group = false;
 }
@@ -183,32 +183,47 @@ void RingNestedIndexBuilder::Finish()
 }
 
 /*
-** Function: readStreamedRecords
-** @brief    Reads every fixed-size T record from an Lz4Stream-compressed
-**           file into pOut, appending until end of stream.
-** @param    path - file path to read
-** @param    pOut - out: filled with every record in the file
-** @return   true if the file opened and every record was whole (no
-**           truncated/corrupt trailing partial record).
+** Function: readRingLevelViaRSF
+** @brief    Reads a Ring_1/Ring_2 file (RSF_SHAPE_RING_LEVEL, via
+**           RSFOpenShaped/RSFReadShaped -- see file Notes) fully into pOut.
+** @param    path - path to the Ring_1 or Ring_2 file
+** @param    pOut - out: filled with every RingLevelRec in the file
+** @return   true if the file opened and read successfully.
 */
-template <typename T>
-static bool readStreamedRecords(const char* path, std::vector<T>* pOut)
+static bool readRingLevelViaRSF(const char* path, std::vector<RingLevelRec>* pOut)
 {
-    Lz4StreamReader* r = Lz4StreamReaderOpen(path);
+    RSFReader* r = RSFOpenShaped(path, RSF_SHAPE_RING_LEVEL);
     if (!r) return false;
 
-    bool ok = true;
-    for (;;)
-    {
-        T      rec;
-        size_t got = Lz4StreamReaderRead(r, &rec, sizeof(rec));
-        if (got == 0) break;                       /* clean end of stream */
-        if (got != sizeof(rec)) { ok = false; break; }   /* truncated mid-record */
-        pOut->push_back(rec);
-    }
+    pOut->resize((size_t)RSFReaderTrailer(r)->recordCount);
 
-    Lz4StreamReaderClose(&r);
-    return ok;
+    size_t i = 0;
+    while (i < pOut->size() && RSFReadShaped(r, &(*pOut)[i], 1) == 1)
+        i++;
+    RSFClose(&r);
+    return i == pOut->size();
+}
+
+/*
+** Function: readRing34ViaRSF
+** @brief    Reads the Ring_3_4 file (RSF_SHAPE_LEAF16, via
+**           RSFOpenShaped/RSFReadShaped -- see file Notes) fully into pOut.
+** @param    path - path to the Ring_3_4 file
+** @param    pOut - out: filled with every Ring34Rec in the file
+** @return   true if the file opened and read successfully.
+*/
+static bool readRing34ViaRSF(const char* path, std::vector<Ring34Rec>* pOut)
+{
+    RSFReader* r = RSFOpenShaped(path, RSF_SHAPE_LEAF16);
+    if (!r) return false;
+
+    pOut->resize((size_t)RSFReaderTrailer(r)->recordCount);
+
+    size_t i = 0;
+    while (i < pOut->size() && RSFReadShaped(r, &(*pOut)[i], 1) == 1)
+        i++;
+    RSFClose(&r);
+    return i == pOut->size();
 }
 
 /*
@@ -253,9 +268,9 @@ bool RingNestedIndexReader::Load(const char* cellsInUsePath, const char* ring1Pa
     hasRing2 = (ring2Path != nullptr);
 
     if (!readCellsInUseViaRSF(cellsInUsePath, &cellsInUse)) return false;
-    if (hasRing1 && !readStreamedRecords(ring1Path, &ring1)) return false;
-    if (hasRing2 && !readStreamedRecords(ring2Path, &ring2)) return false;
-    return readStreamedRecords(ring34Path, &ring34);
+    if (hasRing1 && !readRingLevelViaRSF(ring1Path, &ring1)) return false;
+    if (hasRing2 && !readRingLevelViaRSF(ring2Path, &ring2)) return false;
+    return readRing34ViaRSF(ring34Path, &ring34);
 }
 
 /*
@@ -286,24 +301,27 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
 
     if (hasRing1)
     {
-        /* Full 4-level walk: CellsInUse -> Ring_1 -> Ring_2 -> Ring_3_4 (8x8). */
+        /* Full 4-level walk: CellsInUse -> Ring_1 -> Ring_2 -> Ring_3_4 (8x8).
+        ** None of CellsInUse/Ring_1/Ring_2 carry a count field -- each
+        ** group's span runs until the next record's offset in that SAME
+        ** flat stream (offsets are monotonic across the whole stream, not
+        ** just within one parent group), or to the end of the next stored
+        ** level for the very last record -- see file Notes.
+        */
         for (size_t i = 0; i < numCellsInUse; i++)
         {
-            /* CellsInUseRec has no count field -- a group's span runs until
-            ** the next entry's offset (or the end of Ring_1, for the last entry).
-            */
             uint64_t ring1Begin = cellsInUse[i].offset;
             uint64_t ring1End   = (i + 1 < numCellsInUse) ? cellsInUse[i + 1].offset : (uint64_t)ring1.size();
 
             for (uint64_t j = ring1Begin; j < ring1End; j++)
             {
                 uint64_t ring2Begin = ring1[j].offset;
-                uint64_t ring2End   = ring2Begin + ring1[j].count;
+                uint64_t ring2End   = (j + 1 < ring1.size()) ? ring1[j + 1].offset : (uint64_t)ring2.size();
 
                 for (uint64_t k = ring2Begin; k < ring2End; k++)
                 {
                     uint64_t ring34Begin = ring2[k].offset;
-                    uint64_t ring34End   = ring34Begin + ring2[k].count;
+                    uint64_t ring34End   = (k + 1 < ring2.size()) ? ring2[k + 1].offset : (uint64_t)ring34.size();
 
                     for (uint64_t m = ring34Begin; m < ring34End; m++)
                     {
@@ -332,7 +350,7 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
             for (uint64_t k = ring2Begin; k < ring2End; k++)
             {
                 uint64_t ring34Begin = ring2[k].offset;
-                uint64_t ring34End   = ring34Begin + ring2[k].count;
+                uint64_t ring34End   = (k + 1 < ring2.size()) ? ring2[k + 1].offset : (uint64_t)ring34.size();
 
                 for (uint64_t m = ring34Begin; m < ring34End; m++)
                 {
@@ -379,29 +397,42 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
     RSFReader* pCellsInUse = RSFOpen(cellsInUsePath);
     if (!pCellsInUse) return false;
 
-    Lz4StreamReader* pRing1  = hasRing1 ? Lz4StreamReaderOpen(ring1Path) : nullptr;
-    Lz4StreamReader* pRing2  = hasRing2 ? Lz4StreamReaderOpen(ring2Path) : nullptr;
-    Lz4StreamReader* pRing34 = Lz4StreamReaderOpen(ring34Path);
+    RSFReader* pRing1  = hasRing1 ? RSFOpenShaped(ring1Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+    RSFReader* pRing2  = hasRing2 ? RSFOpenShaped(ring2Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+    RSFReader* pRing34 = RSFOpenShaped(ring34Path, RSF_SHAPE_LEAF16);
 
     if ((hasRing1 && !pRing1) || (hasRing2 && !pRing2) || !pRing34)
     {
         RSFClose(&pCellsInUse);
-        if (pRing1)  Lz4StreamReaderClose(&pRing1);
-        if (pRing2)  Lz4StreamReaderClose(&pRing2);
-        if (pRing34) Lz4StreamReaderClose(&pRing34);
+        if (pRing1)  RSFClose(&pRing1);
+        if (pRing2)  RSFClose(&pRing2);
+        if (pRing34) RSFClose(&pRing34);
         return false;
     }
 
     bool ok = true;
 
-    /* One-record lookahead on CellsInUse -- see function Notes on why
-    ** nothing else in the walk needs one.
+    /* One-record lookahead on CellsInUse, and (since neither carries a
+    ** count field any more -- see file Notes) on Ring_1/Ring_2 too. Each
+    ** is a single flat stream spanning the WHOLE level, not per-parent-
+    ** group arrays, so these lookahead buffers are hoisted here rather
+    ** than reset per parent group -- they must survive across CellsInUse/
+    ** Ring_1 group boundaries exactly like CellsInUse's own lookahead
+    ** already survives across levels.
     */
     UINT64_PAIR curCells{}, nextCells{};
-    bool haveCur  = (RSFRead(pCellsInUse, &curCells, 1) == 1);
-    bool haveNext = haveCur && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+    bool haveCurCells  = (RSFRead(pCellsInUse, &curCells, 1) == 1);
+    bool haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
 
-    while (haveCur && ok)
+    RingLevelRec curRing1{}, nextRing1{};
+    bool haveCurRing1  = hasRing1 && (RSFReadShaped(pRing1, &curRing1, 1) == 1);
+    bool haveNextRing1 = haveCurRing1 && (RSFReadShaped(pRing1, &nextRing1, 1) == 1);
+
+    RingLevelRec curRing2{}, nextRing2{};
+    bool haveCurRing2  = hasRing2 && (RSFReadShaped(pRing2, &curRing2, 1) == 1);
+    bool haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
+
+    while (haveCurCells && ok)
     {
         uint64_t pattern = curCells.hi;
 
@@ -410,77 +441,95 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
         ** for the LAST group, "consume until that level's stream hits
         ** EOF" -- UINT64_MAX as a loop bound lets the EOF check do the work.
         */
-        uint64_t groupSpan = haveNext ? (nextCells.lo - curCells.lo) : UINT64_MAX;
+        uint64_t groupSpan = haveNextCells ? (nextCells.lo - curCells.lo) : UINT64_MAX;
 
         if (hasRing1)
         {
             for (uint64_t r1 = 0; ok && r1 < groupSpan; r1++)
             {
-                RingLevelRec ring1Rec;
-                size_t got = Lz4StreamReaderRead(pRing1, &ring1Rec, sizeof(ring1Rec));
-                if (got == 0) { if (haveNext) ok = false; break; }
-                if (got != sizeof(ring1Rec)) { ok = false; break; }
+                if (!haveCurRing1) { if (haveNextCells) ok = false; break; }
 
-                for (uint64_t r2 = 0; ok && r2 < ring1Rec.count; r2++)
+                uint32_t ring1Pattern = curRing1.pattern;
+                uint64_t ring2Span    = haveNextRing1 ? (nextRing1.offset - curRing1.offset) : UINT64_MAX;
+
+                if (hasRing2)
                 {
-                    if (hasRing2)
+                    for (uint64_t r2 = 0; ok && r2 < ring2Span; r2++)
                     {
-                        RingLevelRec ring2Rec;
-                        if (Lz4StreamReaderRead(pRing2, &ring2Rec, sizeof(ring2Rec)) != sizeof(ring2Rec)) { ok = false; break; }
+                        if (!haveCurRing2) { if (haveNextRing1) ok = false; break; }
 
-                        for (uint64_t r34 = 0; ok && r34 < ring2Rec.count; r34++)
+                        uint32_t ring2Pattern = curRing2.pattern;
+                        uint64_t ring34Span   = haveNextRing2 ? (nextRing2.offset - curRing2.offset) : UINT64_MAX;
+
+                        for (uint64_t r34 = 0; ok && r34 < ring34Span; r34++)
                         {
                             Ring34Rec ring34Rec;
-                            if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+                            if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing2) ok = false; break; }
 
                             BOARD_KEY key;
                             key.ullCellsInUse = pattern;
-                            key.ullCellColors = ((uint64_t)ring1Rec.pattern << RING1_SHIFT)
-                                              | ((uint64_t)ring2Rec.pattern << RING2_SHIFT)
+                            key.ullCellColors = ((uint64_t)ring1Pattern << RING1_SHIFT)
+                                              | ((uint64_t)ring2Pattern << RING2_SHIFT)
                                               | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
                             onBoard(key);
                         }
+
+                        curRing2      = nextRing2;
+                        haveCurRing2  = haveNextRing2;
+                        haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
                     }
-                    else
+                }
+                else
+                {
+                    /* hasRing1 true but hasRing2 false never occurs for
+                    ** any board size this project supports (8x8 implies
+                    ** 6x6's Ring_2 too), but handled correctly anyway:
+                    ** Ring_1's own offset points directly into Ring_3_4, so
+                    ** ring2Span here is really "how many Ring_3_4 records
+                    ** belong to this Ring_1 group."
+                    */
+                    for (uint64_t r34 = 0; ok && r34 < ring2Span; r34++)
                     {
-                        /* hasRing1 true but hasRing2 false never occurs for
-                        ** any board size this project supports (8x8 implies
-                        ** 6x6's Ring_2 too), but handled correctly anyway:
-                        ** Ring_1's own offset/count would point directly
-                        ** into Ring_3_4.
-                        */
                         Ring34Rec ring34Rec;
-                        if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+                        if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing1) ok = false; break; }
 
                         BOARD_KEY key;
                         key.ullCellsInUse = pattern;
-                        key.ullCellColors = ((uint64_t)ring1Rec.pattern << RING1_SHIFT)
+                        key.ullCellColors = ((uint64_t)ring1Pattern << RING1_SHIFT)
                                           | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
                         onBoard(key);
                     }
                 }
+
+                curRing1      = nextRing1;
+                haveCurRing1  = haveNextRing1;
+                haveNextRing1 = haveCurRing1 && (RSFReadShaped(pRing1, &nextRing1, 1) == 1);
             }
         }
         else if (hasRing2)
         {
             for (uint64_t r2 = 0; ok && r2 < groupSpan; r2++)
             {
-                RingLevelRec ring2Rec;
-                size_t got = Lz4StreamReaderRead(pRing2, &ring2Rec, sizeof(ring2Rec));
-                if (got == 0) { if (haveNext) ok = false; break; }
-                if (got != sizeof(ring2Rec)) { ok = false; break; }
+                if (!haveCurRing2) { if (haveNextCells) ok = false; break; }
 
-                for (uint64_t r34 = 0; ok && r34 < ring2Rec.count; r34++)
+                uint32_t ring2Pattern = curRing2.pattern;
+                uint64_t ring34Span   = haveNextRing2 ? (nextRing2.offset - curRing2.offset) : UINT64_MAX;
+
+                for (uint64_t r34 = 0; ok && r34 < ring34Span; r34++)
                 {
                     Ring34Rec ring34Rec;
-                    if (Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec)) != sizeof(ring34Rec)) { ok = false; break; }
+                    if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing2) ok = false; break; }
 
                     BOARD_KEY key;
                     key.ullCellsInUse = pattern;
-                    key.ullCellColors = ((uint64_t)ring2Rec.pattern << RING2_SHIFT)
+                    key.ullCellColors = ((uint64_t)ring2Pattern << RING2_SHIFT)
                                       | ((uint64_t)ring34Rec.pattern << RING34_SHIFT);
                     onBoard(key);
                 }
+
+                curRing2      = nextRing2;
+                haveCurRing2  = haveNextRing2;
+                haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
             }
         }
         else
@@ -488,9 +537,7 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
             for (uint64_t r34 = 0; ok && r34 < groupSpan; r34++)
             {
                 Ring34Rec ring34Rec;
-                size_t got = Lz4StreamReaderRead(pRing34, &ring34Rec, sizeof(ring34Rec));
-                if (got == 0) { if (haveNext) ok = false; break; }
-                if (got != sizeof(ring34Rec)) { ok = false; break; }
+                if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextCells) ok = false; break; }
 
                 BOARD_KEY key;
                 key.ullCellsInUse = pattern;
@@ -499,17 +546,208 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
             }
         }
 
-        curCells  = nextCells;
-        haveCur   = haveNext;
-        haveNext  = haveCur && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+        curCells      = nextCells;
+        haveCurCells  = haveNextCells;
+        haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
     }
 
     RSFClose(&pCellsInUse);
-    if (pRing1) Lz4StreamReaderClose(&pRing1);
-    if (pRing2) Lz4StreamReaderClose(&pRing2);
-    Lz4StreamReaderClose(&pRing34);
+    if (pRing1) RSFClose(&pRing1);
+    if (pRing2) RSFClose(&pRing2);
+    RSFClose(&pRing34);
 
     return ok;
+}
+
+/*
+** ============================================================
+** RingNestedIndexPullReader
+** ============================================================
+*/
+
+/*
+** Method: RingNestedIndexPullReader::Open
+** @brief  See RingNestedIndex.h.
+*/
+bool RingNestedIndexPullReader::Open(const char* cellsInUsePath, const char* ring1Path,
+                                      const char* ring2Path, const char* ring34Path)
+{
+    hasRing1 = (ring1Path != nullptr);
+    hasRing2 = (ring2Path != nullptr);
+
+    pCellsInUse = RSFOpen(cellsInUsePath);
+    if (!pCellsInUse) return false;
+
+    pRing1  = hasRing1 ? RSFOpenShaped(ring1Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+    pRing2  = hasRing2 ? RSFOpenShaped(ring2Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+    pRing34 = RSFOpenShaped(ring34Path, RSF_SHAPE_LEAF16);
+
+    if ((hasRing1 && !pRing1) || (hasRing2 && !pRing2) || !pRing34)
+    {
+        Close();
+        return false;
+    }
+
+    haveCurCells  = (RSFRead(pCellsInUse, &curCells, 1) == 1);
+    haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+
+    haveCurRing1  = hasRing1 && (RSFReadShaped(pRing1, &curRing1, 1) == 1);
+    haveNextRing1 = haveCurRing1 && (RSFReadShaped(pRing1, &nextRing1, 1) == 1);
+
+    haveCurRing2  = hasRing2 && (RSFReadShaped(pRing2, &curRing2, 1) == 1);
+    haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
+
+    haveCurRing34 = (RSFReadShaped(pRing34, &curRing34, 1) == 1);
+
+    FillCurrent();
+    return true;
+}
+
+/*
+** Method: RingNestedIndexPullReader::FillCurrent
+** @brief  Computes currentBoard from the current cursor position
+**         (curCells/curRing1/curRing2/curRing34), or clears haveCurrent if
+**         nothing is available. Private helper shared by Open()/Advance().
+** @return haveCurrent's new value, for the callers' convenience.
+*/
+bool RingNestedIndexPullReader::FillCurrent()
+{
+    if (!haveCurCells || !haveCurRing34) { haveCurrent = false; return false; }
+
+    currentBoard.ullCellsInUse = curCells.hi;
+    uint64_t colors = (uint64_t)curRing34.pattern << RING34_SHIFT;
+    if (hasRing1) colors |= (uint64_t)curRing1.pattern << RING1_SHIFT;
+    if (hasRing2) colors |= (uint64_t)curRing2.pattern << RING2_SHIFT;
+    currentBoard.ullCellColors = colors;
+
+    haveCurrent = true;
+    return true;
+}
+
+/*
+** Method: RingNestedIndexPullReader::Peek
+** @brief  See RingNestedIndex.h.
+*/
+bool RingNestedIndexPullReader::Peek(BOARD_KEY* pOutKey) const
+{
+    if (!haveCurrent) return false;
+    *pOutKey = currentBoard;
+    return true;
+}
+
+/*
+** Method: RingNestedIndexPullReader::Advance
+** @brief  See RingNestedIndex.h.
+** @details Consumes the current Ring_3_4 record (always -- it's the leaf,
+**          one per board), then cascades upward exactly like the builder's
+**          own CloseRing1Group/CloseRing2Group cascade, but in reverse:
+**          reaching a level's next-record offset (the same boundary value
+**          the builder wrote) advances that level's cursor and, if that
+**          level itself just crossed ITS OWN parent's boundary, cascades
+**          one level further up. A level with no next record (haveNextX
+**          false -- the last group at that level) never reaches its
+**          (infinite) boundary via count comparison; it only ends when the
+**          underlying file's own EOF is hit, exactly like StreamAll.
+*/
+bool RingNestedIndexPullReader::Advance()
+{
+    if (!haveCurrent) return false;
+
+    ring34Count++;
+    haveCurRing34 = (RSFReadShaped(pRing34, &curRing34, 1) == 1);
+
+    if (!haveCurRing34)
+    {
+        /* Ring_3_4 (the leaf, read every Advance() call) has run out.
+        ** Legitimate only if this is genuinely the last group at every
+        ** applicable level -- nothing anywhere still promises more boards.
+        ** Otherwise the data is truncated/corrupt (same reasoning
+        ** RingNestedIndexStreamAll's own "if (haveNext) ok = false" checks
+        ** apply, just consolidated to the one place it can actually happen
+        ** here: every higher-level cascade below only ever fires when its
+        ** own haveNextX is already true, so it can never itself be the
+        ** source of a truncation -- only running out of leaf records can).
+        */
+        bool trulyDone = !haveNextCells
+                       && (!hasRing1 || !haveNextRing1)
+                       && (!hasRing2 || !haveNextRing2);
+        if (!trulyDone) corrupted = true;
+        haveCurrent = false;
+        return false;
+    }
+
+    /* Cascade the read cursors upward wherever ring34Count has now reached
+    ** the next-record boundary the builder itself wrote at that level --
+    ** mirrors CloseRing1Group/CloseRing2Group's own cascade, in reverse.
+    ** Each check only ever fires when that level's own haveNextX is
+    ** already true, so it can never spuriously trigger past real data.
+    */
+    if (hasRing2 && haveNextRing2 && ring34Count >= nextRing2.offset)
+    {
+        ring2Count++;
+        curRing2      = nextRing2;
+        haveCurRing2  = haveNextRing2;
+        haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
+
+        if (hasRing1)
+        {
+            if (haveNextRing1 && ring2Count >= nextRing1.offset)
+            {
+                ring1Count++;
+                curRing1      = nextRing1;
+                haveCurRing1  = haveNextRing1;
+                haveNextRing1 = haveCurRing1 && (RSFReadShaped(pRing1, &nextRing1, 1) == 1);
+
+                if (haveNextCells && ring1Count >= nextCells.lo)
+                {
+                    curCells      = nextCells;
+                    haveCurCells  = haveNextCells;
+                    haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+                }
+            }
+        }
+        else if (haveNextCells && ring2Count >= nextCells.lo)
+        {
+            curCells      = nextCells;
+            haveCurCells  = haveNextCells;
+            haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+        }
+    }
+    else if (!hasRing2 && hasRing1 && haveNextRing1 && ring34Count >= nextRing1.offset)
+    {
+        ring1Count++;
+        curRing1      = nextRing1;
+        haveCurRing1  = haveNextRing1;
+        haveNextRing1 = haveCurRing1 && (RSFReadShaped(pRing1, &nextRing1, 1) == 1);
+
+        if (haveNextCells && ring1Count >= nextCells.lo)
+        {
+            curCells      = nextCells;
+            haveCurCells  = haveNextCells;
+            haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+        }
+    }
+    else if (!hasRing2 && !hasRing1 && haveNextCells && ring34Count >= nextCells.lo)
+    {
+        curCells      = nextCells;
+        haveCurCells  = haveNextCells;
+        haveNextCells = haveCurCells && (RSFRead(pCellsInUse, &nextCells, 1) == 1);
+    }
+
+    return FillCurrent();
+}
+
+/*
+** Method: RingNestedIndexPullReader::Close
+** @brief  See RingNestedIndex.h.
+*/
+void RingNestedIndexPullReader::Close()
+{
+    if (pCellsInUse) RSFClose(&pCellsInUse);
+    if (pRing1)      RSFClose(&pRing1);
+    if (pRing2)      RSFClose(&pRing2);
+    if (pRing34)     RSFClose(&pRing34);
+    haveCurrent = false;
 }
 
 /*
@@ -571,8 +809,11 @@ bool RingNestedIndexReader::FindBoardPosition(const BOARD_KEY& key, uint64_t* pO
         if (!BinarySearchPattern(ring1, begin, end, ring1Pattern, &j))
             return false;
 
+        /* No count field -- span runs to the next Ring_1 record's offset
+        ** in this same flat stream, or to the end of Ring_2 for the last one.
+        */
         begin = ring1[j].offset;
-        end   = begin + ring1[j].count;
+        end   = (j + 1 < ring1.size()) ? ring1[j + 1].offset : (uint64_t)ring2.size();
     }
     else
     {
@@ -588,8 +829,11 @@ bool RingNestedIndexReader::FindBoardPosition(const BOARD_KEY& key, uint64_t* pO
         if (!BinarySearchPattern(ring2, begin, end, ring2Pattern, &k))
             return false;
 
+        /* No count field -- span runs to the next Ring_2 record's offset
+        ** in this same flat stream, or to the end of Ring_3_4 for the last one.
+        */
         begin = ring2[k].offset;
-        end   = begin + ring2[k].count;
+        end   = (k + 1 < ring2.size()) ? ring2[k + 1].offset : (uint64_t)ring34.size();
     }
 
     uint64_t m;

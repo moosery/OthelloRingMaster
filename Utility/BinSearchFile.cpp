@@ -31,20 +31,21 @@
 ** @param    sizeOfElementInArray  - size in bytes of one record
 ** @param    pComp                 - 3-way comparator: <0/0/>0 as *pEntry is less/equal/greater than *pKey
 ** @param    pContext              - opaque context passed through to pComp
+** @param    startIdx              - first element of the searched sub-range, in whole-file terms (0 by default)
 ** @return   Index of the matching record if found; otherwise -(insertion point + 1).
 */
-long long BinarySearchFile(FILE* fpOut, void* pKey, void* pDataBuffer, long long numElements, long long sizeOfElementInArray, int (*pComp)(void* pContext, const void* pEntry, const void* pKey), void* pContext)
+long long BinarySearchFile(FILE* fpOut, void* pKey, void* pDataBuffer, long long numElements, long long sizeOfElementInArray, int (*pComp)(void* pContext, const void* pEntry, const void* pKey), void* pContext, long long startIdx)
 {
-    long long  leftIdx     = 0;                 /* lower bound of the still-uneliminated range (inclusive) */
-    long long  rightIdx    = numElements - 1;   /* upper bound of the still-uneliminated range (inclusive) */
-    long long  midIdx      = 0;                 /* index of the record read/compared this iteration        */
-    long long  seekOffset;                      /* byte offset of midIdx corresponding to seekOffset       */
+    long long  leftIdx     = 0;                 /* lower bound of the still-uneliminated sub-range index (inclusive) */
+    long long  rightIdx    = numElements - 1;   /* upper bound of the still-uneliminated sub-range index (inclusive) */
+    long long  midIdx      = 0;                 /* sub-range-relative index of the record read/compared this iteration */
+    long long  seekOffset;                      /* byte offset of (startIdx + midIdx) in the whole file              */
 
     while (leftIdx <= rightIdx)
     {
         midIdx = leftIdx + ((rightIdx - leftIdx) >> 1);
 
-        seekOffset = (midIdx * sizeOfElementInArray);
+        seekOffset = ((startIdx + midIdx) * sizeOfElementInArray);
 
         /* A failed seek means the search can no longer trust file position --
         ** fatal rather than silently comparing against stale/wrong data.
@@ -74,9 +75,9 @@ long long BinarySearchFile(FILE* fpOut, void* pKey, void* pDataBuffer, long long
         }
         else
         {
-            return midIdx;
+            return startIdx + midIdx;
         }
     }
 
-    return -(leftIdx + 1);
+    return -(startIdx + leftIdx + 1);
 }

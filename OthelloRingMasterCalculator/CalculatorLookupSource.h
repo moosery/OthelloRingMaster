@@ -2,23 +2,30 @@
 ** Filename:  CalculatorLookupSource.h
 **
 ** Purpose:
-**   Declares LookupSource: level+1's board-key and counts data staged as
-**   drive-spanning segmented scratch (see SegmentedStore.h) instead of
-**   held wholesale in memory, plus LookupChildTriple, which resolves a
-**   generated child to its already-computed OutcomeTriple against it.
+**   Declares LookupSource: level+1's ring nested-index data (CellsInUse/
+**   Ring_1/Ring_2/Ring_3_4) and counts data staged as drive-spanning
+**   segmented scratch (see SegmentedStore.h) instead of held wholesale in
+**   memory, plus LookupChildTriple, which resolves a generated child to
+**   its already-computed OutcomeTriple against it.
 **
 ** Notes:
-**   Board-key scratch is built via a single RingNestedIndexStreamAll pass
-**   instead of RingNestedIndexReader::Load()/ExpandAll() -- the pass never
-**   holds a whole level resident, regardless of board count (see
-**   RingNestedIndex.h's own Notes on why StreamAll replaced the
-**   wholesale-load reader everywhere it's used to read a level for
-**   processing, including RingMaster's own forward solve). One pass is
-**   enough because SegmentedStoreWriter reserves scratch drives on demand
-**   (ReserveNextScratchDrive), one at a time, as it actually needs a new
-**   segment -- no total record/byte count has to be known up front. The
-**   counts side never needed a count either: the permanent counts file is
-**   already read sequentially, one record at a time, straight into scratch.
+**   Ring scratch is staged as four SEPARATE segmented stores (one per
+**   nested-index file, skipping Ring_1/Ring_2 exactly as
+**   RingNestedIndexHasRing1/HasRing2 already governs elsewhere) holding
+**   the DECOMPRESSED but still ring-SHAPED records -- never rehydrated to
+**   flat 16-byte BOARD_KEY records. This conserves real disk space: the
+**   ring format's hierarchical grouping (many boards sharing one
+**   CellsInUse/Ring_1/Ring_2 group) is inherently smaller even fully
+**   decompressed than one flat record per board would be. Each file is
+**   staged via a single straight decompress-and-rewrite streaming pass
+**   (RSFOpen/RSFOpenShaped -> SegmentedStoreWriter), never holding a whole
+**   level resident regardless of board count. LookupChildTriple then walks
+**   the same CellsInUse -> Ring_1 -> Ring_2 -> Ring_3_4 hierarchy
+**   RingNestedIndexReader::FindBoardPosition does in-memory, but via
+**   SegmentedStoreReader::FindPatternInRange/ReadAt against the drive-
+**   segmented stores instead of in-memory vectors. The counts side is
+**   unchanged: the permanent counts file is already read sequentially,
+**   one record at a time, straight into scratch, no count needed up front.
 */
 
 #pragma once
@@ -32,20 +39,29 @@
 
 /*
 ** Type:    LookupSourceForColor
-** @brief   One color's staged lookup data at level+1: a key-searchable
-**          board-key segmented store and a positional counts segmented
-**          store, plus the drive plans both were written under (needed
-**          to release the ledger claim when this color is no longer needed).
+** @brief   One color's staged lookup data at level+1: the four ring
+**          nested-index segmented stores (Ring_1/Ring_2 only populated
+**          when hasRing1/hasRing2 are true), a positional counts segmented
+**          store, plus the drive plans each was written under (needed to
+**          release the ledger claim when this color is no longer needed).
 */
 struct LookupSourceForColor
 {
-    bool hasData = false;
+    bool hasData  = false;
+    bool hasRing1 = false;
+    bool hasRing2 = false;
 
-    SegmentedStoreReader boardKeys;
+    SegmentedStoreReader cellsInUse;
+    SegmentedStoreReader ring1;
+    SegmentedStoreReader ring2;
+    SegmentedStoreReader ring34;
     SegmentedStoreReader counts;
     int scratchByteWidth = 1;
 
-    std::vector<std::pair<char, int64_t>> boardKeyPlan;
+    std::vector<std::pair<char, int64_t>> cellsInUsePlan;
+    std::vector<std::pair<char, int64_t>> ring1Plan;
+    std::vector<std::pair<char, int64_t>> ring2Plan;
+    std::vector<std::pair<char, int64_t>> ring34Plan;
     std::vector<std::pair<char, int64_t>> countsPlan;
 };
 
@@ -86,10 +102,11 @@ void ReleaseLookupSource(POthelloRingMasterCalculatorState pState, LookupSource*
 
 /*
 ** Function: LookupChildTriple
-** @brief    Finds child's position in source's board-key store for
-**           childPlayer and returns its already-computed OutcomeTriple
-**           from the matching counts store, uniformly zero-extended
-**           regardless of the source level's tier width.
+** @brief    Finds child's position by walking source's ring nested-index
+**           segmented stores for childPlayer (CellsInUse -> Ring_1 ->
+**           Ring_2 -> Ring_3_4), then returns its already-computed
+**           OutcomeTriple from the matching counts store, uniformly
+**           zero-extended regardless of the source level's tier width.
 ** @param    source      - level+1's staged lookup source
 ** @param    childPlayer - which color's store to search
 ** @param    childKey    - the child board to find

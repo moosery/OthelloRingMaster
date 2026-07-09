@@ -8,9 +8,9 @@
 **   DoCrossDriveIntermediateMerge (consolidates NVMe writer files onto a
 **   medium drive, or performs a total flush to the store drive if the
 **   medium drive is full), and DoEndOfLevelMerge (the end-of-level
-**   consolidation of every remaining writer/intermediate file into a single
-**   sorted, deduped store file per player, then converted into the ring
-**   nested-index format via ConvertLevelOutputToNestedIndex).
+**   consolidation of every remaining writer/intermediate file, merged
+**   directly into the level's ring nested-index files -- see
+**   KWayMergeFilesToRingIndex and CascadingMerge's pRingBuilder parameter).
 **
 ** Notes:
 **   Adapted from an earlier solver implementation, renamed onto this
@@ -28,11 +28,15 @@
 **   were dropped -- confirmed dead code there (declared, never used
 **   anywhere).
 **
-**   ConvertLevelOutputToNestedIndex is new -- it's the piece that actually
-**   realizes the ring-ordered storage scheme's validated space savings; no
-**   earlier implementation had an equivalent, since none of them wrote
-**   anything but flat files. See that function's own header comment for
-**   the design.
+**   KWayMergeFilesToRingIndex/CascadingMerge's pRingBuilder parameter feed
+**   the final merge pass's deduped, sorted records directly into a
+**   RingNestedIndexBuilder -- no flat intermediate file is ever written for
+**   a level's store output (an earlier version wrote one via
+**   ConvertLevelOutputToNestedIndex, then immediately reread and rewrote it
+**   as the nested-index format; that doubled the actual store I/O for no
+**   benefit, since the flat file was never kept). Cascade's own grouped/
+**   intermediate temp files (used only when a color's input file count
+**   exceeds MAX_MERGE_FANIN) are unaffected -- still flat.
 */
 
 /* Includes */
@@ -284,6 +288,471 @@ static uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* out
 }
 
 /*
+** Function: KWayMergeFilesToRingIndex
+** @brief    Same k-way merge/dedup heap as KWayMergeFiles, but feeds each
+**           deduped, sorted record directly into a RingNestedIndexBuilder
+**           instead of writing a flat file -- no flat intermediate is ever
+**           created for this pass. Used for the FINAL merge pass (the one
+**           that produces a level's actual store output); see
+**           DoEndOfLevelMerge's mergePlayer and CascadingMerge's
+**           pRingBuilder parameter.
+** @param    inputPaths     - files to merge
+** @param    numInputs      - number of files in inputPaths
+** @param    pBuilder       - already-Init()'d builder to feed deduped records into
+** @param    pProgressBytes - out (optional): incremented by sizeof(UINT64_PAIR) per record popped
+** @param    pTerminate     - out-of-band cancellation flag, checked between pops
+** @param    extraReaders   - already-open readers to merge in alongside inputPaths
+** @return   Unique record count fed into pBuilder.
+*/
+static uint64_t KWayMergeFilesToRingIndex(char** inputPaths, int numInputs, RingNestedIndexBuilder* pBuilder,
+                                           volatile int64_t* pProgressBytes,
+                                           const volatile bool* pTerminate = nullptr,
+                                           const std::vector<RSFReader*>& extraReaders = {})
+{
+    std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
+
+    for (int i = 0; i < numInputs; i++)
+    {
+        RSFReader* r = RSFOpen(inputPaths[i]);
+        if (!r)
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "KWayMergeFilesToRingIndex: cannot open '%s' (missing, incomplete, or corrupt trailer) -- "
+                  "this file was enumerated as present moments earlier",
+                  inputPaths[i]);
+
+        UINT64_PAIR first;
+        if (RSFRead(r, &first, 1) == 1)
+            heap.push({ first, r });
+        else
+            RSFClose(&r);
+    }
+
+    for (RSFReader* r : extraReaders)
+    {
+        UINT64_PAIR first;
+        if (RSFRead(r, &first, 1) == 1)
+            heap.push({ first, r });
+        else
+            RSFClose(&r);
+    }
+
+    UINT64_PAIR lastKey = {};
+    bool        hasLast = false;
+    uint64_t    unique  = 0;
+
+    while (!heap.empty())
+    {
+        if (pTerminate && *pTerminate) break;
+
+        MergeHead top = heap.top();
+        heap.pop();
+
+        if (pProgressBytes)
+            InterlockedAdd64((volatile LONG64*)pProgressBytes, (LONG64)sizeof(UINT64_PAIR));
+
+        bool isDup = hasLast && top.key.hi == lastKey.hi && top.key.lo == lastKey.lo;
+        if (!isDup)
+        {
+            BOARD_KEY key;
+            key.ullCellsInUse = top.key.hi;
+            key.ullCellColors = top.key.lo;
+            pBuilder->Process(key);
+            lastKey = top.key;
+            hasLast = true;
+            unique++;
+        }
+
+        UINT64_PAIR next;
+        if (RSFRead(top.pReader, &next, 1) == 1)
+        {
+            top.key = next;
+            heap.push(top);
+        }
+        else
+        {
+            RSFClose(&top.pReader);
+        }
+    }
+
+    /* Close any readers still in the heap (handles early termination cleanly). */
+    while (!heap.empty())
+    {
+        MergeHead top = heap.top(); heap.pop();
+        RSFClose(&top.pReader);
+    }
+
+    return unique;
+}
+
+/*
+** ============================================================
+** Min-heap entry for ring-format-group k-way merge (whole BOARD_KEYs)
+** ============================================================
+*/
+
+/*
+** Type:    RingGroupMergeHead
+** @brief   One open ring-format cascade group's current front-of-stream
+**          board, for MergeRingGroupsIntoBuilder's heap.
+*/
+struct RingGroupMergeHead
+{
+    BOARD_KEY                  key;
+    RingNestedIndexPullReader* pReader;
+};
+
+/*
+** Type:    RingGroupMergeHeadGreater
+** @brief   Min-heap comparator (see MergeHeadGreater) ordering by
+**          (ullCellsInUse, ullCellColors) -- the same plain numeric
+**          comparison every merge comparator in this file uses.
+*/
+struct RingGroupMergeHeadGreater
+{
+    bool operator()(const RingGroupMergeHead& a, const RingGroupMergeHead& b) const
+    {
+        if (a.key.ullCellsInUse != b.key.ullCellsInUse)
+            return a.key.ullCellsInUse > b.key.ullCellsInUse;
+        return a.key.ullCellColors > b.key.ullCellColors;
+    }
+};
+
+/*
+** Function: MergeRingGroupsIntoBuilder
+** @brief    K-way merges numGroups already-open ring-format cascade group
+**           readers directly into pBuilder, deduping on (ullCellsInUse,
+**           ullCellColors) -- the ring-format-group counterpart to
+**           KWayMergeFilesToRingIndex, used when the merge inputs are
+**           themselves ring-format (cascade groups) rather than flat files.
+**           Does not close pReaders -- the caller opened them and is
+**           expected to close them (and check IsCorrupted()) afterward.
+** @param    pReaders       - numGroups already-Open()'d readers
+** @param    numGroups      - number of entries in pReaders
+** @param    pBuilder       - already-Init()'d builder to feed deduped records into
+** @param    pProgressBytes - out (optional): incremented by sizeof(UINT64_PAIR) per record popped
+** @param    pTerminate     - out-of-band cancellation flag, checked between pops
+** @return   Unique record count fed into pBuilder.
+*/
+static uint64_t MergeRingGroupsIntoBuilder(RingNestedIndexPullReader* pReaders, int numGroups,
+                                            RingNestedIndexBuilder* pBuilder,
+                                            volatile int64_t* pProgressBytes,
+                                            const volatile bool* pTerminate)
+{
+    std::priority_queue<RingGroupMergeHead, std::vector<RingGroupMergeHead>, RingGroupMergeHeadGreater> heap;
+
+    for (int i = 0; i < numGroups; i++)
+    {
+        BOARD_KEY key;
+        if (pReaders[i].Peek(&key))
+            heap.push({ key, &pReaders[i] });
+    }
+
+    BOARD_KEY lastKey = {};
+    bool      hasLast = false;
+    uint64_t  unique  = 0;
+
+    while (!heap.empty())
+    {
+        if (pTerminate && *pTerminate) break;
+
+        RingGroupMergeHead top = heap.top();
+        heap.pop();
+
+        if (pProgressBytes)
+            InterlockedAdd64((volatile LONG64*)pProgressBytes, (LONG64)sizeof(UINT64_PAIR));
+
+        bool isDup = hasLast && top.key.ullCellsInUse == lastKey.ullCellsInUse
+                             && top.key.ullCellColors == lastKey.ullCellColors;
+        if (!isDup)
+        {
+            pBuilder->Process(top.key);
+            lastKey = top.key;
+            hasLast = true;
+            unique++;
+        }
+
+        if (top.pReader->Advance())
+        {
+            BOARD_KEY nextKey;
+            top.pReader->Peek(&nextKey);
+            top.key = nextKey;
+            heap.push(top);
+        }
+        /* If Advance() returned false, top.pReader is either cleanly
+        ** exhausted or corrupted -- the caller checks IsCorrupted() on
+        ** every reader once this function returns, so no check is needed
+        ** per-pop here.
+        */
+    }
+
+    return unique;
+}
+
+/*
+** Function: ChooseNextCascadeGroup
+** @brief    Picks how many of the next files (inputPaths[0..windowSize)) form
+**           the next cascade group, and which temp drive will hold that
+**           group's merged output -- shared by CascadingMerge's flat and
+**           ring-format group-forming loops (see file Notes on the latter).
+** @details  For each candidate drive (fastest first, store drive last
+**           resort): counts how many consecutive files fit within the
+**           drive's available ledger space, using the first drive that can
+**           accept at least one file. Reserves that drive's ledger space
+**           for the chosen group's exact input bytes.
+** @param    inputPaths        - remaining files to group (only [0, windowSize) is examined)
+** @param    numRemaining      - how many files remain to be grouped in total
+** @param    tempDirs          - candidate directories, ordered fastest-first
+** @param    numTempDirs       - number of entries in tempDirs
+** @param    pSt               - solve state (driveLedger), or nullptr (recursive/no-pCtx call -- no drive accounting)
+** @param    player             - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE (logging only)
+** @param    groupNumber1Based - this group's 1-based index (logging only)
+** @param    fileSzCache       - scratch buffer, at least MAX_MERGE_FANIN entries
+** @param    pOutChosenDir     - out: the chosen directory
+** @param    pOutGroupSize     - out: how many files this group contains
+** @param    pOutGroupBytes    - out: total input bytes reserved for this group
+*/
+static void ChooseNextCascadeGroup(char** inputPaths, int numRemaining,
+                                    const char** tempDirs, int numTempDirs,
+                                    POthelloRingMasterState pSt, int player, int groupNumber1Based,
+                                    std::vector<int64_t>& fileSzCache,
+                                    const char** pOutChosenDir, int* pOutGroupSize, int64_t* pOutGroupBytes)
+{
+    int windowSize = (std::min)(MAX_MERGE_FANIN, numRemaining);
+
+    std::fill(fileSzCache.begin(), fileSzCache.begin() + windowSize, 0);
+    for (int k = 0; k < windowSize; k++)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (GetFileAttributesExA(inputPaths[k], GetFileExInfoStandard, &fad))
+            fileSzCache[k] = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+    }
+
+    const char* chosenDir  = (numTempDirs > 0) ? tempDirs[0] : nullptr;
+    int         groupSize  = windowSize;
+    int64_t     groupBytes = 0;
+    for (int k = 0; k < windowSize; k++) groupBytes += fileSzCache[k];
+
+    if (pSt && numTempDirs > 0)
+    {
+        chosenDir  = nullptr;
+        groupSize  = 0;
+        groupBytes = 0;
+        for (int d = 0; d < numTempDirs; d++)
+        {
+            int64_t avail = DriveAvailable(pSt, tempDirs[d][0]);
+            int64_t accum = 0;
+            int     count = 0;
+            for (int k = 0; k < windowSize; k++)
+            {
+                if (accum + fileSzCache[k] > avail) break;
+                accum += fileSzCache[k];
+                count++;
+            }
+            if (count == 0) continue;
+            if (DriveReserve(pSt, tempDirs[d][0], accum))
+            {
+                chosenDir  = tempDirs[d];
+                groupSize  = count;
+                groupBytes = accum;
+                break;
+            }
+            /* DriveReserve failed (concurrent allocation narrowed the window) -- try next. */
+        }
+        if (!chosenDir)
+            Fatal(FATAL_DRIVE_SPACE,
+                  "CascadingMerge: %s group %d -- no temp drive has room for even one file",
+                  RSFPlayerStr(player), groupNumber1Based);
+    }
+
+    *pOutChosenDir  = chosenDir;
+    *pOutGroupSize  = groupSize;
+    *pOutGroupBytes = groupBytes;
+}
+
+/*
+** Type:    RingCascadeGroupPaths
+** @brief   One ring-format cascade group's 4 file paths (Ring_1/Ring_2
+**          only meaningful when the board size uses them).
+*/
+struct RingCascadeGroupPaths
+{
+    char cellsInUse[MAX_FULL_PATH_NAME];
+    char ring1[MAX_FULL_PATH_NAME];
+    char ring2[MAX_FULL_PATH_NAME];
+    char ring34[MAX_FULL_PATH_NAME];
+};
+
+/*
+** Function: CascadeGroupsToRingIndex
+** @brief    Ring-format counterpart to CascadingMerge's grouped/cascading
+**           path, used when numInputs alone exceeds MAX_MERGE_FANIN and the
+**           final output is ring-format (CascadingMerge's pRingBuilder is
+**           set). Groups inputPaths exactly like CascadingMerge's own loop
+**           (via the same ChooseNextCascadeGroup helper), but each group's
+**           merged output becomes 4 ring files (via
+**           KWayMergeFilesToRingIndex) instead of 1 flat file -- to conserve
+**           space on these transient temp files too, the same reasoning as
+**           the level's own final store.
+** @details  Deliberately single-round: if the groups this round produces
+**           (at most MAX_MERGE_FANIN of them) still exceed MAX_MERGE_FANIN,
+**           Fatals rather than recursing into a second cascade round --
+**           that would need well over 12 million real input files for one
+**           level/color (the largest real run on record needed ~42,000),
+**           a scale never exercised or tested in this project. The
+**           realistic case (one round of ring-format groups, merged
+**           directly into pRingBuilder) is what this implements.
+** @param    inputPaths     - files to merge (caller already knows numInputs > MAX_MERGE_FANIN)
+** @param    numInputs      - number of files in inputPaths
+** @param    tempDirs       - candidate directories for group temp files, ordered fastest-first
+** @param    numTempDirs    - number of entries in tempDirs
+** @param    pTempCount     - running counter for cascade temp file indices
+** @param    level          - level being merged (for temp file naming)
+** @param    player         - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    pProgressBytes - out (optional): merge progress, see KWayMergeFiles
+** @param    pCtx           - solve context (always real here -- ring mode only ever starts from the outer call)
+** @param    pTerm          - out-of-band cancellation flag
+** @param    pRingBuilder   - the final, already-Init()'d builder to feed deduped records into
+** @return   Unique record count fed into pRingBuilder.
+*/
+static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
+                                          const char** tempDirs, int numTempDirs,
+                                          int* pTempCount, int level, int player,
+                                          volatile int64_t* pProgressBytes,
+                                          PSolveContext pCtx, const volatile bool* pTerm,
+                                          RingNestedIndexBuilder* pRingBuilder)
+{
+    if (!pCtx)
+        Fatal(FATAL_MERGE_LOGIC_ERROR, "CascadeGroupsToRingIndex: requires a real solve context (board size)");
+
+    POthelloRingMasterState pSt       = pCtx->pState;
+    int                     boardSize = (int)pCtx->pConfig->boardSize;
+    bool                    hasRing1  = RingNestedIndexHasRing1(boardSize);
+    bool                    hasRing2  = RingNestedIndexHasRing2(boardSize);
+
+    /* Upper bound on groups is numInputs (1 file per group in the extreme case). */
+    std::vector<RingCascadeGroupPaths> groupPaths(numInputs);
+    std::vector<int64_t>               groupActualBytes(numInputs, 0);
+    std::vector<char>                  groupDriveLetter(numInputs, 0);
+
+    if (pSt)
+    {
+        pSt->cascadeNumGroups[player]          = (numInputs + MAX_MERGE_FANIN - 1) / MAX_MERGE_FANIN;
+        pSt->cascadeGroupsDone[player]         = 0;
+        pSt->cascadeGroupProgressBytes[player] = 0;
+        pSt->cascadeStartTickMs[player]        = GetTickCount64();
+        pSt->cascadeActive[player]             = true;
+    }
+
+    int numGroups = 0;
+    int start     = 0;
+    std::vector<int64_t> fileSzCache(MAX_MERGE_FANIN, 0);
+    while (start < numInputs)
+    {
+        if (pTerm && *pTerm) break;
+
+        const char* chosenDir;
+        int         groupSize;
+        int64_t     groupBytes;
+        ChooseNextCascadeGroup(inputPaths + start, numInputs - start, tempDirs, numTempDirs,
+                                pSt, player, numGroups + 1, fileSzCache,
+                                &chosenDir, &groupSize, &groupBytes);
+
+        if (numGroups + 1 > MAX_MERGE_FANIN)
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "CascadeGroupsToRingIndex: %s needs a second cascade round (>%d ring-format groups) -- "
+                  "not supported (would need well over 12 million real input files for one level/color, "
+                  "never seen at this project's scale)",
+                  RSFPlayerStr(player), MAX_MERGE_FANIN);
+
+        if (pSt && numTempDirs > 0 && numGroups + 1 > pSt->cascadeNumGroups[player])
+            pSt->cascadeNumGroups[player] = numGroups + 1;
+
+        if (pSt) pSt->cascadeGroupProgressBytes[player] = 0;
+        if (pSt) pSt->cascadeGroupStartTickMs[player]  = GetTickCount64();
+
+        LoggerLog("CascadeGroupsToRingIndex: %s group %d -> %c: (%d files, %.2f GB input, ring format)\n",
+                  RSFPlayerStr(player), numGroups + 1, chosenDir[0],
+                  groupSize, groupBytes / (1024.0 * 1024.0 * 1024.0));
+
+        RingCascadeGroupPaths& gp = groupPaths[numGroups];
+        int groupIdx = (*pTempCount)++;
+        RSFNameCascadeRingCellsInUseFile(gp.cellsInUse, sizeof(gp.cellsInUse), chosenDir, level, player, groupIdx);
+        if (hasRing1) RSFNameCascadeRingRing1File(gp.ring1, sizeof(gp.ring1), chosenDir, level, player, groupIdx);
+        if (hasRing2) RSFNameCascadeRingRing2File(gp.ring2, sizeof(gp.ring2), chosenDir, level, player, groupIdx);
+        RSFNameCascadeRingRing34File(gp.ring34, sizeof(gp.ring34), chosenDir, level, player, groupIdx);
+
+        RSFWriter* pCellsInUseWriter = RSFWriterOpenZL(gp.cellsInUse);
+        RSFWriter* pRing1Writer      = hasRing1 ? RSFWriterOpenZLShaped(gp.ring1, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing2Writer      = hasRing2 ? RSFWriterOpenZLShaped(gp.ring2, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing34Writer     = RSFWriterOpenZLShaped(gp.ring34, RSF_SHAPE_LEAF16);
+
+        RingNestedIndexBuilder groupBuilder;
+        groupBuilder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
+
+        KWayMergeFilesToRingIndex(inputPaths + start, groupSize, &groupBuilder,
+                                   pSt ? &pSt->cascadeGroupProgressBytes[player] : nullptr, pTerm);
+        groupBuilder.Finish();
+
+        RSFWriterClose(pCellsInUseWriter);
+        if (pRing1Writer) RSFWriterClose(pRing1Writer);
+        if (pRing2Writer) RSFWriterClose(pRing2Writer);
+        RSFWriterClose(pRing34Writer);
+
+        int64_t groupActual = 0;
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad = {};
+            const char* parts[4] = { gp.cellsInUse, hasRing1 ? gp.ring1 : nullptr,
+                                      hasRing2 ? gp.ring2 : nullptr, gp.ring34 };
+            for (int i = 0; i < 4; i++)
+                if (parts[i] && GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
+                    groupActual += ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+        }
+        groupActualBytes[numGroups] = groupActual;
+        groupDriveLetter[numGroups] = chosenDir[0];
+        if (pSt) DriveReclaim(pSt, chosenDir[0], groupBytes - groupActual);
+
+        numGroups++;
+        if (pSt) pSt->cascadeGroupsDone[player]++;
+        start += groupSize;
+    }
+
+    if (pSt) pSt->cascadeActive[player] = false;
+
+    /* Single round only (see @details) -- merge the (at most MAX_MERGE_FANIN)
+    ** ring-format groups directly into the final builder.
+    */
+    std::vector<RingNestedIndexPullReader> readers(numGroups);
+    for (int i = 0; i < numGroups; i++)
+    {
+        const RingCascadeGroupPaths& gp = groupPaths[i];
+        if (!readers[i].Open(gp.cellsInUse, hasRing1 ? gp.ring1 : nullptr, hasRing2 ? gp.ring2 : nullptr, gp.ring34))
+            Fatal(FATAL_MERGE_LOGIC_ERROR, "CascadeGroupsToRingIndex: cannot reopen ring-format group %d for '%s'",
+                  i, gp.cellsInUse);
+    }
+
+    uint64_t unique = MergeRingGroupsIntoBuilder(readers.data(), numGroups, pRingBuilder, pProgressBytes, pTerm);
+
+    for (int i = 0; i < numGroups; i++)
+    {
+        if (readers[i].IsCorrupted())
+            Fatal(FATAL_MERGE_LOGIC_ERROR, "CascadeGroupsToRingIndex: ring-format group %d is truncated/corrupt", i);
+        readers[i].Close();
+    }
+
+    for (int i = 0; i < numGroups; i++)
+    {
+        const RingCascadeGroupPaths& gp = groupPaths[i];
+        if (pSt) DriveReclaim(pSt, groupDriveLetter[i], groupActualBytes[i]);
+        DeleteFileA(gp.cellsInUse);
+        if (hasRing1) DeleteFileA(gp.ring1);
+        if (hasRing2) DeleteFileA(gp.ring2);
+        DeleteFileA(gp.ring34);
+    }
+
+    return unique;
+}
+
+/*
 ** Function: CascadingMerge
 ** @brief    Merges numInputs files into finalOutPath, recursing through
 **           intermediate grouped passes when numInputs exceeds
@@ -324,7 +793,16 @@ static uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* out
 ** @param    compressIntermediate   - true to compress cascade temp files
 ** @param    pTerminate             - out-of-band cancellation flag (used when pCtx is null)
 ** @param    extraReaders           - leftover in-memory pool data to merge in
-** @return   Unique record count written to finalOutPath.
+** @param    pRingBuilder           - if non-null, feeds deduped records directly into this
+**                                    already-Init()'d builder instead of writing finalOutPath
+**                                    (finalOutPath/compressFinal are ignored in that case).
+**                                    numInputs <= MAX_MERGE_FANIN goes straight through
+**                                    KWayMergeFilesToRingIndex; numInputs > MAX_MERGE_FANIN
+**                                    dispatches to CascadeGroupsToRingIndex instead of this
+**                                    function's own flat grouped/recursive path below -- in ring
+**                                    mode, cascade's own intermediate group temp files become
+**                                    ring-format too (see that function's own comment).
+** @return   Unique record count written to finalOutPath (or fed into pRingBuilder).
 */
 static uint64_t CascadingMerge(char** inputPaths, int numInputs,
                                  const char** tempDirs, int numTempDirs,
@@ -334,13 +812,18 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
                                  PSolveContext pCtx, bool compressFinal = false,
                                  bool compressIntermediate = false,
                                  const volatile bool* pTerminate = nullptr,
-                                 const std::vector<RSFReader*>& extraReaders = {})
+                                 const std::vector<RSFReader*>& extraReaders = {},
+                                 RingNestedIndexBuilder* pRingBuilder = nullptr)
 {
     const volatile bool* pTerm = pCtx ? &pCtx->pState->terminateThreads : pTerminate;
 
     if (numInputs <= MAX_MERGE_FANIN)
+    {
+        if (pRingBuilder)
+            return KWayMergeFilesToRingIndex(inputPaths, numInputs, pRingBuilder, pProgressBytes, pTerm, extraReaders);
         return KWayMergeFiles(inputPaths, numInputs, finalOutPath, pProgressBytes,
                               compressFinal, pTerm, extraReaders);
+    }
 
     if (!extraReaders.empty())
         Fatal(FATAL_MERGE_LOGIC_ERROR,
@@ -348,6 +831,15 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
               "> MAX_MERGE_FANIN requires grouped mode, which only accepts files -- "
               "caller must flush the pool to disk first",
               RSFPlayerStr(player), extraReaders.size(), numInputs);
+
+    /* Ring mode's grouped path is a separate, single-round implementation
+    ** (see CascadeGroupsToRingIndex's own comment) -- never recurses back
+    ** into CascadingMerge itself.
+    */
+    if (pRingBuilder)
+        return CascadeGroupsToRingIndex(inputPaths, numInputs, tempDirs, numTempDirs,
+                                         pTempCount, level, player, pProgressBytes,
+                                         pCtx, pTerm, pRingBuilder);
 
     POthelloRingMasterState pSt = pCtx ? pCtx->pState : nullptr;
 
@@ -380,66 +872,16 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     {
         if (pTerm && *pTerm) break;
 
-        int windowSize = (std::min)(MAX_MERGE_FANIN, numInputs - start);
+        const char* chosenDir;
+        int         groupSize;
+        int64_t     groupBytes;
+        ChooseNextCascadeGroup(inputPaths + start, numInputs - start, tempDirs, numTempDirs,
+                                pSt, player, numTemps + 1, fileSzCache,
+                                &chosenDir, &groupSize, &groupBytes);
 
-        /* Precompute file sizes for the next window of up to MAX_MERGE_FANIN
-        ** files. Used by each drive check so GetFileAttributesExA is called
-        ** once per file.
-        */
-        std::fill(fileSzCache.begin(), fileSzCache.begin() + windowSize, 0);
-        for (int k = 0; k < windowSize; k++)
-        {
-            WIN32_FILE_ATTRIBUTE_DATA fad = {};
-            if (GetFileAttributesExA(inputPaths[start + k], GetFileExInfoStandard, &fad))
-                fileSzCache[k] = ((int64_t)fad.nFileSizeHigh << 32)
-                               | (int64_t)fad.nFileSizeLow;
-        }
-
-        /* For each candidate drive (fastest first, store drive last resort):
-        ** count how many consecutive files from 'start' fit within the
-        ** drive's available ledger space. Use the first drive that can
-        ** accept at least one file.
-        */
-        const char* chosenDir  = (numTempDirs > 0) ? tempDirs[0] : nullptr;
-        int         groupSize  = windowSize;
-        int64_t     groupBytes = 0;
-        for (int k = 0; k < windowSize; k++) groupBytes += fileSzCache[k];
-
-        if (pSt && numTempDirs > 0)
-        {
-            chosenDir  = nullptr;
-            groupSize  = 0;
-            groupBytes = 0;
-            for (int d = 0; d < numTempDirs; d++)
-            {
-                int64_t avail = DriveAvailable(pSt, tempDirs[d][0]);
-                int64_t accum = 0;
-                int     count = 0;
-                for (int k = 0; k < windowSize; k++)
-                {
-                    if (accum + fileSzCache[k] > avail) break;
-                    accum += fileSzCache[k];
-                    count++;
-                }
-                if (count == 0) continue;
-                if (DriveReserve(pSt, tempDirs[d][0], accum))
-                {
-                    chosenDir  = tempDirs[d];
-                    groupSize  = count;
-                    groupBytes = accum;
-                    break;
-                }
-                /* DriveReserve failed (concurrent allocation narrowed the window) -- try next. */
-            }
-            if (!chosenDir)
-                Fatal(FATAL_DRIVE_SPACE,
-                      "CascadingMerge: %s group %d -- no temp drive has room for even one file",
-                      RSFPlayerStr(player), numTemps + 1);
-
-            /* Keep the status group-count estimate current if we're creating more groups. */
-            if (numTemps + 1 > pSt->cascadeNumGroups[player])
-                pSt->cascadeNumGroups[player] = numTemps + 1;
-        }
+        /* Keep the status group-count estimate current if we're creating more groups. */
+        if (pSt && numTempDirs > 0 && numTemps + 1 > pSt->cascadeNumGroups[player])
+            pSt->cascadeNumGroups[player] = numTemps + 1;
 
         if (pSt) pSt->cascadeGroupProgressBytes[player] = 0;
         if (pSt) pSt->cascadeGroupStartTickMs[player]  = GetTickCount64();
@@ -501,7 +943,7 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     uint64_t unique = CascadingMerge(tempPaths, numTemps, tempDirs, numTempDirs,
                                       finalOutPath, pTempCount, level, player,
                                       pProgressBytes, nullptr, compressFinal,
-                                      compressIntermediate, pTerm);
+                                      compressIntermediate, pTerm, {}, pRingBuilder);
 
     for (int i = 0; i < numTemps; i++)
     {
@@ -1313,113 +1755,6 @@ static void CollectPoolReadersForPlayer(POthelloRingMasterState pSt, int player,
 }
 
 /*
-** Function: ConvertLevelOutputToNestedIndex
-** @brief    Converts one player's flat, sorted+deduped RSF store output into
-**           the ring nested-index format (CellsInUse/Ring_1/Ring_2/
-**           Ring_3_4 -- see OthelloBasics/RingNestedIndex.h; Ring_1/Ring_2
-**           only exist for board sizes that use them), deleting the flat
-**           intermediate once the nested files are fully written.
-** @details  This is the actual point of the ring-ordered storage scheme --
-**           the flat RSF file alone only carries the same delta+varint+LZ4
-**           compression an earlier implementation already had; the nested
-**           index is what realizes the additional validated savings (see
-**           project_ring_split_validated_findings memory). Streams directly
-**           from the flat reader into the nested-index writers (CellsInUse
-**           via RSFWriterOpenZL, Ring_1/Ring_2/Ring_3_4 via
-**           Lz4StreamWriterOpen) -- no raw intermediate ever touches disk,
-**           and nothing beyond one flat-store-sized read pass is ever held
-**           at once, matching the flat store's own streaming discipline
-**           rather than requiring a whole level to fit in memory. If
-**           interrupted before the flat file is deleted (the last step),
-**           the flat file is still intact and the existing resume-scan
-**           recovery (re-solve the level from scratch) covers it exactly
-**           like any other interrupted merge -- no new failure mode.
-** @param    pCtx            - solve context
-** @param    level           - the level this output belongs to (the level being produced)
-** @param    player          - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    flatPath        - path to the flat merged output to convert
-** @param    flatActualBytes - bytes on disk for flatPath (already known by the caller)
-** @return   Total bytes on disk across the 4 new nested-index files, or 0 if flatPath didn't exist.
-*/
-static int64_t ConvertLevelOutputToNestedIndex(PSolveContext pCtx, int level, int player,
-                                                const char* flatPath, int64_t flatActualBytes)
-{
-    RSFReader* flatReader = RSFOpen(flatPath);
-    if (!flatReader) return 0;
-
-    POthelloRingMasterState  pSt       = pCtx->pState;
-    POthelloRingMasterConfig pCfg      = pCtx->pConfig;
-    int                      boardSize = (int)pCfg->boardSize;
-    bool                     hasRing1  = RingNestedIndexHasRing1(boardSize);
-    bool                     hasRing2  = RingNestedIndexHasRing2(boardSize);
-
-    char cellsInUsePath[MAX_FULL_PATH_NAME];
-    char ring1PathBuf[MAX_FULL_PATH_NAME];
-    char ring2PathBuf[MAX_FULL_PATH_NAME];
-    char ring34Path[MAX_FULL_PATH_NAME];
-    RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level, player, 0);
-    if (hasRing1)
-        RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
-    if (hasRing2)
-        RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pSt->storeDirectory, boardSize, level, player, 0);
-    RSFNameRing34File(ring34Path, sizeof(ring34Path), pSt->storeDirectory, boardSize, level, player, 0);
-
-    const char* ring1Path = hasRing1 ? ring1PathBuf : nullptr;
-    const char* ring2Path = hasRing2 ? ring2PathBuf : nullptr;
-
-    RSFWriter*       pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
-    Lz4StreamWriter* pRing1Writer      = hasRing1 ? Lz4StreamWriterOpen(ring1Path) : nullptr;
-    Lz4StreamWriter* pRing2Writer      = hasRing2 ? Lz4StreamWriterOpen(ring2Path) : nullptr;
-    Lz4StreamWriter* pRing34Writer     = Lz4StreamWriterOpen(ring34Path);
-
-    RingNestedIndexBuilder builder;
-    builder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
-
-    UINT64_PAIR rec;
-    while (RSFRead(flatReader, &rec, 1) == 1)
-    {
-        BOARD_KEY key;
-        key.ullCellsInUse = rec.hi;
-        key.ullCellColors = rec.lo;
-        builder.Process(key);
-    }
-    builder.Finish();
-    RSFClose(&flatReader);
-
-    RSFWriterClose(pCellsInUseWriter);
-    if (pRing1Writer) Lz4StreamWriterClose(pRing1Writer);
-    if (pRing2Writer) Lz4StreamWriterClose(pRing2Writer);
-    Lz4StreamWriterClose(pRing34Writer);
-
-    int64_t nestedBytes = 0;
-    {
-        WIN32_FILE_ATTRIBUTE_DATA fad = {};
-        const char* parts[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
-        for (int i = 0; i < 4; i++)
-            if (parts[i] && GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
-                nestedBytes += ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
-    }
-
-    /* Only delete the flat intermediate once every nested-index file is
-    ** fully written and closed -- see @details above for why this ordering matters.
-    */
-    DeleteFileA(flatPath);
-
-    /* flatActualBytes were already charged against the store-drive
-    ** reservation by the caller; give those back (the flat file is gone)
-    ** and charge for the nested files that replaced it.
-    */
-    DriveReclaim(pSt, pCfg->storeDrive, flatActualBytes - nestedBytes);
-
-    LoggerLog("ConvertLevelOutputToNestedIndex: level %d %s -> nested index (%.2f GB, was %.2f GB flat)\n",
-              level, RSFPlayerStr(player),
-              nestedBytes     / (1024.0 * 1024.0 * 1024.0),
-              flatActualBytes / (1024.0 * 1024.0 * 1024.0));
-
-    return nestedBytes;
-}
-
-/*
 ** ============================================================
 ** DoEndOfLevelMerge
 **
@@ -1878,90 +2213,90 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
             return;
         }
 
-        char outPath[MAX_FULL_PATH_NAME];
-        {
-            bool storeLZ4 = compressOutput && pCfg->lz4Drives[0]
-                         && (strchr(pCfg->lz4Drives, pCfg->storeDrive) != nullptr);
-            if (storeLZ4)
-                RSFZLNameStoreFile(outPath, sizeof(outPath), pSt->storeDirectory,
-                                   boardSize, level + 1, player, 0);
-            else if (compressOutput)
-                RSFZNameStoreFile(outPath, sizeof(outPath), pSt->storeDirectory,
-                                  boardSize, level + 1, player, 0);
-            else
-                RSFNameStoreFile(outPath, sizeof(outPath), pSt->storeDirectory,
-                                 boardSize, level + 1, player, 0);
-        }
+        /* Merge directly into the level's ring nested-index files -- no flat
+        ** intermediate file is ever written for the store output (see
+        ** CascadingMerge/KWayMergeFilesToRingIndex's pRingBuilder path).
+        ** Ring_1/Ring_2 paths are only built (and opened) when this board
+        ** size actually uses that level -- see RingNestedIndexHasRing1/HasRing2.
+        */
+        bool hasRing1 = RingNestedIndexHasRing1(boardSize);
+        bool hasRing2 = RingNestedIndexHasRing2(boardSize);
 
-        if (pd.numFiles == 1 && pd.poolReaders.empty() && !compressOutput)
-        {
-            RSFReader* r = RSFOpen(pd.inputPaths[0]);
-            if (r) { pd.unique = RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
-            if (!MoveFileExA(pd.inputPaths[0], outPath, MOVEFILE_COPY_ALLOWED))
-                Fatal(FATAL_FILE_OPEN,
-                      "EndOfLevelMerge: cannot move '%s' -> '%s' (err %lu)",
-                      pd.inputPaths[0], outPath, GetLastError());
-            if (!pd.yInputsPreReclaimed)
-                DriveReclaim(pSt, pd.inputPaths[0][0], (int64_t)pd.inputSizes[0]);
-            int64_t actual = (int64_t)(pd.unique * sizeof(UINT64_PAIR)
-                             + sizeof(RSFTrailer));
-            DriveReclaim(pSt, pCfg->storeDrive, pd.storeReservation - actual);
-            InterlockedAdd64((volatile LONG64*)pProg, (LONG64)(pd.unique * sizeof(UINT64_PAIR)));
-        }
-        else
-        {
-            /* Unified merge: on-disk files (0, 1, or many) plus any leftover
-            ** in-memory pool data, all merged in a single pass -- see
-            ** CascadingMerge/KWayMergeFiles. Cascade temps (grouped mode,
-            ** only when pd.numFiles alone exceeds MAX_MERGE_FANIN) are
-            ** placed greedily per-group (fastest drive first, store drive
-            ** if needed). When compressOutput is on, also compress
-            ** intermediate cascade temps.
-            */
-            int tempCount = 0;
-            pd.unique = CascadingMerge(pd.inputPaths, pd.numFiles, tempDirs, numTempDirs,
-                                        outPath, &tempCount, level, player, pProg, pCtx,
-                                        compressOutput, compressOutput, nullptr, pd.poolReaders);
-            for (uint8_t* buf : pd.poolTempBufs) MemFree(buf);
-            pd.poolTempBufs.clear();
+        char cellsInUsePath[MAX_FULL_PATH_NAME];
+        char ring1PathBuf[MAX_FULL_PATH_NAME];
+        char ring2PathBuf[MAX_FULL_PATH_NAME];
+        char ring34Path[MAX_FULL_PATH_NAME];
+        RSFNameCellsInUseFile(cellsInUsePath, sizeof(cellsInUsePath), pSt->storeDirectory, boardSize, level + 1, player, 0);
+        if (hasRing1)
+            RSFNameRing1File(ring1PathBuf, sizeof(ring1PathBuf), pSt->storeDirectory, boardSize, level + 1, player, 0);
+        if (hasRing2)
+            RSFNameRing2File(ring2PathBuf, sizeof(ring2PathBuf), pSt->storeDirectory, boardSize, level + 1, player, 0);
+        RSFNameRing34File(ring34Path, sizeof(ring34Path), pSt->storeDirectory, boardSize, level + 1, player, 0);
 
-            /* Return store-drive overestimate; use actual file size for compressed output. */
-            int64_t actual;
-            if (compressOutput)
-            {
-                WIN32_FILE_ATTRIBUTE_DATA fad = {};
-                actual = 0;
-                if (GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad))
-                    actual = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
-            }
-            else
-            {
-                actual = (int64_t)(pd.unique * sizeof(UINT64_PAIR)
-                         + (pd.unique > 0 ? sizeof(RSFTrailer) : 0));
-            }
-            DriveReclaim(pSt, pCfg->storeDrive, pd.storeReservation - actual);
+        const char* ring1Path = hasRing1 ? ring1PathBuf : nullptr;
+        const char* ring2Path = hasRing2 ? ring2PathBuf : nullptr;
 
-            /* Reclaim source-file drive space as each input is deleted.
-            ** Skip store-drive inputs that were pre-reclaimed in Phase 1b.
-            */
-            for (int i = 0; i < pd.numFiles; i++)
-            {
-                if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
-                    DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
-                DeleteFileA(pd.inputPaths[i]);
-            }
-        }
+        RSFWriter* pCellsInUseWriter = RSFWriterOpenZL(cellsInUsePath);
+        RSFWriter* pRing1Writer      = hasRing1 ? RSFWriterOpenZLShaped(ring1Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing2Writer      = hasRing2 ? RSFWriterOpenZLShaped(ring2Path, RSF_SHAPE_RING_LEVEL) : nullptr;
+        RSFWriter* pRing34Writer     = RSFWriterOpenZLShaped(ring34Path, RSF_SHAPE_LEAF16);
 
+        RingNestedIndexBuilder builder;
+        builder.Init(pCellsInUseWriter, pRing1Writer, pRing2Writer, pRing34Writer);
+
+        /* Unified merge: on-disk files (0, 1, or many) plus any leftover
+        ** in-memory pool data, all merged in a single pass -- see
+        ** CascadingMerge/KWayMergeFilesToRingIndex. Cascade temps (grouped
+        ** mode, only when pd.numFiles alone exceeds MAX_MERGE_FANIN) are
+        ** still flat, placed greedily per-group (fastest drive first, store
+        ** drive if needed); compressed when compressOutput is on.
+        ** compressFinal is passed false -- irrelevant here, since the ring
+        ** builder's own shaped writers are always compressed regardless.
+        */
+        int tempCount = 0;
+        pd.unique = CascadingMerge(pd.inputPaths, pd.numFiles, tempDirs, numTempDirs,
+                                    nullptr, &tempCount, level, player, pProg, pCtx,
+                                    /*compressFinal=*/false, compressOutput, nullptr,
+                                    pd.poolReaders, &builder);
+        builder.Finish();
+
+        RSFWriterClose(pCellsInUseWriter);
+        if (pRing1Writer) RSFWriterClose(pRing1Writer);
+        if (pRing2Writer) RSFWriterClose(pRing2Writer);
+        RSFWriterClose(pRing34Writer);
+
+        for (uint8_t* buf : pd.poolTempBufs) MemFree(buf);
+        pd.poolTempBufs.clear();
+
+        /* Total on-disk bytes across the (up to) 4 ring files just written. */
+        int64_t actual = 0;
         {
             WIN32_FILE_ATTRIBUTE_DATA fad = {};
-            if (GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad))
-                pd.actualBytes = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+            const char* parts[4] = { cellsInUsePath, ring1Path, ring2Path, ring34Path };
+            for (int i = 0; i < 4; i++)
+                if (parts[i] && GetFileAttributesExA(parts[i], GetFileExInfoStandard, &fad))
+                    actual += ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
         }
+        DriveReclaim(pSt, pCfg->storeDrive, pd.storeReservation - actual);
+
+        /* Reclaim source-file drive space as each input is deleted.
+        ** Skip store-drive inputs that were pre-reclaimed in Phase 1b.
+        */
+        for (int i = 0; i < pd.numFiles; i++)
+        {
+            if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
+                DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
+            DeleteFileA(pd.inputPaths[i]);
+        }
+
+        pd.actualBytes = actual;
+
         if (pd.unique > 0)
             InterlockedIncrement((volatile LONG*)&pSt->levelStats[level].mergeFilesWritten);
 
-        LoggerLog("EndOfLevelMerge: level %d %s -> '%s'  (%llu unique boards)\n",
-                  level, RSFPlayerStr(player), outPath, pd.unique);
+        LoggerLog("EndOfLevelMerge: level %d %s -> nested index under '%s'  (%llu unique boards, %.2f GB)\n",
+                  level, RSFPlayerStr(player), pSt->storeDirectory, pd.unique,
+                  actual / (1024.0 * 1024.0 * 1024.0));
 
         for (int i = 0; i < pd.numFiles; i++)
             MemFree(pd.inputPaths[i]);
@@ -1972,8 +2307,7 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         ** do now -- the merge above (and any RSFReaderOpenZMem segments it
         ** read from pMWBuffer) has already fully consumed and closed
         ** everything. No-op when this color's pool was already empty (e.g.
-        ** it took the raw-move shortcut, or was pre-flushed to NVMe by the
-        ** fan-in guard).
+        ** it was pre-flushed to NVMe by the fan-in guard).
         */
         for (int i = 0; i < pSt->numMergeWriters; i++)
         {
@@ -2009,30 +2343,6 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     std::thread whiteThread([&] { mergePlayer(RSF_PLAYER_WHITE); pSt->mergeEndTickMs[RSF_PLAYER_WHITE] = GetTickCount64(); });
     blackThread.join();
     whiteThread.join();
-
-    /* Convert each player's flat merged output into the ring nested-index
-    ** format -- see ConvertLevelOutputToNestedIndex's own comment for why
-    ** this is a separate pass rather than fused into the merge itself.
-    */
-    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
-    {
-        PlayerData& pd = data[player];
-        if (pd.actualBytes <= 0) continue;   /* nothing was written for this player */
-
-        char flatPath[MAX_FULL_PATH_NAME];
-        bool storeLZ4 = compressOutput && pCfg->lz4Drives[0]
-                     && (strchr(pCfg->lz4Drives, pCfg->storeDrive) != nullptr);
-        if (storeLZ4)
-            RSFZLNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
-        else if (compressOutput)
-            RSFZNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
-        else
-            RSFNameStoreFile(flatPath, sizeof(flatPath), pSt->storeDirectory, boardSize, level + 1, player, 0);
-
-        int64_t nestedBytes = ConvertLevelOutputToNestedIndex(pCtx, level + 1, player, flatPath, pd.actualBytes);
-        if (nestedBytes > 0)
-            pd.actualBytes = nestedBytes;
-    }
 
     /* Delete "merging" sentinel on clean finish. The "complete" sentinel
     ** (with full LevelStats payload) is written by the main loop after all

@@ -22,8 +22,8 @@
 **   FeedNestedIndexLevel/FeedBoardIntoBatch are new, replacing the old
 **   EnumerateStoreFilesForLevel + RSFOpen/RSFRead loop with
 **   RingNestedIndexStreamAll, since the store format is now the ring
-**   nested index (see MergeFiles.cpp's ConvertLevelOutputToNestedIndex,
-**   which is what produces it). StreamAll -- not RingNestedIndexReader::
+**   nested index (see MergeFiles.cpp's DoEndOfLevelMerge, which merges
+**   directly into it). StreamAll -- not RingNestedIndexReader::
 **   Load()/ExpandAll() -- is deliberate: it never holds a whole level's
 **   board-key data resident, regardless of board count (see
 **   RingNestedIndex.h's own Notes).
