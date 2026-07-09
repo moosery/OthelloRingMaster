@@ -13,6 +13,15 @@
 **   it. This calculator only ever reads storeDir, never writes to it, so
 **   there is nothing to repair here: a missing sentinel just means "stop
 **   scanning," full stop.
+**
+**   The deepest sentinel found is NOT always a level with real board
+**   data: RingMaster (OthelloRingMaster.cpp) writes a level+1 _complete
+**   sentinel the moment its own solve loop confirms level produced zero
+**   new boards -- a "nothing past here" marker, not a claim that level+1
+**   itself has data. FindDeepestCompleteLevel steps back past any such
+**   empty level(s) to the deepest one that actually has ring-index
+**   files, since that's the real terminal level for the calculator to
+**   process.
 */
 
 #pragma once

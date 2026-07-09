@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.25.1"
+#define VERSION "0.25.2"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */

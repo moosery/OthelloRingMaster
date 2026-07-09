@@ -45,7 +45,9 @@ static void PrintUsage(const char* prog)
     printf("Usage: %s [options]\n\n", prog);
     printf("  --board-size N    Board size: 4, 6, or 8                     [default: 6]\n");
     printf("  --store-drive L   Drive letter holding RingMaster's finished store [default: Y]\n");
-    printf("  --store-dir PATH  Sub-path on store drive (no drive letter)  [default: \\OthelloRingMaster\\Store]\n");
+    printf("  --store-dir PATH  Sub-path on store drive (no drive letter) -- same value given to\n");
+    printf("                    RingMaster's own --store-dir; \\storeDir is appended automatically,\n");
+    printf("                    same as RingMaster does internally      [default: \\OthelloRingMaster\\Store]\n");
     printf("  --counts-drive L  Drive letter this calculator writes its own counts files to [default: Y]\n");
     printf("  --counts-dir PATH Sub-path on counts drive (no drive letter) [default: \\OthelloRingMasterCalculator\\Counts]\n");
     printf("  --cache-dir PATH  Full path for logs and the width-config file [default: C:\\OthelloRingMasterCalculator\\Cache]\n");
@@ -124,7 +126,13 @@ int main(int argc, char* argv[])
 {
     ParseArgs(argc, argv);
 
-    snprintf(g_state.storeDirectory, sizeof(g_state.storeDirectory), "%c:%s",
+    /* Matches RingMaster's own InitSolver.cpp convention exactly: --store-dir
+    ** is the same sub-path RingMaster was given via ITS --store-dir, and
+    ** RingMaster's actual read/write directory is that path plus \storeDir --
+    ** appending it here too means the user can point this calculator at the
+    ** same --store-dir value they gave RingMaster, with no extra suffix to remember.
+    */
+    snprintf(g_state.storeDirectory, sizeof(g_state.storeDirectory), "%c:%s\\storeDir",
              g_config.storeDrive, g_config.storeDirNameNoDrive);
     snprintf(g_state.countsDirectory, sizeof(g_state.countsDirectory), "%c:%s",
              g_config.countsDrive, g_config.countsDirNameNoDrive);

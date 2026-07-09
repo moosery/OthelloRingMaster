@@ -4,6 +4,17 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.2] - 2026-07-09
+
+### First real 4x4 run: fixed a drive-ledger exhaustion crash, a level-scan bug, a misleading log message, and a CLI ergonomics gap
+
+- **Drive-ledger exhaustion crash (the real bug)**: `SegmentedStoreWriter: every available scratch drive is full` -- `ReserveNextScratchDrive` grabs a whole drive's entire remaining ledger per segment, and that reservation previously wasn't given back until the segment file was later deleted via `DeleteSegments` (for the lookup-source's board-key/counts writers, that's not until `ReleaseLookupSource`, at the very end of a level's entire processing). A single level needs up to 6 of these datasets alive at once (4 for the lookup source across both colors, 2 for the level's own output), but with only a few usable scratch drives, the ledger ran dry even though every dataset involved was only a few KB. Fixed in `SegmentedStore.cpp`'s `CloseCurrentSegment`: reclaim a segment's unused reservation the moment it closes (once its real size is known), correcting the writer's own `plan` entry to match so a later `DeleteSegments` reclaims only what's actually still spent.
+- **Calculator picked the wrong deepest level**: `StoreLevelScan.cpp`'s `FindDeepestCompleteLevel` trusted the deepest `_complete` sentinel it found, but RingMaster (`OthelloRingMaster.cpp`) writes a level+1 sentinel purely to record "confirmed nothing past here" the moment its own solve loop produces zero boards for a level -- not a claim that level+1 has real data. New `LevelHasBoardData` helper steps back past any such empty level(s) to the deepest one with actual ring-index files.
+- **Misleading "overflowed" log message**: `CounterWidthConfigBumpLevel` unconditionally logged "level N overflowed at X, widening to Y" even when called just to propagate an already-confirmed width to shallower levels (no real overflow) -- now only logs/writes when `newByteWidth` is actually wider than what's already set. Also fixed a missing trailing `\n` that ran this message together with the next log line.
+- **CLI ergonomics**: `OthelloRingMasterCalculator`'s `--store-dir` now appends `\storeDir` itself, matching `InitSolver.cpp`'s own convention for RingMaster's `--store-dir` -- the same value can now be passed to both executables instead of needing the extra `\storeDir` suffix only on the calculator's command line.
+- Removed a debug `printf` the user had temporarily added to `RSFFileName.h`'s `SentinelNameComplete` while diagnosing the level-scan issue.
+
+
 ## [0.25.1] - 2026-07-08
 
 ### Buffered scratch writes -- larger sequential fwrites instead of one per record

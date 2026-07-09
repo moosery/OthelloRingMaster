@@ -96,7 +96,13 @@ typedef std::vector<std::pair<char, int64_t>> ScratchPlan;
 **           Reserving a whole drive's remaining budget per segment (not
 **           just "enough for this one record") is deliberate -- a
 **           segment simply rolls to the next drive once this one fills,
-**           so there's no reason to under-reserve.
+**           so there's no reason to under-reserve. The over-reservation
+**           is temporary: once a segment closes and its real size is
+**           known, SegmentedStoreWriter immediately gives back whatever
+**           it didn't use (see CloseCurrentSegment in SegmentedStore.cpp),
+**           so this doesn't monopolize a drive for a tiny dataset's whole
+**           lifetime -- only for as long as one segment is actively
+**           being written.
 ** @param    pState        - calculator state (driveInfo, driveLedger)
 ** @param    excludeDrive1 - a drive letter to never use as scratch (e.g. RingMaster's store drive), or 0 for none
 ** @param    excludeDrive2 - a second drive letter to exclude (e.g. the counts drive), or 0 for none

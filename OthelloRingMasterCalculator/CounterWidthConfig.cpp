@@ -216,12 +216,20 @@ void CounterWidthConfigBumpLevel(CounterWidthConfig* pConfig, int level, int new
     if (level < 0 || level >= CALC_MAX_LEVELS)
         Fatal(FATAL_MERGE_LOGIC_ERROR, "CounterWidthConfigBumpLevel: level %d out of range (0..%d)", level, CALC_MAX_LEVELS - 1);
 
-    char oldLabel[16], newLabel[16];
-    WidthLabel(pConfig->byteWidth[level], oldLabel, sizeof(oldLabel));
-    WidthLabel(newByteWidth, newLabel, sizeof(newLabel));
-    LoggerLog("CounterWidthConfig: level %d overflowed at %s, widening to %s", level, oldLabel, newLabel);
+    /* Callers also invoke this to re-confirm a level's already-correct
+    ** width (propagating a floor to shallower levels after the fact) --
+    ** that is NOT an overflow, so only log/write when newByteWidth is
+    ** actually wider than what's already set.
+    */
+    if (newByteWidth != pConfig->byteWidth[level])
+    {
+        char oldLabel[16], newLabel[16];
+        WidthLabel(pConfig->byteWidth[level], oldLabel, sizeof(oldLabel));
+        WidthLabel(newByteWidth, newLabel, sizeof(newLabel));
+        LoggerLog("CounterWidthConfig: level %d overflowed at %s, widening to %s\n", level, oldLabel, newLabel);
 
-    pConfig->byteWidth[level] = (uint8_t)newByteWidth;
+        pConfig->byteWidth[level] = (uint8_t)newByteWidth;
+    }
 
     for (int shallower = 0; shallower < level; shallower++)
     {

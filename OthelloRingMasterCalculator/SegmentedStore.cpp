@@ -86,6 +86,23 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
     fclose(pWriter->pCurrentFile);
     pWriter->pCurrentFile = nullptr;
 
+    /* ReserveNextScratchDrive deliberately over-reserves (a whole drive's
+    ** remaining budget) since a segment's real size isn't known in
+    ** advance. Now that it is, give back everything this segment didn't
+    ** actually use immediately -- otherwise a tiny writer would monopolize
+    ** an entire drive's ledger for as long as its segment file exists
+    ** (for lookup-source writers, that's the WHOLE level's processing,
+    ** not just the moment of writing), starving other concurrent
+    ** datasets that need a drive of their own. plan's entry is corrected
+    ** to match, so a later DeleteSegments/ReleaseScratchPlan reclaims
+    ** only the (now much smaller) amount actually left reserved.
+    */
+    int64_t unused = pWriter->currentBudgetBytes - pWriter->currentBytesUsed;
+    if (unused > 0)
+        CalcDriveReclaim(pWriter->pState, pWriter->currentDriveLetter, unused);
+    if (!pWriter->plan.empty())
+        pWriter->plan.back().second = pWriter->currentBytesUsed;
+
     if (pWriter->currentRecordCount == 0)
     {
         /* Nothing was ever written (Finish() called with no Write() at
