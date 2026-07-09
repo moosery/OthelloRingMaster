@@ -48,6 +48,16 @@ static const int kNumColumns = sizeof(kColumns) / sizeof(kColumns[0]);
 /* Functions */
 
 /*
+** Function: CalcFormatDurationHMS
+** @brief    See CalculatorLevelTable.h.
+*/
+void CalcFormatDurationHMS(int64_t nanos, char* out, size_t outSz)
+{
+    int64_t s = nanos / 1000000000LL;
+    snprintf(out, outSz, "%lld:%02lld:%02lld", s / 3600, (s % 3600) / 60, s % 60);
+}
+
+/*
 ** Function: CalcWidthShortLabel
 ** @brief    See CalculatorLevelTable.h.
 */

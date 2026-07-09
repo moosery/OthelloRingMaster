@@ -92,17 +92,18 @@ static void LogLevelTableRow(POthelloRingMasterCalculatorState pState, int level
 /*
 ** Function: PrintFinalResultBox
 ** @brief    Prints level 0's fully validated final answer as a small
-**           ASCII box, black/white/tie plus the total, for a clean,
-**           unambiguous end-of-run summary distinct from the scrolling
-**           per-level table above it.
-** @param    boardSize - board size, shown in the box title
-** @param    t         - level 0's combinedTotals (the real final answer)
+**           ASCII box, black/white/tie/total plus the whole walk's wall-
+**           clock duration, for a clean, unambiguous end-of-run summary
+**           distinct from the scrolling per-level table above it.
+** @param    boardSize    - board size, shown in the box title
+** @param    t            - level 0's combinedTotals (the real final answer)
+** @param    totalNanos   - wall-clock duration of the whole backward walk
 */
-static void PrintFinalResultBox(int boardSize, const WinTieLossTriple& t)
+static void PrintFinalResultBox(int boardSize, const WinTieLossTriple& t, int64_t totalNanos)
 {
-    const int labelW = 14;
-    const int valueW = 20;
-    const int innerW = 1 + labelW + 1 + valueW + 1;   /* " label " + " value " widths incl. spaces either side */
+    const int labelW  = 14;
+    const int valueW  = 20;
+    const int innerW  = (labelW + 2) + 1 + (valueW + 2);   /* the two body-row segments plus their shared middle divider */
 
     char fullBorder[64];
     int  n = 0;
@@ -130,6 +131,9 @@ static void PrintFinalResultBox(int boardSize, const WinTieLossTriple& t)
 
     uint64_t total = t.blackWins + t.whiteWins + t.ties;
 
+    char durStr[24];
+    CalcFormatDurationHMS(totalNanos, durStr, sizeof(durStr));
+
     LoggerLog("%s\n", fullBorder);
     LoggerLog("|%*s%s%*s|\n", leftPad, "", title, rightPad, "");
     LoggerLog("%s\n", midBorder);
@@ -138,6 +142,7 @@ static void PrintFinalResultBox(int boardSize, const WinTieLossTriple& t)
     LoggerLog("| %-*s | %*llu |\n", labelW, "Ties",       valueW, (unsigned long long)t.ties);
     LoggerLog("%s\n", midBorder);
     LoggerLog("| %-*s | %*llu |\n", labelW, "Total Games", valueW, (unsigned long long)total);
+    LoggerLog("| %-*s | %*s |\n",   labelW, "Duration",    valueW, durStr);
     LoggerLog("%s\n", midBorder);
 }
 
@@ -152,6 +157,14 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
 {
     int boardSize = (int)pConfig->boardSize;
     pState->deepestLevel = (uint8_t)deepestLevel;
+
+    /* Wall-clock duration of the whole walk (level deepestLevel down to
+    ** 0), reported in the FINAL RESULT box -- distinct from any single
+    ** level's own totalNanos, and distinct from a resumed run's SKIPPED
+    ** levels, which contribute nothing here since they aren't reprocessed.
+    */
+    ClockTick wholeRunStart;
+    ClockStart(&wholeRunStart);
 
     char header[256], separator[256];
     CalcLevelTableHeaderLines(header, sizeof(header), separator, sizeof(separator));
@@ -226,7 +239,7 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
     ** missing one.
     */
     if (level0StatsValid)
-        PrintFinalResultBox(boardSize, pState->levelStats[0].combinedTotals);
+        PrintFinalResultBox(boardSize, pState->levelStats[0].combinedTotals, ClockNanosSinceStart(&wholeRunStart));
     else if (!pState->terminateThreads)
     {
         LoggerLog("RunBackwardWalk: level 0's sentinel has no stats payload (written before this "

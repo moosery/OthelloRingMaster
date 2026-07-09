@@ -159,10 +159,6 @@ static TerminalPlayerResult ProcessTerminalLevelForPlayer(POthelloRingMasterCalc
     if (player == RSF_PLAYER_BLACK) pStats->blackToMoveTotals = result.totals;
     else                            pStats->whiteToMoveTotals = result.totals;
 
-    LoggerLog("ProcessTerminalLevel: level %d %s-to-move: %llu boards (blackWins=%llu whiteWins=%llu ties=%llu)\n",
-              level, RSFPlayerStr(player), (unsigned long long)result.boardsProcessed,
-              (unsigned long long)result.totals.blackWins, (unsigned long long)result.totals.whiteWins, (unsigned long long)result.totals.ties);
-
     return result;
 }
 
@@ -223,12 +219,4 @@ void ProcessTerminalLevel(POthelloRingMasterCalculatorConfig pConfig, POthelloRi
     GetLocalTime(&st);
     snprintf(pStats->completedAt, sizeof(pStats->completedAt), "%04d-%02d-%02d %02d:%02d:%02d",
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-    LoggerLog("ProcessTerminalLevel: level %d complete: %llu boards total (blackWins=%llu whiteWins=%llu ties=%llu), %lld ns\n",
-              level,
-              (unsigned long long)(pStats->boardsProcessedBlack + pStats->boardsProcessedWhite),
-              (unsigned long long)pStats->combinedTotals.blackWins,
-              (unsigned long long)pStats->combinedTotals.whiteWins,
-              (unsigned long long)pStats->combinedTotals.ties,
-              (long long)pStats->totalNanos);
 }

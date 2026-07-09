@@ -24,6 +24,17 @@
 /* Functions */
 
 /*
+** Function: CalcFormatDurationHMS
+** @brief    Formats a nanosecond duration as "H:MM:SS" (hours unpadded,
+**           since a run can run well past 99 hours; minutes/seconds
+**           zero-padded to two digits).
+** @param    nanos   - duration in nanoseconds
+** @param    out     - buffer to receive the formatted string
+** @param    outSz   - size in bytes of out
+*/
+void CalcFormatDurationHMS(int64_t nanos, char* out, size_t outSz);
+
+/*
 ** Function: CalcWidthShortLabel
 ** @brief    Formats a tier width compactly for a table column: "nibble"
 **           or "N B" (bytes) -- shorter than CounterWidthConfig.cpp's own

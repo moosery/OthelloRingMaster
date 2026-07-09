@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.26.1] - 2026-07-09
+
+### Phase 6 validated (4x4 matches known B=24632/W=30116/T=5312), cleaner log output, and a duration row
+
+- **Phase 6 validation passed**: a `--force` 4x4 run's `FINAL RESULT` box exactly matched the known-correct totals for the first time. The retrograde calculator's core algorithm is now confirmed correct end to end.
+- Removed the per-color and per-level `ProcessTerminalLevel`/`ProcessNonTerminalLevel` `LoggerLog` sentences -- redundant now that the scrolling table (`v0.26.0`) shows the same boards/wins/ties/duration data in a cleaner form.
+- Fixed the `FINAL RESULT` box's border alignment: the title's top border was 2 characters narrower than the body's middle borders (a miscounted width that omitted the middle divider), making the box look visibly crooked. All borders now compute from the same label/value column widths.
+- Added a `Duration` row to the `FINAL RESULT` box -- the whole backward walk's wall-clock time (deepest level down to 0), formatted `H:MM:SS` via new shared `CalcFormatDurationHMS` (`CalculatorLevelTable.h`/`.cpp`).
+
+
 ## [0.26.0] - 2026-07-09
 
 ### Table-ized per-level logging, matching RingMaster/Blaster's scrolling table
