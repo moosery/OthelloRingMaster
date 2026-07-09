@@ -4,6 +4,15 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.26.3] - 2026-07-09
+
+### Fixed live status query's mislabeled drive columns (merge dir / store drive rows)
+
+- **The bug**: `StatsListener.cpp`'s live `STATUS` response (`OthelloRingMasterStatus.exe`) mislabeled the merge-dir (F:) and store-drive (Y:) rows in its per-level drive breakdown table -- a stray hardcoded `1` printed where the real file count should go, and the actual board/file count (`blk + wht`) printed in the "Disk GB" column position with no `GB` suffix and no byte conversion (visible in a real run as `F   1   0` instead of a sensible file count and byte size). In the non-zero-disk branches, the REAL byte total ended up shifted into the "Uncomp GB" column instead of "Disk GB". The writer-drive rows (D:/E:) were never affected -- only F:/Y:.
+- **Confirmed NOT a data-loss or solve-correctness bug**: cross-checked the real files on disk against both the (correctly-coded, separate) log file's own per-level drive summary and the live query -- the actual stored data and the log file's own byte counts were accurate throughout; only this one live-query table's column layout was wrong.
+- Fixed by removing the stray hardcoded `1` argument and using `blk + wht` for the Files column (matching the writer-drive rows' existing, correct shape) in all six affected `snprintf` call sites (three format variants x two sections: merge dirs, store drive).
+
+
 ## [0.26.2] - 2026-07-09
 
 ### Removed the remaining "no X-to-move boards" log line

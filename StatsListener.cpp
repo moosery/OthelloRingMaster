@@ -272,21 +272,21 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         double freeGB   = DriveAvailable(pSt, dl) / (1024.0 * 1024.0 * 1024.0);
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht,
+                          "    %c  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht,
                           disk   / (1024.0 * 1024.0 * 1024.0),
                           uncomp / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else if (disk > 0)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht,
+                          "    %c  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht,
                           disk / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d                              %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht, freeGB, blk, wht);
+                          "    %c  %5d                              %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht, freeGB, blk, wht);
     }
 
     /* Store drive -- storeMerge file counts, bytes written, free space */
@@ -300,21 +300,21 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         double freeGB   = DriveAvailable(pSt, dl) / (1024.0 * 1024.0 * 1024.0);
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht,
+                          "    %c  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht,
                           disk   / (1024.0 * 1024.0 * 1024.0),
                           uncomp / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else if (disk > 0)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht,
+                          "    %c  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht,
                           disk / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %4d  %5d                              %9.2f GB  %4d  %4d\n",
-                          dl, 1, blk + wht, freeGB, blk, wht);
+                          "    %c  %5d                              %9.2f GB  %4d  %4d\n",
+                          dl, blk + wht, freeGB, blk, wht);
     }
 
     /* Active intermediate merges (indexed by player: 0=white, 1=black) */
