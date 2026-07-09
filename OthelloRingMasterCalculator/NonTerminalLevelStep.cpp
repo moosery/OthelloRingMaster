@@ -34,6 +34,7 @@ struct PlayerLevelResult
 {
     bool             overflowed      = false;
     uint64_t         boardsProcessed = 0;
+    uint64_t         terminalBoards  = 0;   /* boards among boardsProcessed with zero legal moves */
     WinTieLossTriple totals          = {};   /* exact running sum of every processed board's own value -- see WinTieLossTripleAccumulateNibble/Wide */
 
     SegmentList                           scratchSegments;
@@ -279,6 +280,8 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
             else
                 WinTieLossTripleAccumulateWide(&result.totals, &jr.wide, byteWidth, level);
 
+            if (jr.isTerminal) result.terminalBoards++;
+
             result.boardsProcessed++;
         }
 
@@ -420,6 +423,8 @@ void ProcessNonTerminalLevel(POthelloRingMasterCalculatorConfig pConfig, POthell
     pStats->combinedTotals.blackWins = blackResult.totals.blackWins + whiteResult.totals.blackWins;
     pStats->combinedTotals.whiteWins = blackResult.totals.whiteWins + whiteResult.totals.whiteWins;
     pStats->combinedTotals.ties      = blackResult.totals.ties      + whiteResult.totals.ties;
+    pStats->terminalBoards           = blackResult.terminalBoards + whiteResult.terminalBoards;
+    pStats->counterByteWidth         = finalWidth;
     pStats->startTick                = startTick;
     pStats->totalNanos               = ClockNanosSinceStart(&startTick);
 

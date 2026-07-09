@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include "CalculatorStatsListener.h"
+#include "CalculatorLevelTable.h"
 #include "RSFFileName.h"
 #include <stdio.h>
 #include <string.h>
@@ -123,28 +124,23 @@ static void BuildCalculatorStatusResponse(PCalculatorContext pCtx, char* buf, in
 
     /* --- Level history table -- processing order is deepest-first, the
     ** opposite of OthelloRingMaster's own 0-first table, since that's the
-    ** actual order this calculator works through levels in.
+    ** actual order this calculator works through levels in. Same shared
+    ** row/header formatting BackwardWalkDriver.cpp logs as each level
+    ** completes, so the on-demand STATUS view and the log file always
+    ** agree on what these columns mean.
     */
-    n += snprintf(buf + n, bufSize - n,
-                  "Lvl    BoardsBlk    BoardsWht       BlackWins       WhiteWins            Ties  Duration\n");
-    n += snprintf(buf + n, bufSize - n,
-                  "---  -----------  -----------  --------------  --------------  --------------  --------\n");
+    char header[256], separator[256];
+    CalcLevelTableHeaderLines(header, sizeof(header), separator, sizeof(separator));
+    n += snprintf(buf + n, bufSize - n, "%s\n", header);
+    n += snprintf(buf + n, bufSize - n, "%s\n", separator);
     for (int lvl = (int)pSt->deepestLevel; lvl >= 0; lvl--)
     {
         if (n >= bufSize - 512) break;   /* safety guard -- buffer nearly full */
         const CalculatorLevelStats* ls = &pSt->levelStats[lvl];
         if (ls->totalNanos == 0) continue;   /* not yet completed */
-        char lvlDur[16];
-        FormatDuration(ls->totalNanos, lvlDur, sizeof(lvlDur));
-        n += snprintf(buf + n, bufSize - n,
-                      "%3d  %11llu  %11llu  %14llu  %14llu  %14llu  %8s\n",
-                      lvl,
-                      (unsigned long long)ls->boardsProcessedBlack,
-                      (unsigned long long)ls->boardsProcessedWhite,
-                      (unsigned long long)ls->combinedTotals.blackWins,
-                      (unsigned long long)ls->combinedTotals.whiteWins,
-                      (unsigned long long)ls->combinedTotals.ties,
-                      lvlDur);
+        char row[256];
+        CalcLevelTableFormatRow(lvl, ls, row, sizeof(row));
+        n += snprintf(buf + n, bufSize - n, "%s\n", row);
     }
 
     n += snprintf(buf + n, bufSize - n, "END\n");

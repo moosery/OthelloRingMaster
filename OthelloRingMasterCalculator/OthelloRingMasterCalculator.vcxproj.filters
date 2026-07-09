@@ -54,6 +54,9 @@
     <ClCompile Include="CalculatorLookupSource.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="CalculatorLevelTable.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="RetrogradeKernels.cu">
@@ -110,6 +113,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="CalculatorLookupSource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CalculatorLevelTable.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

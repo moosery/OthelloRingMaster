@@ -29,7 +29,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.25.6"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.26.0"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 
@@ -81,6 +81,21 @@ typedef struct __CalculatorLevelStats
     WinTieLossTriple  blackToMoveTotals;
     WinTieLossTriple  whiteToMoveTotals;
     WinTieLossTriple  combinedTotals;
+
+    /* Boards at this level (both colors combined) with zero legal moves --
+    ** classified directly rather than summed from children. For a terminal
+    ** level (Phase 2) this always equals boardsProcessedBlack+White (every
+    ** board there is terminal by construction); for a non-terminal level
+    ** it's however many of this level's boards happened to have no moves.
+    */
+    uint64_t  terminalBoards;
+
+    /* This level's confirmed final tier width: COUNTER_WIDTH_NIBBLE or a
+    ** byte count (see CounterWidthConfig.h) -- always COUNTER_WIDTH_NIBBLE
+    ** for a terminal level (Phase 2 never widens), whatever
+    ** CounterWidthConfigGet last confirmed for a non-terminal one.
+    */
+    int       counterByteWidth;
 
     ClockTick  startTick;
     int64_t    totalNanos;

@@ -208,6 +208,14 @@ void ProcessTerminalLevel(POthelloRingMasterCalculatorConfig pConfig, POthelloRi
     pStats->combinedTotals.whiteWins = pStats->blackToMoveTotals.whiteWins + pStats->whiteToMoveTotals.whiteWins;
     pStats->combinedTotals.ties      = pStats->blackToMoveTotals.ties      + pStats->whiteToMoveTotals.ties;
 
+    /* Every board at a terminal level is terminal by construction (see
+    ** ProcessTerminalLevelForPlayer's own Notes), and this level never
+    ** widens beyond nibble (Phase 2's classification is always a trivial
+    ** one-hot, never a wide sum).
+    */
+    pStats->terminalBoards   = pStats->boardsProcessedBlack + pStats->boardsProcessedWhite;
+    pStats->counterByteWidth = COUNTER_WIDTH_NIBBLE;
+
     pStats->startTick  = startTick;
     pStats->totalNanos = ClockNanosSinceStart(&startTick);
 

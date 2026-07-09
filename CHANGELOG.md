@@ -4,6 +4,15 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.26.0] - 2026-07-09
+
+### Table-ized per-level logging, matching RingMaster/Blaster's scrolling table
+
+- New `OthelloRingMasterCalculator/CalculatorLevelTable.h`/`.cpp`: a shared column-spec table (`Lv`, `Boards`, `BlkWins`, `WhtWins`, `Ties`, `Terminal`, `Width`, `Dur(s)`, `Brd/s`, `ns/brd`, `CompletedAt`) driving both the header/separator builder and the per-row formatter, so header and data can never drift out of alignment with each other. Used by both `BackwardWalkDriver.cpp` (logged to screen and log file as each level completes, plus a full reprint under `--- Completed level history ---` at the end of the walk -- mirroring `OthelloRingMaster.cpp`'s own scrolling table exactly) and `CalculatorStatsListener.cpp`'s on-demand STATUS history table, so the log and the live query always agree on what the columns mean.
+- Two new `CalculatorLevelStats` fields feed the new columns: `terminalBoards` (boards at this level with zero legal moves, classified directly -- always equals total boards for a terminal level, however many happened to have no moves for a non-terminal one) and `counterByteWidth` (this level's confirmed tier width). Both are part of the sentinel's persisted stats payload, so they survive a resumed run like everything else added in v0.25.5.
+- `BackwardWalkDriver.cpp`'s end-of-run `FINAL RESULT` line is now a small ASCII box (black wins / white wins / ties / total games), replacing the plain log sentence.
+
+
 ## [0.25.6] - 2026-07-09
 
 ### New --force option to force a clean re-run

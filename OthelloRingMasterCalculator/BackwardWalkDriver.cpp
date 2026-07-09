@@ -8,9 +8,11 @@
 /* Includes */
 #include "BackwardWalkDriver.h"
 #include "CalculatorFileName.h"
+#include "CalculatorLevelTable.h"
 #include "TerminalLevelBootstrap.h"
 #include "NonTerminalLevelStep.h"
 #include <windows.h>
+#include <string.h>
 
 /* Internal Helpers */
 
@@ -74,6 +76,71 @@ static void MarkLevelComplete(POthelloRingMasterCalculatorState pState, int boar
     WriteCalcSentinelStats(sentPath, &pState->levelStats[level]);
 }
 
+/*
+** Function: LogLevelTableRow
+** @brief    Prints one level's table row via CalcLevelTableFormatRow.
+** @param    level - the level this row is for
+** @param    pState - calculator state (levelStats[level] must be valid)
+*/
+static void LogLevelTableRow(POthelloRingMasterCalculatorState pState, int level)
+{
+    char row[256];
+    CalcLevelTableFormatRow(level, &pState->levelStats[level], row, sizeof(row));
+    LoggerLog("%s\n", row);
+}
+
+/*
+** Function: PrintFinalResultBox
+** @brief    Prints level 0's fully validated final answer as a small
+**           ASCII box, black/white/tie plus the total, for a clean,
+**           unambiguous end-of-run summary distinct from the scrolling
+**           per-level table above it.
+** @param    boardSize - board size, shown in the box title
+** @param    t         - level 0's combinedTotals (the real final answer)
+*/
+static void PrintFinalResultBox(int boardSize, const WinTieLossTriple& t)
+{
+    const int labelW = 14;
+    const int valueW = 20;
+    const int innerW = 1 + labelW + 1 + valueW + 1;   /* " label " + " value " widths incl. spaces either side */
+
+    char fullBorder[64];
+    int  n = 0;
+    fullBorder[n++] = '+';
+    for (int i = 0; i < innerW; i++) fullBorder[n++] = '-';
+    fullBorder[n++] = '+';
+    fullBorder[n] = '\0';
+
+    char midBorder[64];
+    n = 0;
+    midBorder[n++] = '+';
+    for (int i = 0; i < labelW + 2; i++) midBorder[n++] = '-';
+    midBorder[n++] = '+';
+    for (int i = 0; i < valueW + 2; i++) midBorder[n++] = '-';
+    midBorder[n++] = '+';
+    midBorder[n] = '\0';
+
+    char title[48];
+    snprintf(title, sizeof(title), "FINAL RESULT (%dx%d)", boardSize, boardSize);
+    int titleLen  = (int)strlen(title);
+    int leftPad   = (innerW - titleLen) / 2;
+    int rightPad  = (innerW - titleLen) - leftPad;
+    if (leftPad < 0) leftPad = 0;
+    if (rightPad < 0) rightPad = 0;
+
+    uint64_t total = t.blackWins + t.whiteWins + t.ties;
+
+    LoggerLog("%s\n", fullBorder);
+    LoggerLog("|%*s%s%*s|\n", leftPad, "", title, rightPad, "");
+    LoggerLog("%s\n", midBorder);
+    LoggerLog("| %-*s | %*llu |\n", labelW, "Black Wins", valueW, (unsigned long long)t.blackWins);
+    LoggerLog("| %-*s | %*llu |\n", labelW, "White Wins", valueW, (unsigned long long)t.whiteWins);
+    LoggerLog("| %-*s | %*llu |\n", labelW, "Ties",       valueW, (unsigned long long)t.ties);
+    LoggerLog("%s\n", midBorder);
+    LoggerLog("| %-*s | %*llu |\n", labelW, "Total Games", valueW, (unsigned long long)total);
+    LoggerLog("%s\n", midBorder);
+}
+
 /* Functions */
 
 /*
@@ -85,6 +152,11 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
 {
     int boardSize = (int)pConfig->boardSize;
     pState->deepestLevel = (uint8_t)deepestLevel;
+
+    char header[256], separator[256];
+    CalcLevelTableHeaderLines(header, sizeof(header), separator, sizeof(separator));
+    LoggerLog("%s\n", header);
+    LoggerLog("%s\n", separator);
 
     bool level0StatsValid = false;
 
@@ -104,10 +176,10 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
         bool statsValid = false;
         if (CheckLevelCompleteAndRestore(pState, boardSize, level, &statsValid))
         {
-            LoggerLog(statsValid
-                       ? "RunBackwardWalk: level %d already complete, skipping (stats restored from sentinel)\n"
-                       : "RunBackwardWalk: level %d already complete, skipping (legacy sentinel, no stats payload)\n",
-                       level);
+            if (statsValid)
+                LogLevelTableRow(pState, level);
+            else
+                LoggerLog("RunBackwardWalk: level %d already complete, skipping (legacy sentinel, no stats payload)\n", level);
             if (level == 0) level0StatsValid = statsValid;
             continue;
         }
@@ -118,11 +190,29 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
             ProcessNonTerminalLevel(pConfig, pState, pWidthConfig, level);
 
         MarkLevelComplete(pState, boardSize, level);
+        LogLevelTableRow(pState, level);
 
         if (level == 0) level0StatsValid = true;
     }
 
-    LoggerLog("RunBackwardWalk: complete -- levels %d down to 0 all processed\n", deepestLevel);
+    LoggerLog("RunBackwardWalk: complete -- levels %d down to 0 all processed\n\n", deepestLevel);
+
+    /* Full reprint of the completed-level history, deepest-first --
+    ** mirrors OthelloRingMaster.cpp's own end-of-run table reprint.
+    ** Skips any level whose stats aren't available (never processed this
+    ** run and no restorable sentinel payload -- totalNanos stays 0 in
+    ** that case, the same "not yet completed" signal
+    ** CalculatorStatsListener.cpp's own history table already uses).
+    */
+    LoggerLog("--- Completed level history ---\n");
+    LoggerLog("%s\n", header);
+    LoggerLog("%s\n", separator);
+    for (int level = deepestLevel; level >= 0; level--)
+    {
+        if (pState->levelStats[level].totalNanos == 0) continue;
+        LogLevelTableRow(pState, level);
+    }
+    LoggerLog("\n");
 
     /* Level 0 always has exactly one (black-to-move, non-terminal) board --
     ** the true starting position -- so its own accumulated total (see
@@ -136,13 +226,7 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
     ** missing one.
     */
     if (level0StatsValid)
-    {
-        const WinTieLossTriple& finalTotals = pState->levelStats[0].combinedTotals;
-        LoggerLog("RunBackwardWalk: FINAL RESULT -- blackWins=%llu whiteWins=%llu ties=%llu\n",
-                  (unsigned long long)finalTotals.blackWins,
-                  (unsigned long long)finalTotals.whiteWins,
-                  (unsigned long long)finalTotals.ties);
-    }
+        PrintFinalResultBox(boardSize, pState->levelStats[0].combinedTotals);
     else if (!pState->terminateThreads)
     {
         LoggerLog("RunBackwardWalk: level 0's sentinel has no stats payload (written before this "

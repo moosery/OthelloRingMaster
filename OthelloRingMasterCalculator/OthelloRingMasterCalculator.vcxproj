@@ -163,6 +163,7 @@
     <ClCompile Include="SegmentedStore.cpp" />
     <ClCompile Include="CalculatorScratchCounts.cpp" />
     <ClCompile Include="CalculatorLookupSource.cpp" />
+    <ClCompile Include="CalculatorLevelTable.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="RetrogradeKernels.cu" />
@@ -185,6 +186,7 @@
     <ClInclude Include="SegmentedStore.h" />
     <ClInclude Include="CalculatorScratchCounts.h" />
     <ClInclude Include="CalculatorLookupSource.h" />
+    <ClInclude Include="CalculatorLevelTable.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
