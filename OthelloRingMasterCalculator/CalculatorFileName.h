@@ -20,6 +20,11 @@
 
 /* Includes */
 #include "RSFFileName.h"
+#include "CalculatorTypes.h"   /* CalculatorLevelStats */
+#include <windows.h>
+
+/* Constants */
+#define CALC_SENTINEL_STATS_MAGIC 0x43414C4353544154ULL   /* "CALCSTAT" in ASCII byte order */
 
 /* Functions */
 
@@ -62,4 +67,49 @@ static inline void CalcSentinelNameComplete(char* out, size_t outSize,
                                              const char* dir, int boardSize, int level)
 {
     snprintf(out, outSize, "%s\\Level_%04d_%dx%d_calc_complete", dir, level, boardSize, boardSize);
+}
+
+/*
+** Function: WriteCalcSentinelStats
+** @brief    Writes a calc_complete sentinel with a magic header followed
+**           by the full CalculatorLevelStats payload, so a future run can
+**           restore this level's stats (for the FINAL RESULT line and any
+**           completed-level history display) without re-processing it --
+**           mirrors RingMaster's own WriteSentinelStats (OthelloRingMaster.cpp)
+**           exactly, using this project's own magic value.
+** @param    path - sentinel file path
+** @param    ls   - the level's stats to persist
+*/
+static inline void WriteCalcSentinelStats(const char* path, const CalculatorLevelStats* ls)
+{
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    uint64_t magic = CALC_SENTINEL_STATS_MAGIC;
+    DWORD nw;
+    WriteFile(h, &magic, (DWORD)sizeof(magic), &nw, NULL);
+    WriteFile(h, ls,     (DWORD)sizeof(*ls),    &nw, NULL);
+    CloseHandle(h);
+}
+
+/*
+** Function: ReadCalcSentinelStats
+** @brief    Reads CalculatorLevelStats from a calc_complete sentinel file.
+** @param    path - sentinel file path
+** @param    out  - out: filled with the sentinel's stats payload
+** @return   false if the file is zero-byte (legacy/manually created) or
+**           doesn't contain a valid stats payload.
+*/
+static inline bool ReadCalcSentinelStats(const char* path, CalculatorLevelStats* out)
+{
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint64_t magic = 0;
+    DWORD    nr    = 0;
+    bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
+              && nr == sizeof(magic)
+              && magic == CALC_SENTINEL_STATS_MAGIC
+              && ReadFile(h, out, (DWORD)sizeof(*out), &nr, NULL)
+              && nr == sizeof(*out);
+    CloseHandle(h);
+    return ok;
 }

@@ -51,6 +51,10 @@ static void PrintUsage(const char* prog)
     printf("  --counts-drive L  Drive letter this calculator writes its own counts files to [default: Y]\n");
     printf("  --counts-dir PATH Sub-path on counts drive (no drive letter) [default: \\OthelloRingMasterCalculator\\Counts]\n");
     printf("  --cache-dir PATH  Full path for logs and the width-config file [default: C:\\OthelloRingMasterCalculator\\Cache]\n");
+    printf("  --drive-cache-dir PATH  Cache dir for the shared drive-benchmark file (driveinfo.json) --\n");
+    printf("                    defaults to RingMaster's own cache dir, so its already-benchmarked\n");
+    printf("                    results are reused instead of re-benchmarking every drive\n");
+    printf("                    [default: C:\\OthelloRingMaster\\Cache]\n");
     printf("  --use-drives STR  Drive letters available for segmented scratch (e.g. DEFG) [default: DEFY, same as RingMaster's own default]\n");
     printf("  --scratch-dir PATH Sub-path (on whichever scratch drive) segments are written under [default: \\OthelloRingMasterCalculator\\Scratch]\n");
     printf("  --port N          Stats listener TCP port                    [default: 17632]\n");
@@ -71,6 +75,11 @@ static void ParseArgs(int argc, char* argv[])
     g_config.countsDrive = 'Y';
     strncpy(g_config.countsDirNameNoDrive, "\\OthelloRingMasterCalculator\\Counts", sizeof(g_config.countsDirNameNoDrive) - 1);
     strncpy(g_config.cacheDirName, "C:\\OthelloRingMasterCalculator\\Cache", sizeof(g_config.cacheDirName) - 1);
+    /* Defaults to RingMaster's own cache dir -- see CalculatorTypes.h's
+    ** own comment on driveCacheDirName for why this is deliberately kept
+    ** separate from cacheDirName.
+    */
+    strncpy(g_config.driveCacheDirName, "C:\\OthelloRingMaster\\Cache", sizeof(g_config.driveCacheDirName) - 1);
     /* Matches RingMaster's own default (OthelloRingMaster.cpp) exactly --
     ** an explicit drive list, never the boot/system drive. An empty
     ** string here would fall through to GetDriveInformation's "NULL ->
@@ -104,6 +113,8 @@ static void ParseArgs(int argc, char* argv[])
             strncpy(g_config.countsDirNameNoDrive, argv[++i], sizeof(g_config.countsDirNameNoDrive) - 1);
         else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc)
             strncpy(g_config.cacheDirName, argv[++i], sizeof(g_config.cacheDirName) - 1);
+        else if (strcmp(argv[i], "--drive-cache-dir") == 0 && i + 1 < argc)
+            strncpy(g_config.driveCacheDirName, argv[++i], sizeof(g_config.driveCacheDirName) - 1);
         else if (strcmp(argv[i], "--use-drives") == 0 && i + 1 < argc)
             strncpy(g_config.useDrives, argv[++i], sizeof(g_config.useDrives) - 1);
         else if (strcmp(argv[i], "--scratch-dir") == 0 && i + 1 < argc)
@@ -150,6 +161,7 @@ int main(int argc, char* argv[])
     LoggerLog("  Store dir     : %s\n", g_state.storeDirectory);
     LoggerLog("  Counts dir    : %s\n", g_state.countsDirectory);
     LoggerLog("  Cache dir     : %s\n", g_state.cacheDirectory);
+    LoggerLog("  Drive cache   : %s\n", g_config.driveCacheDirName);
     LoggerLog("  Stats port    : %d\n", g_config.statsPort);
 
     int deepestLevel = FindDeepestCompleteLevel(g_state.storeDirectory, g_config.boardSize);
@@ -164,13 +176,16 @@ int main(int argc, char* argv[])
     CounterWidthConfig widthConfig;
     CounterWidthConfigLoad(&widthConfig, g_state.cacheDirectory, g_config.boardSize);
 
-    /* Probe/benchmark drives once at startup (cached in cacheDirectory,
-    ** same as RingMaster's own driveinfo.json) and seed the scratch
-    ** ledger for every drive it found -- both level+1's lookup-source
-    ** segments and this level's own output segments draw reservations
-    ** from this same ledger for the rest of the run.
+    /* Probe/benchmark drives once at startup and seed the scratch ledger
+    ** for every drive it found -- both level+1's lookup-source segments
+    ** and this level's own output segments draw reservations from this
+    ** same ledger for the rest of the run. Cached in driveCacheDirName
+    ** (RingMaster's own cache dir by default, not this calculator's own
+    ** cacheDirName) so a benchmark RingMaster already ran is reused
+    ** instead of re-benchmarking every drive from scratch -- write/read
+    ** MB/s is a property of the physical drive, not of which program asked.
     */
-    GetDriveInformation(&g_state.driveInfo, g_state.cacheDirectory,
+    GetDriveInformation(&g_state.driveInfo, g_config.driveCacheDirName,
                         g_config.useDrives[0] ? g_config.useDrives : nullptr);
     for (int i = 0; i < g_state.driveInfo.numDrives; i++)
     {

@@ -29,7 +29,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define CALCULATOR_VERSION "0.25.4"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
+#define CALCULATOR_VERSION "0.25.5"   /* tracks the shared solution-wide version in OthelloTypes.h, not an independent counter */
 
 #define CALC_MAX_LEVELS 256   /* covers up to 16x16 board (252 levels) -- same bound OthelloTypes.h uses, kept local rather than shared across projects */
 
@@ -100,6 +100,17 @@ typedef struct __OthelloRingMasterCalculatorConfig
     char      countsDrive;                            /* drive this calculator writes its own counts files to */
     char      countsDirNameNoDrive[MAX_FULL_PATH_NAME]; /* sub-path on countsDrive for counts output */
     char      cacheDirName[MAX_FULL_PATH_NAME];        /* logs + the single per-level width-config file live here */
+    /* Separate from cacheDirName deliberately: drive benchmark results
+    ** (write/read MB/s per physical drive) are a property of the machine,
+    ** not of which program asked, so this defaults to RingMaster's OWN
+    ** cache directory -- the calculator reuses RingMaster's already-
+    ** benchmarked driveinfo.json instead of re-benchmarking every drive
+    ** from scratch. Can't just share cacheDirName wholesale: RingMaster's
+    ** and the calculator's log files use the identical "log_WxH_date.txt"
+    ** naming pattern, so pointing both programs' whole cache directory at
+    ** the same path would risk one silently overwriting the other's log.
+    */
+    char      driveCacheDirName[MAX_FULL_PATH_NAME];
     uint16_t  statsPort;                              /* default 17632 -- distinct from RingMaster's 17532 */
     char      useDrives[64];                          /* drive letters available for segmented scratch (e.g. "DEFG"); empty = auto-enumerate all fixed local drives */
     char      scratchDirNameNoDrive[MAX_FULL_PATH_NAME]; /* sub-path (on whichever scratch drive) segments are written under */

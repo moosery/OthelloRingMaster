@@ -15,35 +15,63 @@
 /* Internal Helpers */
 
 /*
-** Function: IsLevelComplete
-** @brief    Checks whether level's calculator-output sentinel is present.
-** @param    countsDir - counts directory
-** @param    boardSize - board size
-** @param    level     - level to check
-** @return   true if level was already fully processed by a prior run.
+** Function: CheckLevelCompleteAndRestore
+** @brief    Checks whether level's calculator-output sentinel is present,
+**           and if so, restores its persisted CalculatorLevelStats into
+**           pState->levelStats[level] -- mirrors RingMaster's own
+**           ScanForResumeLevel (InitSolver.cpp), which does the same
+**           restoration on its own sentinel hit, so a resumed/rerun
+**           calculator invocation can still log/report a previously
+**           completed level's real numbers (including level 0's FINAL
+**           RESULT) without re-processing it.
+** @param    pState          - calculator state (levelStats[level] restored into on hit)
+** @param    boardSize       - board size
+** @param    level           - level to check
+** @param    pOutStatsValid  - out: true if the sentinel actually carried a
+**                             restorable stats payload -- false for a
+**                             legacy zero-byte sentinel (written before
+**                             this version), in which case
+**                             pState->levelStats[level] is left untouched
+**                             (all zero) and must NOT be reported as real
+** @return   true if level was already fully processed by a prior run
+**           (the counts data itself is valid either way -- only the
+**           STATS payload can be legacy-missing).
 */
-static bool IsLevelComplete(const char* countsDir, int boardSize, int level)
+static bool CheckLevelCompleteAndRestore(POthelloRingMasterCalculatorState pState, int boardSize, int level,
+                                          bool* pOutStatsValid)
 {
     char sentPath[MAX_FULL_PATH_NAME];
-    CalcSentinelNameComplete(sentPath, sizeof(sentPath), countsDir, boardSize, level);
-    return GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES;
+    CalcSentinelNameComplete(sentPath, sizeof(sentPath), pState->countsDirectory, boardSize, level);
+
+    if (GetFileAttributesA(sentPath) == INVALID_FILE_ATTRIBUTES)
+    {
+        *pOutStatsValid = false;
+        return false;
+    }
+
+    CalculatorLevelStats restored = {};
+    *pOutStatsValid = ReadCalcSentinelStats(sentPath, &restored);
+    if (*pOutStatsValid)
+        pState->levelStats[level] = restored;
+
+    return true;
 }
 
 /*
 ** Function: MarkLevelComplete
-** @brief    Writes level's calculator-output sentinel (zero-byte marker).
-** @param    countsDir - counts directory
+** @brief    Writes level's calculator-output sentinel with its full stats
+**           payload (see WriteCalcSentinelStats), so a future run can
+**           restore and report this level's real numbers without
+**           re-processing it.
+** @param    pState    - calculator state (levelStats[level] is what gets persisted)
 ** @param    boardSize - board size
 ** @param    level     - level to mark complete
 */
-static void MarkLevelComplete(const char* countsDir, int boardSize, int level)
+static void MarkLevelComplete(POthelloRingMasterCalculatorState pState, int boardSize, int level)
 {
     char sentPath[MAX_FULL_PATH_NAME];
-    CalcSentinelNameComplete(sentPath, sizeof(sentPath), countsDir, boardSize, level);
-
-    HANDLE h = CreateFileA(sentPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE)
-        CloseHandle(h);
+    CalcSentinelNameComplete(sentPath, sizeof(sentPath), pState->countsDirectory, boardSize, level);
+    WriteCalcSentinelStats(sentPath, &pState->levelStats[level]);
 }
 
 /* Functions */
@@ -58,13 +86,7 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
     int boardSize = (int)pConfig->boardSize;
     pState->deepestLevel = (uint8_t)deepestLevel;
 
-    /* Tracks whether level 0 was actually (re)processed by THIS run, as
-    ** opposed to skipped because a prior run already completed it --
-    ** pState->levelStats[0] is only populated when ProcessNonTerminalLevel
-    ** genuinely runs for level 0, never when IsLevelComplete skips it, so
-    ** the final-tally print below must not assume it's always valid.
-    */
-    bool level0ProcessedThisRun = false;
+    bool level0StatsValid = false;
 
     for (int level = deepestLevel; level >= 0; level--)
     {
@@ -79,9 +101,14 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
             break;
         }
 
-        if (IsLevelComplete(pState->countsDirectory, boardSize, level))
+        bool statsValid = false;
+        if (CheckLevelCompleteAndRestore(pState, boardSize, level, &statsValid))
         {
-            LoggerLog("RunBackwardWalk: level %d already complete, skipping\n", level);
+            LoggerLog(statsValid
+                       ? "RunBackwardWalk: level %d already complete, skipping (stats restored from sentinel)\n"
+                       : "RunBackwardWalk: level %d already complete, skipping (legacy sentinel, no stats payload)\n",
+                       level);
+            if (level == 0) level0StatsValid = statsValid;
             continue;
         }
 
@@ -90,10 +117,9 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
         else
             ProcessNonTerminalLevel(pConfig, pState, pWidthConfig, level);
 
-        MarkLevelComplete(pState->countsDirectory, boardSize, level);
+        MarkLevelComplete(pState, boardSize, level);
 
-        if (level == 0)
-            level0ProcessedThisRun = true;
+        if (level == 0) level0StatsValid = true;
     }
 
     LoggerLog("RunBackwardWalk: complete -- levels %d down to 0 all processed\n", deepestLevel);
@@ -102,9 +128,14 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
     ** the true starting position -- so its own accumulated total (see
     ** WinTieLossTripleAccumulateNibble/Wide) is not an approximation of
     ** any kind: it IS the fully validated final answer for the whole game
-    ** tree.
+    ** tree. Available whether level 0 was processed fresh by this run or
+    ** restored from a prior run's sentinel -- either way the number is
+    ** real. NOT printed for a legacy zero-byte sentinel (statsValid
+    ** false): pState->levelStats[0] was left untouched (all zero) in
+    ** that case, and printing it would be a silently wrong answer, not a
+    ** missing one.
     */
-    if (level0ProcessedThisRun)
+    if (level0StatsValid)
     {
         const WinTieLossTriple& finalTotals = pState->levelStats[0].combinedTotals;
         LoggerLog("RunBackwardWalk: FINAL RESULT -- blackWins=%llu whiteWins=%llu ties=%llu\n",
@@ -114,8 +145,8 @@ void RunBackwardWalk(POthelloRingMasterCalculatorConfig pConfig, POthelloRingMas
     }
     else if (!pState->terminateThreads)
     {
-        LoggerLog("RunBackwardWalk: level 0 was already complete from a prior run -- its final "
-                  "result was logged then, not this run (delete its sentinel/counts file and "
-                  "re-run to recompute and log it again).\n");
+        LoggerLog("RunBackwardWalk: level 0's sentinel has no stats payload (written before this "
+                  "version) -- delete Level_0000's calc_complete sentinel and re-run to recompute "
+                  "and log the FINAL RESULT.\n");
     }
 }

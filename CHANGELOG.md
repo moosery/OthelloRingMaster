@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.25.5] - 2026-07-09
+
+### Shared drive-benchmark cache with RingMaster, and sentinel-persisted level stats (resume no longer loses the FINAL RESULT)
+
+- **Shared drive benchmark cache**: caught by the user -- "the benchmark from the RingMaster should be equivalent to the Calculator, right? So we really don't need a separate file for the benchmark results." New `OthelloRingMasterCalculatorConfig::driveCacheDirName` (`--drive-cache-dir`, defaults to `C:\OthelloRingMaster\Cache`, RingMaster's own default cache dir) is now what `GetDriveInformation`'s `pCacheDir` argument uses, instead of the calculator's own `cacheDirName`. Write/read MB/s is a property of the physical drive, not of which program is asking, so the calculator now reuses RingMaster's already-benchmarked `driveinfo.json` instead of re-benchmarking every drive from scratch. Deliberately NOT just pointing the calculator's whole `cacheDirName` at RingMaster's -- both programs' log files use the identical `log_WxH_date.txt` naming pattern, so sharing the full cache directory would risk one silently overwriting the other's log.
+- **Sentinel-persisted level stats, matching RingMaster's own resume behavior**: the calculator's `_calc_complete` sentinel was a zero-byte marker, so a resumed/rerun invocation could never report a previously-completed level's real numbers (including the new FINAL RESULT line) -- it could only skip reprocessing it. New `WriteCalcSentinelStats`/`ReadCalcSentinelStats` (`CalculatorFileName.h`, own `CALC_SENTINEL_STATS_MAGIC`) mirror RingMaster's own `WriteSentinelStats`/`ReadSentinelStats` (`OthelloRingMaster.cpp`/`InitSolver.cpp`) exactly: the sentinel now carries the full `CalculatorLevelStats` payload, restored into `pState->levelStats[level]` whenever `BackwardWalkDriver.cpp` skips an already-complete level. A legacy zero-byte sentinel (written before this version) is detected and never silently reported as a real (all-zero) result -- `RunBackwardWalk` distinguishes "stats restored" from "sentinel present but no stats payload" and only prints FINAL RESULT in the former case.
+
+
 ## [0.25.4] - 2026-07-09
 
 ### Per-level win/tie/loss totals are now exact (not terminal-only), plus a final-tally line and a drive-safety fix
