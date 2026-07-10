@@ -54,9 +54,11 @@ static void PrintUsage(const char* prog)
     printf("  --store-dir PATH  Sub-path on store drive (no drive letter)  [default: \\OthelloRingMaster\\Store]\n");
     printf("  --cache-dir PATH  Full path for logs and drive-bench cache   [default: C:\\OthelloRingMaster\\Cache]\n");
     printf("  --port N          Stats listener TCP port                    [default: 17532]\n");
-    printf("  --compress        Compress all files as .rsfz (delta+varint, ~7x smaller) [default]\n");
-    printf("  --compress-store-only  Compress only store output; MW/imerge stay .rsf\n");
-    printf("  --no-compress     Write all files as .rsf (uncompressed)\n");
+    printf("  --compress        Compress writer + intermediate merge files as .rsfz [default]\n");
+    printf("  --compress-store-only  Compress intermediate merge files only; writer files stay .rsf\n");
+    printf("  --no-compress     Write writer + intermediate merge files as .rsf (uncompressed)\n");
+    printf("                    (a level's actual permanent store output is always compressed via\n");
+    printf("                    the ring nested-index's own delta+varint+LZ4 tier regardless of this)\n");
     printf("  --lz4-drives DEF  Drive letters that get LZ4 on top of varint (.rsfzl) [default: DEF]\n");
     printf("                    Only applies when --compress is active. Use \"\" to disable.\n");
     printf("  --help            Show this help\n\n");
