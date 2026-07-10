@@ -20,6 +20,17 @@ than just read an already-finished store.
    compressed, 5.77x smaller uncompressed -- the uncompressed number is what
    matters for point-lookup use cases, since compression breaks random-access
    seeking.
+
+   `Ring_3_4` is deliberately kept as one combined 16-bit leaf, not split
+   further into a `Ring_3` grouping level + `Ring_4` leaf. Tested directly on
+   real 6x6 data (levels 15 and 17): splitting made total storage ~5-6%
+   *worse* both times, not better. The existing delta+varint+LZ4 compression
+   already captures real structure in the combined 16-bit value (real cost
+   came in around 6.9 bits/board, well under the raw 16), and a `Ring_3`
+   grouping level's own per-group offset overhead consistently outweighed
+   what little additional entropy a split could recover -- even accounting
+   for `Ring_4` alone showing some real skew (nibble-packed + LZ4 landed
+   under the naive 4 bits/board), it wasn't enough to offset `Ring_3`'s cost.
 2. **Keep the live GPU math (move generation, flip computation,
    canonicalization) entirely row-major** -- ring order is fundamentally
    incompatible with the uniform-shift trick that math depends on. Convert
