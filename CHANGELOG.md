@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.28.0] - 2026-07-10
+
+### New tool: OthelloRingMasterStoreStats -- per-level CSV store statistics
+
+- **New standalone project `OthelloRingMasterStoreStats`**: scans a store directory's ring-store file trailers (no decompression -- every figure comes from each file's 64-byte `RSFTrailer`, i.e. `recordCount`, plus its real on-disk size) and prints one CSV row per completed level: `Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard`. Both colors' CellsInUse/Ring_1(if applicable)/Ring_2(if applicable)/Ring_3_4 files are folded into one set of per-level totals, not reported per-file.
+- CLI mirrors `OthelloRingMaster.exe`'s own `--store-drive`/`--store-dir`/`--board-size` flags and defaults (`Y` / `\OthelloRingMaster\Store` / `6`), so running it with no arguments points at the same store a default-configured solver run writes to; `--output PATH` writes the CSV to a file instead of stdout.
+- Depends only on `Utility` (for the `RSFOpen`/`RSFOpenShaped`/`RSFReaderTrailer` trailer-only read API) and `OthelloBasics` (for `RingNestedIndexHasRing1/HasRing2`/`RingNestedIndexFileCount`) -- no CUDA dependency at all, unlike `OthelloRingMasterCalculator`.
+- Never Fatals on a legitimately-absent early-level single-color file (e.g. level 0 has no white files in real 6x6 data); only Fatals if a file a sentinel already confirms exists fails to yield a valid trailer (genuine corruption).
+
+
 ## [0.27.0] - 2026-07-09
 
 ### Eliminated the ring-store double-write; Calculator now searches ring-shaped scratch instead of rehydrated board keys; cascade's own intermediate files become ring-format too

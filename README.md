@@ -108,6 +108,7 @@ Outputs:
 - `x64/Release/OthelloRingMasterStatus.exe` -- live status client (TCP)
 - `x64/Release/OthelloRingMasterCalculator.exe` -- retrograde win/tie/loss calculator
 - `x64/Release/OthelloRingMasterCalculatorStatus.exe` -- calculator's live status client (TCP)
+- `x64/Release/OthelloRingMasterStoreStats.exe` -- per-level CSV store statistics (read-only)
 
 ## Usage
 
@@ -171,6 +172,25 @@ never rehydrated to flat board-key records, and never holding a whole level resi
 memory), with adaptive per-level counter width (nibble through arbitrary byte widths,
 widening automatically on overflow). Validated end to end on 4x4: reproduces the known-correct
 whole-tree result exactly -- 24,632 black wins / 30,116 white wins / 5,312 ties.
+
+### Store stats
+
+```
+OthelloRingMasterStoreStats.exe [options]
+
+  --board-size N    Board size: 4, 6, or 8                     [default: 6]
+  --store-drive L   Drive letter the store lives on            [default: Y]
+  --store-dir PATH  Sub-path on store drive (no drive letter)  [default: \OthelloRingMaster\Store]
+  --output PATH     Write CSV to PATH instead of stdout
+  --help            Show this help
+```
+
+Reads every completed level's ring-store file trailers directly (no decompression --
+every figure comes from each file's 64-byte trailer and its real on-disk size) and prints
+one CSV row per level: `Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,
+UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard`, with both colors' files folded into
+one set of per-level totals. Safe to run against a store while the solver is actively
+writing to it -- only completed levels are read.
 
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
@@ -299,6 +319,7 @@ OthelloRingMaster/
   OthelloRingMasterStatus/       Solver's status client project
   OthelloRingMasterCalculator/   Retrograde win/tie/loss calculator (see its own --help)
   OthelloRingMasterCalculatorStatus/  Calculator's status client project
+  OthelloRingMasterStoreStats/   Per-level CSV store statistics tool (read-only, see its own --help)
 ```
 
 ## Related
