@@ -18,7 +18,8 @@
 void StoreStatsWriteCsvHeader(FILE* fpOut)
 {
     fprintf(fpOut, "Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,UncompressedBytes,"
-                   "Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,CumulativeBoardsGenerated\n");
+                   "Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,DupsRemovedPercent,"
+                   "CumulativeBoardsGenerated\n");
 }
 
 /*
@@ -51,10 +52,18 @@ void StoreStatsWriteCsvRow(FILE* fpOut, const LevelStoreStats* stats, uint64_t c
     else
         fprintf(fpOut, ",");
 
-    if (stats->hasGenerationStats)
-        fprintf(fpOut, "%llu,%llu,", (unsigned long long)stats->boardsGenerated, (unsigned long long)stats->dupsRemoved);
+    if (stats->hasGenerationStats && stats->boardsGenerated > 0)
+    {
+        double dupsRemovedPercent = (double)stats->dupsRemoved / (double)stats->boardsGenerated * 100.0;
+        fprintf(fpOut, "%llu,%llu,%.2f,",
+                (unsigned long long)stats->boardsGenerated,
+                (unsigned long long)stats->dupsRemoved,
+                dupsRemovedPercent);
+    }
     else
-        fprintf(fpOut, ",,");
+    {
+        fprintf(fpOut, ",,,");
+    }
 
     fprintf(fpOut, "%llu\n", (unsigned long long)cumulativeBoardsGenerated);
 }

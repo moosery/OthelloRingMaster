@@ -189,7 +189,8 @@ Reads every completed level's ring-store file trailers directly (no decompressio
 every figure comes from each file's 64-byte trailer and its real on-disk size) and prints
 one CSV row per level: `Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,
 UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,
-CumulativeBoardsGenerated`, with both colors' files folded into one set of per-level totals.
+DupsRemovedPercent,CumulativeBoardsGenerated`, with both colors' files folded into one set
+of per-level totals. `DupsRemovedPercent` is `DupsRemoved / BoardsGenerated * 100`.
 `BoardsGenerated`/`DupsRemoved` come from the level's own `_complete` sentinel (which embeds
 the solver's `LevelStats` for the step that produced it) -- raw GPU-generated boards before
 dedup, and the **full three-stage dedup total**: GPU intra-flush dedup (`gpuDupsRemoved`),

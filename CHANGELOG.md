@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.28.3] - 2026-07-10
+
+### OthelloRingMasterStoreStats: added DupsRemovedPercent column
+
+- New column: `DupsRemovedPercent` = `DupsRemoved / BoardsGenerated * 100`, blank under the same conditions as `BoardsGenerated`/`DupsRemoved` (no generation stats, or `BoardsGenerated` is 0).
+
+
 ## [0.28.2] - 2026-07-10
 
 ### Fixed DupsRemoved undercounting a real, previously untracked dedup stage

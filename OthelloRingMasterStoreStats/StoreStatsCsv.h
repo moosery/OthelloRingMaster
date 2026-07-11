@@ -27,11 +27,11 @@ void StoreStatsWriteCsvHeader(FILE* fpOut);
 **           writes one CSV row to fpOut. Guards divide-by-zero for a level
 **           with zero boards or zero uncompressed/compressed bytes by
 **           leaving the affected field blank rather than emitting inf/nan.
-**           BoardsGenerated/DupsRemoved are left blank when stats->
-**           hasGenerationStats is false (e.g. level 0's sentinel has no
-**           stats payload); cumulativeBoardsGenerated is still written in
-**           that case (the caller's running sum simply doesn't advance for
-**           an unknown level).
+**           BoardsGenerated/DupsRemoved/DupsRemovedPercent are left blank
+**           when stats->hasGenerationStats is false (e.g. level 0's
+**           sentinel has no stats payload) or boardsGenerated is 0;
+**           cumulativeBoardsGenerated is still written in that case (the
+**           caller's running sum simply doesn't advance for an unknown level).
 ** @param    fpOut                      - destination stream (stdout or the --output file)
 ** @param    stats                      - one level's already-aggregated totals
 ** @param    cumulativeBoardsGenerated  - running total of boardsGenerated through this level, inclusive
