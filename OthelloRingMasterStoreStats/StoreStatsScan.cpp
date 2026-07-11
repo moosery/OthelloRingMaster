@@ -123,7 +123,12 @@ static bool levelHasRingFiles(const char* storeDir, int boardSize, int level)
 ** @param    boardSize          - exact board size
 ** @param    level              - level whose sentinel to read
 ** @param    pBoardsGenerated   - out: raw GPU-generated boards, valid only if this returns true
-** @param    pDupsRemoved       - out: gpuDupsRemoved + mrgDupsRemoved, valid only if this returns true
+** @param    pDupsRemoved       - out: full 3-stage dedup total (GPU intra-flush +
+**                                merge-writer pool cross-segment + final merge),
+**                                valid only if this returns true -- see
+**                                StoreStatsTypes.h's LevelStoreStats::dupsRemoved
+**                                comment for why stage 2 needs deriving rather
+**                                than reading a dedicated counter
 ** @return   false if the sentinel is zero-byte (legacy/manual, e.g. level 0)
 **           or otherwise has no valid stats payload -- not an error.
 */
@@ -150,8 +155,19 @@ static bool readLevelGenerationStats(const char* storeDir, int boardSize, int le
     if (!ok)
         return false;
 
+    /* Stage 2 (merge-writer pool cross-segment dedup, MergePoolToWriter) has
+    ** no dedicated LevelStats counter -- derive it from the two fields that
+    ** bracket it: boardsReceivedFromGpu is tallied before that stage ever
+    ** runs, boardsWrittenToDisk reflects its result (RSFWriterClose's actual
+    ** returned record count). Clamp to 0: should never go negative for
+    ** correct data, but a negative value here would silently look like a
+    ** huge unsigned number in the CSV instead of the impossible condition it is.
+    */
+    uint64_t stage2 = (stats.boardsReceivedFromGpu >= stats.boardsWrittenToDisk)
+                     ? (stats.boardsReceivedFromGpu - stats.boardsWrittenToDisk) : 0;
+
     *pBoardsGenerated = stats.boardsGenerated;
-    *pDupsRemoved     = stats.gpuDupsRemoved + stats.mrgDupsRemoved;
+    *pDupsRemoved     = stats.gpuDupsRemoved + stage2 + stats.mrgDupsRemoved;
     return true;
 }
 

@@ -39,8 +39,25 @@ struct LevelStoreStats
     ** level's own board population). hasGenerationStats is false for level 0
     ** (its sentinel is zero-byte, no stats payload) and for any level solved
     ** before this stats payload existed.
+    **
+    ** dupsRemoved is the FULL three-stage total, not just the two stages
+    ** LevelStats has an explicit counter for:
+    **   1. gpuDupsRemoved      -- GPU intra-flush dedup (has its own counter)
+    **   2. boardsReceivedFromGpu - boardsWrittenToDisk
+    **                           -- merge-writer pool cross-segment dedup
+    **                              (MergePoolToWriter, MergeFiles.cpp) --
+    **                              LevelStats has NO explicit counter for
+    **                              this stage; derived here from two fields
+    **                              that ARE both tracked (boardsReceivedFromGpu
+    **                              is tallied before this stage runs,
+    **                              boardsWrittenToDisk reflects its result)
+    **   3. mrgDupsRemoved      -- final end-of-level k-way merge dedup (has its own counter)
+    ** Without stage 2, BoardsGenerated - DupsRemoved does not equal
+    ** TotalBoards for any level whose merge-writer pool held more than one
+    ** GPU flush's worth of data before spilling to disk (first happens at
+    ** real 6x6 scale around level 15-16, per real-run investigation).
     */
     bool     hasGenerationStats = false;
     uint64_t boardsGenerated    = 0;   /* raw boards the GPU generated (pre-dedup) to produce this level */
-    uint64_t dupsRemoved        = 0;   /* gpuDupsRemoved + mrgDupsRemoved removed while producing this level */
+    uint64_t dupsRemoved        = 0;   /* full 3-stage total removed while producing this level, see above */
 };

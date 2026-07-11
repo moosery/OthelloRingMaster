@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.28.2] - 2026-07-10
+
+### Fixed DupsRemoved undercounting a real, previously untracked dedup stage
+
+- **Found via investigation prompted by the user noticing the numbers didn't add up**: `BoardsGenerated - DupsRemoved` should exactly equal `TotalBoards` for any level with generation stats, and did for levels 1-15 -- but diverged starting at level 16, growing from ~3.17B boards off to ~109B by level 19.
+- **Root cause**: there are three dedup stages in the solve pipeline, and `LevelStats` only has dedicated counters for two of them. `MergePoolToWriter` (`MergeFiles.cpp`) -- which k-way-merges a merge-writer thread's accumulated GPU-flush segments before spilling to an NVMe file -- silently drops cross-segment duplicates (`bool dup = ...; if (!dup) { RSFWriterRecord(...) }`, no counter incremented on the dup branch). This only fires once a thread's pool holds more than one GPU flush's worth of data before it fills up enough to spill -- never happened for levels 0-14 in the real 6x6 run (pool never filled, "0 files + N pool readers" in the log the whole time), first happened at level 15 (log shows real writer files for the first time), and grows with level size since deeper levels accumulate more segments per flush.
+- **Fix, retroactive**: `LevelStats` already tracks the two fields that bracket this stage (`boardsReceivedFromGpu`, tallied before it runs; `boardsWrittenToDisk`, reflecting its result) even though neither run of the solver ever explicitly counted the stage itself. `OthelloRingMasterStoreStats`'s `readLevelGenerationStats` now derives it as `boardsReceivedFromGpu - boardsWrittenToDisk` and includes it in `DupsRemoved`, so the fix applies to every level's sentinel already on disk -- no solver-side code change or re-run needed, no new field, purely a tool-side formula fix.
+- `BoardsGenerated - DupsRemoved == TotalBoards` now holds exactly for every level with generation stats, confirmed against the real live 6x6 run's own numbers.
+
+
 ## [0.28.1] - 2026-07-10
 
 ### OthelloRingMasterStoreStats: added GPU generation/dedup columns from sentinel stats

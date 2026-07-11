@@ -191,9 +191,17 @@ one CSV row per level: `Level,TotalBoards,WhiteBoards,BlackBoards,CompressedByte
 UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,
 CumulativeBoardsGenerated`, with both colors' files folded into one set of per-level totals.
 `BoardsGenerated`/`DupsRemoved` come from the level's own `_complete` sentinel (which embeds
-the solver's `LevelStats` for the step that produced it -- raw GPU-generated boards before
-dedup, and GPU+merge duplicates removed getting to the stored, unique count); blank for a
-level whose sentinel predates that stats payload (always level 0). `CumulativeBoardsGenerated`
+the solver's `LevelStats` for the step that produced it) -- raw GPU-generated boards before
+dedup, and the **full three-stage dedup total**: GPU intra-flush dedup (`gpuDupsRemoved`),
+merge-writer pool cross-segment dedup (`MergePoolToWriter` -- boards that survive one GPU
+flush's own dedup but duplicate a board from a *different* flush sitting in the same
+thread's pool; `LevelStats` has no dedicated counter for this stage, so it's derived as
+`boardsReceivedFromGpu - boardsWrittenToDisk`), and the final end-of-level k-way merge dedup
+(`mrgDupsRemoved`). Without stage 2, `BoardsGenerated - DupsRemoved` would undercount actual
+dedup (and so overstate `TotalBoards` predicted from `BoardsGenerated` alone) for any level
+whose merge-writer pool held more than one GPU flush's data before spilling to disk -- first
+happens around level 15-16 at real 6x6 scale, confirmed on a live run. Blank for a level
+whose sentinel predates the stats payload entirely (always level 0). `CumulativeBoardsGenerated`
 is the running total of `BoardsGenerated` through that level. Safe to run against a store
 while the solver is actively writing to it -- only completed levels are read.
 
