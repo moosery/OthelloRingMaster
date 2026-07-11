@@ -4,6 +4,15 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.28.1] - 2026-07-10
+
+### OthelloRingMasterStoreStats: added GPU generation/dedup columns from sentinel stats
+
+- **New columns**: `BoardsGenerated`, `DupsRemoved`, `CumulativeBoardsGenerated`. The first two come from the level's own `_complete` sentinel, which embeds the solver's full `LevelStats` for the step that produced it (`WriteSentinelStats` in `OthelloRingMaster.cpp`) -- `BoardsGenerated` is the raw GPU-generated board count before dedup, `DupsRemoved` is `gpuDupsRemoved + mrgDupsRemoved`. `CumulativeBoardsGenerated` is a running total across levels 0..N.
+- Reuses `OthelloTypes.h`'s `LevelStats` struct directly (header-only, no new link dependency) for binary-compatible reads, mirroring the read pattern `InitSolver.cpp`'s own `ReadSentinelStats` already uses (magic check via `RSF_SENTINEL_STATS_MAGIC`, then a raw struct read) -- reimplemented locally since that function is file-scope static, not exported.
+- Level 0's sentinel is zero-byte (no stats payload, predates any solve step) -- `BoardsGenerated`/`DupsRemoved` are left blank for it rather than reported as zero, distinguishing "not tracked" from "genuinely zero."
+
+
 ## [0.28.0] - 2026-07-10
 
 ### New tool: OthelloRingMasterStoreStats -- per-level CSV store statistics

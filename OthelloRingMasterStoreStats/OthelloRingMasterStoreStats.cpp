@@ -150,11 +150,13 @@ int main(int argc, char* argv[])
             storeDir, config.boardSize, config.boardSize, deepest);
 
     StoreStatsWriteCsvHeader(fpOut);
+    uint64_t cumulativeBoardsGenerated = 0;
     for (int level = 0; level <= deepest; level++)
     {
         LevelStoreStats stats;
         StoreStatsScanLevel(storeDir, config.boardSize, level, &stats);
-        StoreStatsWriteCsvRow(fpOut, &stats);
+        cumulativeBoardsGenerated += stats.boardsGenerated;
+        StoreStatsWriteCsvRow(fpOut, &stats, cumulativeBoardsGenerated);
     }
 
     if (fpOut != stdout)

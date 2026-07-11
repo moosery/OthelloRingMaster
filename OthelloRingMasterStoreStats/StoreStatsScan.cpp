@@ -11,6 +11,7 @@
 #include "RSFFileName.h"
 #include "RingNestedIndex.h"
 #include "RingStoreFile.h"
+#include "OthelloTypes.h"
 #include "Error.h"
 #include "FileAndDirUtils.h"
 #include <windows.h>
@@ -108,6 +109,52 @@ static bool levelHasRingFiles(const char* storeDir, int boardSize, int level)
     return false;
 }
 
+/*
+** Function: readLevelGenerationStats
+** @brief    Reads the LevelStats embedded in level's own "_complete"
+**           sentinel (magic + raw struct, written by OthelloRingMaster.cpp's
+**           WriteSentinelStats). Per that same convention, this sentinel
+**           holds the stats for the solve step that PRODUCED this level
+**           (i.e. "level-1 -> level"), not this level's own board
+**           population -- see ScanForResumeLevel in InitSolver.cpp
+**           (`pState->levelStats[level - 1] = restored` for sentinel
+**           "level"), mirrored here read-only.
+** @param    storeDir           - store directory
+** @param    boardSize          - exact board size
+** @param    level              - level whose sentinel to read
+** @param    pBoardsGenerated   - out: raw GPU-generated boards, valid only if this returns true
+** @param    pDupsRemoved       - out: gpuDupsRemoved + mrgDupsRemoved, valid only if this returns true
+** @return   false if the sentinel is zero-byte (legacy/manual, e.g. level 0)
+**           or otherwise has no valid stats payload -- not an error.
+*/
+static bool readLevelGenerationStats(const char* storeDir, int boardSize, int level,
+                                      uint64_t* pBoardsGenerated, uint64_t* pDupsRemoved)
+{
+    char sentPath[MAX_FULL_PATH_NAME];
+    SentinelNameComplete(sentPath, sizeof(sentPath), storeDir, boardSize, level);
+
+    HANDLE h = CreateFileA(sentPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    uint64_t   magic = 0;
+    LevelStats stats  = {};
+    DWORD      nr     = 0;
+    bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
+              && nr == sizeof(magic)
+              && magic == RSF_SENTINEL_STATS_MAGIC
+              && ReadFile(h, &stats, (DWORD)sizeof(stats), &nr, NULL)
+              && nr == sizeof(stats);
+    CloseHandle(h);
+
+    if (!ok)
+        return false;
+
+    *pBoardsGenerated = stats.boardsGenerated;
+    *pDupsRemoved     = stats.gpuDupsRemoved + stats.mrgDupsRemoved;
+    return true;
+}
+
 /* Functions */
 
 /*
@@ -176,4 +223,7 @@ void StoreStatsScanLevel(const char* storeDir, int boardSize, int level, LevelSt
     }
 
     pOut->totalBoards = pOut->whiteBoards + pOut->blackBoards;
+
+    pOut->hasGenerationStats = readLevelGenerationStats(storeDir, boardSize, level,
+                                                          &pOut->boardsGenerated, &pOut->dupsRemoved);
 }

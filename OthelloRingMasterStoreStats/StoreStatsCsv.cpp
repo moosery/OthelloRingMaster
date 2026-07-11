@@ -17,14 +17,15 @@
 */
 void StoreStatsWriteCsvHeader(FILE* fpOut)
 {
-    fprintf(fpOut, "Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard\n");
+    fprintf(fpOut, "Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,UncompressedBytes,"
+                   "Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,CumulativeBoardsGenerated\n");
 }
 
 /*
 ** Function: StoreStatsWriteCsvRow
 ** @brief    See StoreStatsCsv.h.
 */
-void StoreStatsWriteCsvRow(FILE* fpOut, const LevelStoreStats* stats)
+void StoreStatsWriteCsvRow(FILE* fpOut, const LevelStoreStats* stats, uint64_t cumulativeBoardsGenerated)
 {
     fprintf(fpOut, "%d,%llu,%llu,%llu,%llu,%llu,",
             stats->level,
@@ -46,7 +47,14 @@ void StoreStatsWriteCsvRow(FILE* fpOut, const LevelStoreStats* stats)
     }
 
     if (stats->totalBoards > 0)
-        fprintf(fpOut, "%.4f\n", stats->compressedBytes * 8.0 / (double)stats->totalBoards);
+        fprintf(fpOut, "%.4f,", stats->compressedBytes * 8.0 / (double)stats->totalBoards);
     else
-        fprintf(fpOut, "\n");
+        fprintf(fpOut, ",");
+
+    if (stats->hasGenerationStats)
+        fprintf(fpOut, "%llu,%llu,", (unsigned long long)stats->boardsGenerated, (unsigned long long)stats->dupsRemoved);
+    else
+        fprintf(fpOut, ",,");
+
+    fprintf(fpOut, "%llu\n", (unsigned long long)cumulativeBoardsGenerated);
 }

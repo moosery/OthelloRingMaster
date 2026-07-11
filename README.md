@@ -188,9 +188,14 @@ OthelloRingMasterStoreStats.exe [options]
 Reads every completed level's ring-store file trailers directly (no decompression --
 every figure comes from each file's 64-byte trailer and its real on-disk size) and prints
 one CSV row per level: `Level,TotalBoards,WhiteBoards,BlackBoards,CompressedBytes,
-UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard`, with both colors' files folded into
-one set of per-level totals. Safe to run against a store while the solver is actively
-writing to it -- only completed levels are read.
+UncompressedBytes,Ratio,ReductionPercent,BitsPerBoard,BoardsGenerated,DupsRemoved,
+CumulativeBoardsGenerated`, with both colors' files folded into one set of per-level totals.
+`BoardsGenerated`/`DupsRemoved` come from the level's own `_complete` sentinel (which embeds
+the solver's `LevelStats` for the step that produced it -- raw GPU-generated boards before
+dedup, and GPU+merge duplicates removed getting to the stored, unique count); blank for a
+level whose sentinel predates that stats payload (always level 0). `CumulativeBoardsGenerated`
+is the running total of `BoardsGenerated` through that level. Safe to run against a store
+while the solver is actively writing to it -- only completed levels are read.
 
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
