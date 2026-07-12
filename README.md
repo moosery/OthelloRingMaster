@@ -206,6 +206,26 @@ whose sentinel predates the stats payload entirely (always level 0). `Cumulative
 is the running total of `BoardsGenerated` through that level. Safe to run against a store
 while the solver is actively writing to it -- only completed levels are read.
 
+**Diagnostic mode: `Ring_3_4` bit-occupancy report for one level**
+
+```
+OthelloRingMasterStoreStats.exe --ring34-bitstats --level N [--limit N]
+```
+
+Unlike the normal CSV table (trailers only, no decompression), this mode actually decompresses
+`Ring_3_4` record bodies (real delta+varint+LZ4 decode) for one level, both colors, and reports
+per-bit-position occupancy (how often each of the 16 bits is set) plus a popcount histogram and
+average -- i.e. how many of the 16 board-cell positions that field covers are typically occupied
+at that depth, versus still contributing a fixed-zero (unoccupied) bit. Answers whether `Ring_3_4`
+still has real *uncompressed* headroom (structural sparsity from unoccupied cells) at a given
+level, or whether it's already close to fully occupied by then -- a different question from the
+*compressed*-size questions the normal CSV table answers. `--limit` bounds how many records get
+read (default 50,000,000; `0` means read every record in both files). Since the compressed stream
+can only be decoded sequentially from the start, a bounded `--limit` reads a *leading* sample
+(the numerically-smallest `CellsInUse` patterns first), not a uniformly-random one across the
+whole level -- for a fully unbiased answer, run with `--limit 0` on a level cheap enough to afford
+a full decode.
+
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
 Press **Ctrl+C** on the solver for a graceful shutdown -- merge loops check the terminate

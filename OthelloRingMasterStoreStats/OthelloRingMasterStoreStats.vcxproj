@@ -134,11 +134,13 @@
     <ClCompile Include="OthelloRingMasterStoreStats.cpp" />
     <ClCompile Include="StoreStatsScan.cpp" />
     <ClCompile Include="StoreStatsCsv.cpp" />
+    <ClCompile Include="StoreStatsRing34BitStats.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="StoreStatsTypes.h" />
     <ClInclude Include="StoreStatsScan.h" />
     <ClInclude Include="StoreStatsCsv.h" />
+    <ClInclude Include="StoreStatsRing34BitStats.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Utility\Utility.vcxproj">

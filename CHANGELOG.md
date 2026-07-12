@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.29.0] - 2026-07-11
+
+### OthelloRingMasterStoreStats: new Ring_3_4 bit-occupancy diagnostic mode
+
+- **New mode**: `--ring34-bitstats --level N [--limit N]` -- unlike the normal per-level CSV table (trailer-only, never decompresses), this mode does real delta+varint+LZ4 decompression of one level's `Ring_3_4` records (both colors) and reports per-bit-position occupancy (how often each of the 16 bits is set), a popcount histogram, and the average popcount -- i.e. how many of the 16 board-cell positions that field covers are actually occupied at a given depth, versus still contributing a fixed-zero (unoccupied) bit.
+- **Why**: answers a genuinely different question than compression ratio -- whether `Ring_3_4` still has real *uncompressed* structural headroom at a given level (fewer than 16 bits of true information content, from unoccupied cells), which matters for the retrograde calculator's actual working-set size (it fully decompresses into fixed-width scratch stores regardless of the on-disk compression tier, so only uncompressed-record-width reductions shrink that footprint -- compression-ratio improvements don't).
+- New `StoreStatsRing34BitStats.h`/`.cpp`, streaming via the same O(1)-memory `RSFOpenShaped`/`RSFReadShaped` pattern used elsewhere in this project -- never loads a level wholesale.
+- `--limit` (default 50,000,000; `0` = unlimited) bounds how many records get read, since the compressed stream can only be decoded sequentially from the start -- a bounded limit reads a *leading* sample (smallest `CellsInUse` patterns first), not a uniformly-random one. For a fully unbiased answer, run unlimited on a level cheap enough to afford a full decode.
+
+
 ## [0.28.3] - 2026-07-10
 
 ### OthelloRingMasterStoreStats: added DupsRemovedPercent column

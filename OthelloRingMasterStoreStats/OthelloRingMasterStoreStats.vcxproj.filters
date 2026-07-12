@@ -24,6 +24,9 @@
     <ClCompile Include="StoreStatsCsv.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="StoreStatsRing34BitStats.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="StoreStatsTypes.h">
@@ -33,6 +36,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="StoreStatsCsv.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="StoreStatsRing34BitStats.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -21,11 +21,15 @@
 /* Includes */
 #include "StoreStatsScan.h"
 #include "StoreStatsCsv.h"
+#include "StoreStatsRing34BitStats.h"
 #include "FileAndDirUtils.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+
+/* Constants */
+#define RING34_BITSTATS_DEFAULT_LIMIT 50000000ULL   /* records; --limit 0 means unlimited (whole file) */
 
 /* Structures and Types */
 
@@ -35,10 +39,17 @@
 */
 struct StoreStatsConfig
 {
-    int  boardSize                          = 6;
-    char storeDrive                         = 'Y';
-    char storeDirNameNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store";
-    char outputPath[MAX_FULL_PATH_NAME]      = "";   /* empty = stdout */
+    int      boardSize                          = 6;
+    char     storeDrive                         = 'Y';
+    char     storeDirNameNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store";
+    char     outputPath[MAX_FULL_PATH_NAME]      = "";   /* empty = stdout */
+
+    /* --ring34-bitstats mode: a single-level diagnostic report instead of
+    ** the normal per-level CSV table -- see StoreStatsRing34BitStats.h.
+    */
+    bool     ring34BitStatsMode                 = false;
+    int      ring34BitStatsLevel                = -1;     /* required when ring34BitStatsMode is set */
+    uint64_t ring34BitStatsLimit                = RING34_BITSTATS_DEFAULT_LIMIT;
 };
 
 /* Functions */
@@ -59,6 +70,16 @@ static void PrintUsage(const char* prog)
     printf("Scans every completed level's ring-store file trailers (no decompression)\n");
     printf("and prints one CSV row per level: board counts, compressed/uncompressed\n");
     printf("bytes, compression ratio, percent reduction, and bits/board.\n\n");
+    printf("Diagnostic mode -- Ring_3_4 bit-occupancy report for ONE level:\n");
+    printf("  --ring34-bitstats Switch to this mode instead of the normal per-level table\n");
+    printf("  --level N         Level to report on (required in this mode)\n");
+    printf("  --limit N         Stop after N total records, both colors combined\n");
+    printf("                    [default: %llu; 0 = unlimited, read every record]\n\n", (unsigned long long)RING34_BITSTATS_DEFAULT_LIMIT);
+    printf("This mode DOES decompress record bodies (delta+varint+LZ4) -- unlike the\n");
+    printf("normal CSV table, which only ever reads trailers. Records are read from the\n");
+    printf("start of each color's file, so a bounded --limit is a leading sample, not a\n");
+    printf("uniformly-random one (the compressed stream can't be seeked into at an\n");
+    printf("arbitrary offset -- only sequential decode from the start is possible).\n\n");
 }
 
 /*
@@ -103,6 +124,20 @@ static void ParseArgs(int argc, char* argv[], StoreStatsConfig* pConfig)
             REQUIRE_NEXT("--output")
             strncpy(pConfig->outputPath, argv[i], sizeof(pConfig->outputPath) - 1);
         }
+        else if (strcmp(argv[i], "--ring34-bitstats") == 0)
+        {
+            pConfig->ring34BitStatsMode = true;
+        }
+        else if (strcmp(argv[i], "--level") == 0)
+        {
+            REQUIRE_NEXT("--level")
+            pConfig->ring34BitStatsLevel = atoi(argv[i]);
+        }
+        else if (strcmp(argv[i], "--limit") == 0)
+        {
+            REQUIRE_NEXT("--limit")
+            pConfig->ring34BitStatsLimit = _strtoui64(argv[i], nullptr, 10);
+        }
         else
         {
             printf("ERROR: unknown argument '%s'\n\n", argv[i]);
@@ -124,16 +159,14 @@ int main(int argc, char* argv[])
     StoreStatsConfig config;
     ParseArgs(argc, argv, &config);
 
-    char storeDir[MAX_FULL_PATH_NAME];
-    snprintf(storeDir, sizeof(storeDir), "%c:%s\\storeDir", config.storeDrive, config.storeDirNameNoDrive);
-
-    int deepest = StoreStatsFindDeepestCompleteLevel(storeDir, config.boardSize);
-    if (deepest < 0)
+    if (config.ring34BitStatsMode && config.ring34BitStatsLevel < 0)
     {
-        fprintf(stderr, "No completed levels found under '%s' for board size %dx%d.\n",
-                storeDir, config.boardSize, config.boardSize);
+        printf("ERROR: --ring34-bitstats requires --level N\n");
         return 1;
     }
+
+    char storeDir[MAX_FULL_PATH_NAME];
+    snprintf(storeDir, sizeof(storeDir), "%c:%s\\storeDir", config.storeDrive, config.storeDirNameNoDrive);
 
     FILE* fpOut = stdout;
     if (config.outputPath[0])
@@ -144,6 +177,35 @@ int main(int argc, char* argv[])
             fprintf(stderr, "ERROR: could not open '%s' for writing\n", config.outputPath);
             return 1;
         }
+    }
+
+    if (config.ring34BitStatsMode)
+    {
+        if (config.ring34BitStatsLimit == 0)
+            fprintf(stderr, "Reading ALL Ring_3_4 records for level %d under '%s' -- this decompresses the whole level, no limit set...\n",
+                    config.ring34BitStatsLevel, storeDir);
+        else
+            fprintf(stderr, "Reading up to %llu Ring_3_4 records for level %d under '%s'...\n",
+                    (unsigned long long)config.ring34BitStatsLimit, config.ring34BitStatsLevel, storeDir);
+
+        Ring34BitStats stats;
+        StoreStatsCollectRing34BitStats(storeDir, config.boardSize, config.ring34BitStatsLevel,
+                                         config.ring34BitStatsLimit, &stats);
+        StoreStatsPrintRing34BitStats(fpOut, config.ring34BitStatsLevel, &stats);
+
+        if (fpOut != stdout)
+            fclose(fpOut);
+        return 0;
+    }
+
+    int deepest = StoreStatsFindDeepestCompleteLevel(storeDir, config.boardSize);
+    if (deepest < 0)
+    {
+        fprintf(stderr, "No completed levels found under '%s' for board size %dx%d.\n",
+                storeDir, config.boardSize, config.boardSize);
+        if (fpOut != stdout)
+            fclose(fpOut);
+        return 1;
     }
 
     fprintf(stderr, "Scanning '%s' (board size %dx%d), levels 0..%d...\n",
