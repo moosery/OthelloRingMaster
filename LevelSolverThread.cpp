@@ -440,13 +440,24 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
 
     GpuAccumulator* pAccum = GpuAccumulatorCreate(optBatch, maxMoves, totalGpuMem);
 
-    /* Pre-scan for StatsListener solve-phase % progress -- streams and
-    ** counts rather than loading the whole index just to call
-    ** GetBoardCount(), so this never holds a whole level resident either
-    ** (see RingNestedIndex.h's RingNestedIndexStreamAll). Reads the level
-    ** twice overall (once here, once in FeedNestedIndexLevel below) --
-    ** an acceptable trade of sequential I/O time for never needing the
-    ** whole level in memory, which matters far more at real scale.
+    /* Pre-scan for StatsListener solve-phase % progress -- reads each
+    ** color's Ring_3_4 trailer directly instead of streaming/decompressing
+    ** the whole level just to count records. Ring_3_4's own recordCount IS
+    ** the board count (every group there has exactly 1 member, by
+    ** construction -- see RingNestedIndex.h's file Notes), so this is a
+    ** couple of 64-byte trailer reads, not a full pass over the level.
+    **
+    ** The previous version streamed the entire level here just for this
+    ** one number, on top of FeedNestedIndexLevel streaming it again for
+    ** real below -- a real, doubled I/O cost that was invisible at small
+    ** scale but became a multi-tens-of-minutes dead wait once a level
+    ** reached real production size (found at level 19->20, 526B+ boards).
+    **
+    ** Existence/consistency checking is unchanged (RingNestedIndexFileCount
+    ** is a cheap set of GetFileAttributesA calls, not a decompress) -- a
+    ** color with zero applicable files legitimately has no data at this
+    ** level (skip, not an error); a color whose Ring_3_4 file exists but
+    ** fails to yield a valid trailer is real corruption and still Fatals.
     */
     {
         uint64_t total = 0;
@@ -473,18 +484,18 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
             int existCount = RingNestedIndexFileCount(cellsInUsePath, ring1Path, ring2Path, ring34Path);
             if (existCount == 0) continue;
 
-            uint64_t count  = 0;
-            bool     streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
-                                                          [&count](const BOARD_KEY&) { count++; });
-            if (!streamOk)
+            RSFReader* pRing34Reader = RSFOpenShaped(ring34Path, RSF_SHAPE_LEAF16);
+            if (!pRing34Reader)
                 Fatal(FATAL_MERGE_LOGIC_ERROR,
                       "RunGpuFeederJob: nested-index files exist (%d/%d) for level %d %s but "
-                      "failed to stream -- corrupt or truncated data. Files:\n"
+                      "Ring_3_4's trailer could not be read -- corrupt or truncated data. Files:\n"
                       "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
                       existCount, expectedCount, level, RSFPlayerStr(player),
                       cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
                       hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
-            total += count;
+
+            total += RSFReaderTrailer(pRing34Reader)->recordCount;
+            RSFClose(&pRing34Reader);
         }
         pSt->currentLevelTotalBoards = total;
     }

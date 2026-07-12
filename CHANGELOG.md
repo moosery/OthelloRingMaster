@@ -4,6 +4,15 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.30.0] - 2026-07-11
+
+### Eliminated a full, wasted level-read on every level transition
+
+- **The problem**: `RunGpuFeederJob`'s pre-scan (for `StatsListener`'s solve-phase % progress) streamed and decompressed an entire incoming level via `RingNestedIndexStreamAll`, just to count records -- on top of `FeedNestedIndexLevel` streaming the exact same data a second time immediately after, for the real work. A deliberate, documented tradeoff when originally written ("an acceptable trade of sequential I/O time for never needing the whole level in memory"), but invisible at small scale and increasingly costly as levels grew -- at level 19->20 (526B+ boards, 355.6GB compressed), this doubled a real, multi-tens-of-minutes read into a silent, easy-to-mistake-for-a-hang wait before any status field updated. Found live, mid-run, while diagnosing exactly that apparent stall.
+- **The fix**: `Ring_3_4`'s own trailer `recordCount` already *is* the board count for a given level/player (every `Ring_3_4` group has exactly one member, by construction -- the same invariant `OthelloRingMasterStoreStats` already relies on). The pre-scan now opens each color's `Ring_3_4` file, reads its 64-byte trailer, sums `recordCount`, and closes -- no decompression, no full pass, a couple of near-instant reads instead of reading the entire level. Existence/corruption handling is unchanged: a color with no applicable files still skips cleanly (not an error); a color whose `Ring_3_4` file exists but yields no valid trailer still Fatals with full diagnostic detail.
+- Source-only change -- requires a rebuild and restart of the solver to take effect; does not touch stored level data in any way.
+
+
 ## [0.29.3] - 2026-07-11
 
 ### Fixed a build break in StoreStatsRing34BitStats.cpp
