@@ -19,17 +19,46 @@
 /* Internal Helpers */
 
 /*
+** Function: ring34FileRecordCount
+** @brief    Returns path's Ring_3_4 record count straight from its trailer
+**           (no decompression), or 0 if the file is absent -- used only to
+**           size the progress-percentage denominator before the real
+**           (decompressing) read pass starts.
+** @param    path - Ring_3_4 file path for one color
+** @return   The file's recordCount, or 0 if it doesn't exist.
+*/
+static uint64_t ring34FileRecordCount(const char* path)
+{
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+        return 0;
+
+    RSFReader* pReader = RSFOpenShaped(path, RSF_SHAPE_LEAF16);
+    if (!pReader)
+        Fatal(FATAL_FILE_OPEN, "StoreStatsRing34BitStats: '%s' exists but its trailer could not be read (corrupt or truncated)", path);
+
+    uint64_t count = RSFReaderTrailer(pReader)->recordCount;
+    RSFClose(&pReader);
+    return count;
+}
+
+/*
 ** Function: accumulateRing34Records
 ** @brief    Opens one color's Ring_3_4 file (if present) and streams records
-**           into pStats until either the file is exhausted or sampleLimit
-**           (if nonzero) total records have been accumulated across both
-**           colors. A cleanly-absent file is not an error (mirrors
-**           StoreStatsScan.cpp's own convention).
-** @param    path        - Ring_3_4 file path for one color
-** @param    sampleLimit - stop once pStats->totalRecords reaches this (0 = unlimited)
-** @param    pStats      - accumulator being built
+**           into pStats until either the file is exhausted or targetTotal
+**           (the run's overall stop point, both colors combined) is reached.
+**           Prints a progress line to stderr to stderr every time another 5%
+**           of targetTotal is crossed, tracked via *pLastPercentBucket
+**           (shared across both colors' calls) so a huge unlimited read
+**           doesn't sit silent for a long time. A cleanly-absent file is not
+**           an error (mirrors StoreStatsScan.cpp's own convention).
+** @param    path              - Ring_3_4 file path for one color
+** @param    sampleLimit       - stop once pStats->totalRecords reaches this (0 = unlimited)
+** @param    targetTotal       - denominator for percentage progress (both colors combined)
+** @param    pLastPercentBucket - in/out: highest 5%-multiple already printed (start at -1)
+** @param    pStats            - accumulator being built
 */
-static void accumulateRing34Records(const char* path, uint64_t sampleLimit, Ring34BitStats* pStats)
+static void accumulateRing34Records(const char* path, uint64_t sampleLimit, uint64_t targetTotal,
+                                     int* pLastPercentBucket, Ring34BitStats* pStats)
 {
     if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
         return;   /* legitimately absent (e.g. an early level's other-color file) */
@@ -57,6 +86,17 @@ static void accumulateRing34Records(const char* path, uint64_t sampleLimit, Ring
             pStats->popcountHistogram[popcount]++;
             pStats->totalRecords++;
 
+            if (targetTotal > 0)
+            {
+                int bucket = (int)(pStats->totalRecords * 100 / targetTotal / 5);
+                if (bucket > *pLastPercentBucket)
+                {
+                    *pLastPercentBucket = bucket;
+                    fprintf(stderr, "  %d%% (%llu / %llu records)\n",
+                            bucket * 5, (unsigned long long)pStats->totalRecords, (unsigned long long)targetTotal);
+                }
+            }
+
             if (sampleLimit > 0 && pStats->totalRecords >= sampleLimit)
             {
                 RSFClose(&pReader);
@@ -79,14 +119,23 @@ void StoreStatsCollectRing34BitStats(const char* storeDir, int boardSize, int le
 {
     *pOut = Ring34BitStats{};
 
-    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    char whitePath[MAX_FULL_PATH_NAME], blackPath[MAX_FULL_PATH_NAME];
+    RSFNameRing34File(whitePath, sizeof(whitePath), storeDir, boardSize, level, RSF_PLAYER_WHITE, 0);
+    RSFNameRing34File(blackPath, sizeof(blackPath), storeDir, boardSize, level, RSF_PLAYER_BLACK, 0);
+
+    /* Cheap trailer-only pre-pass, just to size the progress-percentage
+    ** denominator before the real (decompressing) pass below.
+    */
+    uint64_t available   = ring34FileRecordCount(whitePath) + ring34FileRecordCount(blackPath);
+    uint64_t targetTotal = (sampleLimit > 0 && sampleLimit < available) ? sampleLimit : available;
+
+    int lastPercentBucket = -1;
+    const char* paths[2] = { whitePath, blackPath };
+    for (int i = 0; i < 2; i++)
     {
         if (sampleLimit > 0 && pOut->totalRecords >= sampleLimit)
             break;
-
-        char ring34Path[MAX_FULL_PATH_NAME];
-        RSFNameRing34File(ring34Path, sizeof(ring34Path), storeDir, boardSize, level, player, 0);
-        accumulateRing34Records(ring34Path, sampleLimit, pOut);
+        accumulateRing34Records(paths[i], sampleLimit, targetTotal, &lastPercentBucket, pOut);
     }
 }
 

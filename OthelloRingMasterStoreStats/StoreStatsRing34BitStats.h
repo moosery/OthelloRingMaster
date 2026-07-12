@@ -39,7 +39,11 @@ struct Ring34BitStats
 **           RSFReadShaped (real decompression, O(1) memory -- never loads a
 **           level wholesale) and accumulates per-bit and popcount tallies.
 **           Stops early once sampleLimit records have been read (0 = read
-**           every record in both files, unbounded).
+**           every record in both files, unbounded). Prints a progress line
+**           to stderr every time another 5% of the run's total target is
+**           crossed (a cheap trailer-only pre-pass sizes that denominator
+**           before the real decompressing pass starts), so a large or
+**           unbounded read doesn't sit silent for a long time.
 ** @param    storeDir     - store directory to read from
 ** @param    boardSize    - exact board size
 ** @param    level        - level whose Ring_3_4 files to read

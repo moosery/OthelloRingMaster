@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.29.2] - 2026-07-11
+
+### --ring34-bitstats now prints progress every 5%
+
+- A cheap trailer-only pre-pass sizes the run's total record target (both colors, respecting `--limit`) before the real decompressing read starts, so a large or unbounded (`--limit 0`) run prints a progress line to stderr every time another 5% is crossed instead of sitting silent.
+
+
 ## [0.29.1] - 2026-07-11
 
 ### Fixed --ring34-bitstats reading an in-progress level
