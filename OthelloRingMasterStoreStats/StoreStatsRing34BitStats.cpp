@@ -11,6 +11,7 @@
 #include "RSFFileName.h"
 #include "RingNestedIndex.h"
 #include "RingStoreFile.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 
 /* Constants */

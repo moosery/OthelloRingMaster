@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.29.3] - 2026-07-11
+
+### Fixed a build break in StoreStatsRing34BitStats.cpp
+
+- Missing `#include "FileAndDirUtils.h"` (`MAX_FULL_PATH_NAME` undeclared) -- caught by the user's own build immediately after v0.29.2.
+
+
 ## [0.29.2] - 2026-07-11
 
 ### --ring34-bitstats now prints progress every 5%
