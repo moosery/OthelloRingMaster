@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.29.1] - 2026-07-11
+
+### Fixed --ring34-bitstats reading an in-progress level
+
+- `--ring34-bitstats --level N` had no check that level N is actually finished -- pointing it at the level the live solver is currently writing would open a `Ring_3_4` file with no valid trailer yet and misreport it as corrupt (`Fatal(FATAL_FILE_OPEN, ...)`), when it's really just not done. New `StoreStatsLevelIsComplete` (checks the same `_complete` sentinel `StoreStatsFindDeepestCompleteLevel`'s walk already relies on) gives a clear, non-fatal message instead. Caught by the user asking "is this safe to run while it's crunching" before actually running it against the live 6x6 store.
+
+
 ## [0.29.0] - 2026-07-11
 
 ### OthelloRingMasterStoreStats: new Ring_3_4 bit-occupancy diagnostic mode

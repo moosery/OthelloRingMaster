@@ -31,6 +31,21 @@
 int StoreStatsFindDeepestCompleteLevel(const char* storeDir, int boardSize);
 
 /*
+** Function: StoreStatsLevelIsComplete
+** @brief    True if level's "_complete" sentinel exists -- the same check
+**           StoreStatsFindDeepestCompleteLevel's walk relies on, exposed
+**           standalone so a caller asking about one specific level (e.g.
+**           --ring34-bitstats --level N) can refuse to touch a level the
+**           solver hasn't finished writing yet, rather than opening a
+**           ring-store file mid-write and misreporting it as corrupt.
+** @param    storeDir  - store directory to check
+** @param    boardSize - exact board size (4, 6, or 8)
+** @param    level     - level to check
+** @return   true if the "_complete" sentinel exists for level.
+*/
+bool StoreStatsLevelIsComplete(const char* storeDir, int boardSize, int level);
+
+/*
 ** Function: StoreStatsScanLevel
 ** @brief    Aggregates one level's combined-color stats from its ring-store
 **           files (CellsInUse always, Ring_1/Ring_2 only when

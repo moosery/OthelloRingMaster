@@ -200,6 +200,17 @@ int StoreStatsFindDeepestCompleteLevel(const char* storeDir, int boardSize)
 }
 
 /*
+** Function: StoreStatsLevelIsComplete
+** @brief    See StoreStatsScan.h.
+*/
+bool StoreStatsLevelIsComplete(const char* storeDir, int boardSize, int level)
+{
+    char sentPath[MAX_FULL_PATH_NAME];
+    SentinelNameComplete(sentPath, sizeof(sentPath), storeDir, boardSize, level);
+    return GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES;
+}
+
+/*
 ** Function: StoreStatsScanLevel
 ** @brief    See StoreStatsScan.h.
 */

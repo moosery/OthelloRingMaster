@@ -181,6 +181,17 @@ int main(int argc, char* argv[])
 
     if (config.ring34BitStatsMode)
     {
+        if (!StoreStatsLevelIsComplete(storeDir, config.boardSize, config.ring34BitStatsLevel))
+        {
+            fprintf(stderr, "Level %d is not yet complete under '%s' (no _complete sentinel) -- "
+                            "the solver hasn't finished writing it, so its Ring_3_4 files can't be "
+                            "read yet. This is expected, not corruption; try an earlier level or wait.\n",
+                    config.ring34BitStatsLevel, storeDir);
+            if (fpOut != stdout)
+                fclose(fpOut);
+            return 1;
+        }
+
         if (config.ring34BitStatsLimit == 0)
             fprintf(stderr, "Reading ALL Ring_3_4 records for level %d under '%s' -- this decompresses the whole level, no limit set...\n",
                     config.ring34BitStatsLevel, storeDir);
