@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.31.0] - 2026-07-21
+
+### Fixed the per-level "uncompressed" stat to reflect real ring-format size
+
+- **The problem**: `DoEndOfLevelMerge`'s finalize-stats block computed the level's "uncompressed equivalent" as `uniqueBoards * sizeof(UINT64_PAIR)` (16 bytes/board) -- a leftover from the pre-v0.27.0 flat row-major format. This badly overstates true size in the current ring-nested format, since `CellsInUse`/`Ring_2` fold many boards into far fewer group records; the flat-format guess was off by roughly 18x on real level-19 data (18.4TB guessed vs. the real ~5.6-5.8 bits/board `OthelloRingMasterStoreStats` already reports correctly). Found while reconciling a live console reading against `OthelloRingMasterStoreStats`'s CSV output.
+- **The fix**: after each color's ring files are written and closed, their trailers are read back and `recordCount * width` summed across all four (`CellsInUse`, `Ring_1`-if-applicable, `Ring_2`-if-applicable, `Ring_3_4`) -- the same computation `OthelloRingMasterStoreStats` already does correctly. Fatals if a just-written file can't be reopened (real corruption, not legitimate absence).
+- Display-only fix -- no storage format, resume logic, or correctness path touched. Takes effect for the next level this build completes; historical sentinel-stored levels keep their originally-recorded (flat-formula) figures, since the fix isn't retroactive.
+
+### Doubled MAX_MW_SEGS (512 -> 1024) alongside a RAM upgrade
+
+- The user upgraded the solver machine from 64GB to 128GB RAM (2x32GB -> 4x32GB DDR5), roughly doubling the per-thread merge-writer buffer (26.9GB -> 55.4GB) so more GPU-flush segments accumulate -- and get deduped -- in memory before a flush to NVMe, reducing the volume that reaches the (much more expensive) end-of-level merge.
+- `MAX_MW_SEGS` is a fixed bookkeeping-array bound, independent of the RAM-driven byte-capacity check that actually decides when a buffer is "full". Live level-22 data showed segment count already at ~244/512 after only 6 minutes with zero flushes yet -- on track to hit the fixed segment cap well before the doubled byte capacity ever filled, which would have forced flushes at roughly the old cadence and capped the RAM upgrade's real benefit. Caught and fixed before level 22 had made meaningful progress (6 minutes, 0.42% of the level), so nothing was lost by stopping to apply it.
+
+
 ## [0.30.0] - 2026-07-11
 
 ### Eliminated a full, wasted level-read on every level transition

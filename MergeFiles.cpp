@@ -1780,6 +1780,7 @@ struct PlayerData
     uint64_t  unique;
     int64_t   storeReservation;   /* bytes pre-reserved on the store drive for final output */
     int64_t   actualBytes;        /* actual bytes written to the output file */
+    uint64_t  uncompBytes;        /* real ring-format uncompressed-equivalent (sum of recordCount*width across the up-to-4 ring files just written) */
     int64_t   yInputBytes;        /* store-drive storeMerge input bytes pre-reclaimed before Phase 1b */
     bool      yInputsPreReclaimed; /* true when yInputBytes were reclaimed early */
 
@@ -2279,6 +2280,41 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         }
         DriveReclaim(pSt, pCfg->storeDrive, pd.storeReservation - actual);
 
+        /* Real ring-format uncompressed-equivalent bytes across the same
+        ** (up to 4) files, read back from each file's own trailer
+        ** recordCount. This replaces the old flat-format approximation
+        ** (unique boards * sizeof(UINT64_PAIR)) that predates the
+        ** ring-nested store redesign and badly overstates true size --
+        ** CellsInUse/Ring_2 fold many boards into far fewer group records,
+        ** which is the entire point of the nested format. See
+        ** OthelloRingMasterStoreStats/StoreStatsScan.cpp's accumulateRingFile
+        ** for the read-only version of this same computation.
+        */
+        uint64_t uncompBytes = 0;
+        {
+            struct { const char* path; bool shaped; RSFRecordShape shape; int width; } parts[4] = {
+                { cellsInUsePath, false, RSF_SHAPE_PAIR64,     16 },
+                { ring1Path,      true,  RSF_SHAPE_RING_LEVEL, 12 },
+                { ring2Path,      true,  RSF_SHAPE_RING_LEVEL, 12 },
+                { ring34Path,     true,  RSF_SHAPE_LEAF16,      2 },
+            };
+            for (int i = 0; i < 4; i++)
+            {
+                if (!parts[i].path)
+                    continue;
+                RSFReader* pReader = parts[i].shaped ? RSFOpenShaped(parts[i].path, parts[i].shape)
+                                                      : RSFOpen(parts[i].path);
+                if (!pReader)
+                    Fatal(FATAL_FILE_OPEN,
+                          "EndOfLevelMerge: level %d %s -- '%s' was just written but its trailer "
+                          "could not be read back (corrupt or truncated)",
+                          level, RSFPlayerStr(player), parts[i].path);
+                uncompBytes += RSFReaderTrailer(pReader)->recordCount * (uint64_t)parts[i].width;
+                RSFClose(&pReader);
+            }
+        }
+        pd.uncompBytes = uncompBytes;
+
         /* Reclaim source-file drive space as each input is deleted.
         ** Skip store-drive inputs that were pre-reclaimed in Phase 1b.
         */
@@ -2358,14 +2394,16 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     uint64_t blackUnique = data[RSF_PLAYER_BLACK].unique;
     uint64_t whiteUnique = data[RSF_PLAYER_WHITE].unique;
     uint64_t totalUnique = blackUnique + whiteUnique;
-    uint64_t outBytes    = totalUnique * sizeof(UINT64_PAIR)
-                         + (blackUnique > 0 ? sizeof(RSFTrailer) : 0)
-                         + (whiteUnique > 0 ? sizeof(RSFTrailer) : 0);
 
     uint64_t bwd = pSt->levelStats[level].boardsWrittenToDisk;
     pSt->levelStats[level].mrgDupsRemoved =
         (bwd >= totalUnique) ? (bwd - totalUnique) : 0;
-    pSt->levelStats[level].mergeBytes       = outBytes;
+    /* Real ring-format uncompressed-equivalent (recordCount*width summed
+    ** across both colors' just-written files -- see uncompBytes above),
+    ** not the old flat totalUnique*sizeof(UINT64_PAIR) approximation.
+    */
+    pSt->levelStats[level].mergeBytes       = data[RSF_PLAYER_BLACK].uncompBytes
+                                             + data[RSF_PLAYER_WHITE].uncompBytes;
     pSt->levelStats[level].mergeActualBytes = (uint64_t)(data[RSF_PLAYER_BLACK].actualBytes
                                                         + data[RSF_PLAYER_WHITE].actualBytes);
 

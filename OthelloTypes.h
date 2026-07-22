@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.30.0"
+#define VERSION "0.31.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -41,8 +41,15 @@
 ** byte-space check in RunMergeWriterJob. Sized with headroom for many
 ** segments per level; cost is trivial (roughly 40 bytes/segment/color x
 ** MAX_WRITERS).
+**
+** Doubled 512->1024 alongside the 2026-07-21 RAM upgrade (26.9GB -> 55.4GB
+** per MW thread): segment count scales with buffer byte capacity for a
+** given average segment size, and live level-22 data showed segment count
+** already at ~244/512 after only 6 minutes with zero flushes yet -- the
+** old bound was on track to become the real flush trigger instead of the
+** byte-space check, capping the benefit the bigger buffers were added for.
 */
-#define MAX_MW_SEGS 512
+#define MAX_MW_SEGS 1024
 
 /*
 ** Maximum number of files opened simultaneously for a single-color k-way
@@ -103,7 +110,7 @@ typedef struct __LevelStats
     /* Merge phase (populated after merge; 0 until then) */
     uint64_t mrgDupsRemoved;
     uint32_t mergeFilesWritten;   /* store files written this level (0-2; 2 = black + white) */
-    uint64_t mergeBytes;          /* uncompressed equivalent (uniqueOut * 16 + trailers)     */
+    uint64_t mergeBytes;          /* real ring-format uncompressed equivalent -- sum of recordCount*width across every ring/cellsinuse file written this level, both colors (see DoEndOfLevelMerge) */
     uint64_t mergeActualBytes;    /* actual bytes written to store drive (compressed if .rsfz) */
 
     /* Game logic */
