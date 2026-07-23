@@ -4,6 +4,23 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.5] - 2026-07-23
+
+### Fixed a v0.32.4 build error (volatile-qualifier mismatch)
+
+- First real build attempt of the v2 consolidation redesign failed:
+  `MergeFiles.cpp(1910): error C2440: cannot convert from 'volatile int [30]' to 'int *'`.
+  `mwBlack/WhiteConsolidatedUpTo` were made `volatile int` in v0.32.4 (touched by multiple
+  concurrent examination threads without a lock now), but `DoBackgroundConsolidation`'s
+  local `pConsolUp` was still declared plain `int*` -- assigning a `volatile int*` to a
+  plain `int*` drops the qualifier, which the compiler correctly rejects.
+- Fixed by declaring `pConsolUp` as `volatile int*`. Swept the rest of `MergeFiles.cpp`,
+  `StatsListener.cpp`, `InitSolver.cpp`, and `OthelloRingMaster.cpp` for any other pointer
+  aliases to the now-`volatile` arrays (`mwBlack/WhiteFileCount`,
+  `mwBlack/WhiteConsolidatedUpTo`) -- this was the only one; everywhere else either reads
+  a value into a plain local (always fine) or assigns directly to an array element
+  (always fine).
+
 ## [0.32.4] - 2026-07-23
 
 ### Redesigned background consolidation: lock-free ticketing + claim registry (v2)

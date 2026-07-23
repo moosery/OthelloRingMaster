@@ -1907,7 +1907,7 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         return;   /* pair is at its concurrency cap -- decline, nothing claimed yet */
 
     int  ticketSnap = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[writerIdx][player], 0, 0);
-    int* pConsolUp  = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo : pSt->mwWhiteConsolidatedUpTo;
+    volatile int* pConsolUp = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo : pSt->mwWhiteConsolidatedUpTo;
 
     /* Advance the low-water HINT past any prefix that's either already
     ** graduated (>= cap) or permanently gone, stopping at the first claimed
