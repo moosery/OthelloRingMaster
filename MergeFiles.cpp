@@ -1142,6 +1142,13 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
     auto flushBlack = [&]()
     {
         if (!hasBlack) return;
+        /* Held for the whole index-pick-through-increment span, not just the
+        ** bookkeeping touches -- DoBackgroundConsolidation can pick this same
+        ** (ti, black) output index if it reads mwBlackFileCount[ti] before
+        ** this flush increments it. See fileIndexCS's declaration comment
+        ** (OthelloTypes.h) for the real corruption this fixes.
+        */
+        EnterCriticalSection(&pSt->fileIndexCS[ti][RSF_PLAYER_BLACK]);
         int blackFileIdx = pSt->mwBlackFileCount[ti];
         char blackPath[MAX_FULL_PATH_NAME];
         if (lz4MW)
@@ -1166,11 +1173,13 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
         if (blackCount == 0) { DeleteFileA(blackPath); blackFileBytes = 0; }
         else { pSt->mwBlackFileCount[ti]++; blackFilesCreated = 1;
                InterlockedIncrement((volatile LONG*)&pSt->mwBlackPhysicalFileCount[ti]); }
+        LeaveCriticalSection(&pSt->fileIndexCS[ti][RSF_PLAYER_BLACK]);
     };
 
     auto flushWhite = [&]()
     {
         if (!hasWhite) return;
+        EnterCriticalSection(&pSt->fileIndexCS[ti][RSF_PLAYER_WHITE]);
         int whiteFileIdx = pSt->mwWhiteFileCount[ti];
         char whitePath[MAX_FULL_PATH_NAME];
         if (lz4MW)
@@ -1195,6 +1204,7 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
         if (whiteCount == 0) { DeleteFileA(whitePath); whiteFileBytes = 0; }
         else { pSt->mwWhiteFileCount[ti]++; whiteFilesCreated = 1;
                InterlockedIncrement((volatile LONG*)&pSt->mwWhitePhysicalFileCount[ti]); }
+        LeaveCriticalSection(&pSt->fileIndexCS[ti][RSF_PLAYER_WHITE]);
     };
 
     std::thread blackThread(flushBlack);
@@ -1847,6 +1857,15 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     ** merges next (cross-drive merge or the final end-of-level merge).
     */
     bool compress = (pCfg->compressMode == COMPRESS_ALL);
+
+    /* Nested inside imergeCS (always acquired in this order, never the
+    ** reverse, to avoid deadlock) from the outIdx read through the increment
+    ** below -- FlushMergeWriterBuffer holds this same (writerIdx, player)
+    ** lock for its own index-pick-through-increment span, so the two can
+    ** never both land on the same output index. See fileIndexCS's
+    ** declaration comment (OthelloTypes.h) for the corruption this fixes.
+    */
+    EnterCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
     int  outIdx   = pCount[writerIdx];
     char outPath[MAX_FULL_PATH_NAME];
     bool lz4MW    = compress && pCfg->lz4Drives[0]
@@ -1891,6 +1910,7 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         */
         DeleteFileA(outPath);
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
+        LeaveCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
         LeaveCriticalSection(&pSt->imergeCS);
         return;
     }
@@ -1922,6 +1942,7 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesRemoved, (LONG64)batchCount);
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
 
+    LeaveCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
     LeaveCriticalSection(&pSt->imergeCS);
 }
 

@@ -4,6 +4,36 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.2] - 2026-07-23
+
+### Fixed a real data-corruption race between flush and consolidation
+
+- **Found by the validation run itself** (exactly what it was for): a fresh disposable-store
+  run showed level 15's black board count short by ~1.77 billion boards versus the
+  independently-confirmed real production number, and a second run crashed outright:
+  `RSFZReadByte: read past end of LZ4 frame -- 'E:\...\writer_black_0002.rsfzl'
+  (743615672/3461934990 records read)` -- a file whose trailer claimed 3.46B records but
+  whose actual LZ4 stream ran dry after only 743M (21%).
+- **Root cause**: `FlushMergeWriterBuffer`'s own output-file index allocation
+  (`mwBlack/WhiteFileCount[ti]`, read before writing, incremented only after close) was
+  never protected by any lock -- safe historically, since only that one writer thread ever
+  touched its own writer's counter. `DoBackgroundConsolidation` (v0.32.0) reads and writes
+  that same counter under `imergeCS`, but that lock alone didn't help since the flush side
+  never took it. A flush and a consolidation merge for the same (drive, color) could both
+  read the counter before either incremented it, both pick the same output file index, and
+  both write to that same path concurrently -- corrupting it.
+- **Fix**: new `fileIndexCS[MAX_WRITERS][2]` lock, granular per (writer drive, color) so
+  unrelated drives/colors stay fully concurrent. `FlushMergeWriterBuffer` now holds its own
+  (drive, color) lock for the entire index-pick-through-increment span;
+  `DoBackgroundConsolidation` holds the same lock (nested inside `imergeCS`, always
+  acquired in that order to prevent deadlock) for its own outIdx-read-through-increment
+  span. The two can no longer land on the same index.
+- Still not validated against real data -- the disposable test store that exposed this bug
+  is now stale (contains the corrupted file and the wrong level 15 count) and needs a fresh
+  run from level 0 to actually confirm the fix before this goes anywhere near the real
+  6x6 production store.
+
+
 ## [0.32.1] - 2026-07-23
 
 ### Documented --memory-limit's real minimum

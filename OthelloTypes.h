@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.32.1"
+#define VERSION "0.32.2"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -290,6 +290,30 @@ typedef struct __OthelloRingMasterState
 
     /* Serializes DoCrossDriveIntermediateMerge so only one thread runs it at a time. */
     CRITICAL_SECTION imergeCS;
+
+    /*
+    ** Per-(writer, color) lock protecting file-index allocation specifically.
+    ** Found necessary 2026-07-23: FlushMergeWriterBuffer's own index pick
+    ** (mwBlack/WhiteFileCount[ti], read before writing, incremented only
+    ** after close) was never protected by any lock -- safe historically,
+    ** since only that one writer thread ever touched its own ti's counter.
+    ** DoBackgroundConsolidation (a separate thread pool) reads/writes the
+    ** SAME counter under imergeCS, but imergeCS alone doesn't help when the
+    ** other side never takes it -- a flush and a consolidation merge for the
+    ** same (writerIdx, player) could both read the counter before either
+    ** incremented it, both pick the same output index, and both write the
+    ** same file path concurrently, corrupting it (confirmed live: a
+    ** writer_black_NNNN.rsfzl file with a trailer recordCount far exceeding
+    ** what was actually readable). Indexed [writerIdx][player] (not a single
+    ** global lock) so unrelated drives/colors stay fully concurrent -- only
+    ** the exact (writer, color) pair that could actually collide is
+    ** serialized. FlushMergeWriterBuffer's flushBlack/flushWhite each hold
+    ** this for their own (ti, color) from index-read through increment;
+    ** DoBackgroundConsolidation holds it (nested inside imergeCS, always
+    ** acquired in that order to avoid deadlock) from outIdx-read through its
+    ** own increment.
+    */
+    CRITICAL_SECTION fileIndexCS[MAX_WRITERS][2];
 
     /*
     ** Per-writer intermediate merge progress (written by MW threads, read by

@@ -673,6 +673,9 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     int numGPUFeederThreads = 1;
 
     InitializeCriticalSection(&pState->imergeCS);
+    for (int wi = 0; wi < MAX_WRITERS; wi++)
+        for (int p = 0; p < 2; p++)
+            InitializeCriticalSection(&pState->fileIndexCS[wi][p]);
 
     pState->pMergeWriterPool = new ThreadPool(numMWThreads, "MergeWriterPool");
     if (!pState->pMergeWriterPool)
@@ -774,4 +777,7 @@ void CleanupSolver(POthelloRingMasterState pState)
         MemFree(pState->pMWBuffer[i]);
     MemFree(pState->pPingPongBuffer);
     DeleteCriticalSection(&pState->imergeCS);
+    for (int wi = 0; wi < MAX_WRITERS; wi++)
+        for (int p = 0; p < 2; p++)
+            DeleteCriticalSection(&pState->fileIndexCS[wi][p]);
 }
