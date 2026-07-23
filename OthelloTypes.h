@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.31.0"
+#define VERSION "0.32.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -68,6 +68,15 @@
 #define DRIVE_SPACE_LOW_GB    20ULL
 #define DRIVE_SPACE_LOW_BYTES (DRIVE_SPACE_LOW_GB * 1024ULL * 1024ULL * 1024ULL)
 
+/*
+** Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp):
+** a file at or above this size is left alone -- not worth the merge cost for
+** the marginal dedup reward once it's already this big; the final end-of-level
+** merge will handle it. Adjustable constant, not derived from anything else.
+*/
+#define CONSOLIDATION_SIZE_CAP_GB    100ULL
+#define CONSOLIDATION_SIZE_CAP_BYTES (CONSOLIDATION_SIZE_CAP_GB * 1024ULL * 1024ULL * 1024ULL)
+
 /* Structures and Types */
 
 /*
@@ -106,6 +115,11 @@ typedef struct __LevelStats
     uint64_t boardsWrittenToDisk;
     uint64_t mwFilesCreated;
     uint64_t mwBytes;
+
+    /* Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp) */
+    uint64_t consolidationFilesCreated;   /* merged-output files the consolidator produced this level */
+    uint64_t consolidationFilesRemoved;   /* original files it absorbed/deleted (folded into those outputs) */
+    uint64_t consolidationBytesWritten;   /* real on-disk bytes of consolidator-created files */
 
     /* Merge phase (populated after merge; 0 until then) */
     uint64_t mrgDupsRemoved;
@@ -149,6 +163,7 @@ typedef struct __OthelloRingMasterConfig
     uint16_t  statsPort;
     uint8_t   compressMode;   /* COMPRESS_NONE / COMPRESS_STORE_ONLY / COMPRESS_ALL */
     char      lz4Drives[64];  /* drive letters that get LZ4 on top of varint (e.g. "DEF") */
+    uint64_t  memoryLimitBytes; /* --memory-limit override (MM_SPECIFIED); 0 = use MM_RECOMMENDED against real free RAM */
 } OthelloRingMasterConfig, * POthelloRingMasterConfig;
 
 /*
@@ -163,6 +178,15 @@ typedef struct __OthelloRingMasterState
     int                  resumeLevel;             /* first level not found in storeDir at startup (0 = fresh run) */
     volatile bool        terminateThreads;
     volatile bool        terminateStatsListener;
+
+    /* Set (in addition to terminateThreads) on Ctrl+C/shutdown, AND set alone
+    ** (terminateThreads left untouched) at each level's normal solve->merge
+    ** transition, so any in-flight background consolidation
+    ** (DoBackgroundConsolidation, MergeFiles.cpp) wraps up promptly rather
+    ** than running arbitrarily long into the transition window. Reset to
+    ** false at the start of each new level.
+    */
+    volatile bool        terminateConsolidation;
     const char* volatile currentPhase;             /* points to a string literal; set by main thread at each phase transition */
     volatile int64_t     mergeProgressBytes[2];    /* bytes written per player to final merge output; [0]=white [1]=black */
     uint64_t             mergeTotalInputBytes[2];  /* total uncompressed record bytes per player; set before merge threads start */
@@ -200,6 +224,20 @@ typedef struct __OthelloRingMasterState
     int      mwWhiteFileCount[MAX_WRITERS];     /* completed white writer files (incremented after close) */
     int      mwBlackFilesConsumed[MAX_WRITERS]; /* files already merged by DoCrossDriveIntermediateMerge  */
     int      mwWhiteFilesConsumed[MAX_WRITERS]; /* files already merged by DoCrossDriveIntermediateMerge  */
+
+    /* Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp):
+    ** an independent prefix boundary, separate from mwBlackFilesConsumed/
+    ** mwWhiteFilesConsumed above -- "everything below this index has already
+    ** been looked at by the consolidator, either merged away and replaced by
+    ** a file appended at a higher index, or left alone because it was already
+    ** >= CONSOLIDATION_SIZE_CAP." Always clamped to never fall behind the
+    ** real mwBlack/WhiteFilesConsumed (DoCrossDriveIntermediateMerge can
+    ** consume a file the consolidator hasn't examined yet -- that's fine,
+    ** it's just as done either way). The two mechanisms never need to
+    ** coordinate beyond sharing imergeCS.
+    */
+    int      mwBlackConsolidatedUpTo[MAX_WRITERS];
+    int      mwWhiteConsolidatedUpTo[MAX_WRITERS];
     size_t   gpuAccumCapacity;   /* GPU accumulator board capacity (shared black+white) */
     size_t   mwStagingSize;      /* bytes per staging area = gpuAccumCapacity * sizeof(UINT64_PAIR) */
 
@@ -275,6 +313,38 @@ typedef struct __OthelloRingMasterState
     uint64_t          mwFlushStartTickMs[MAX_WRITERS];  /* GetTickCount64() when the flush starts */
 
     /*
+    ** Per-writer background consolidation progress (DoBackgroundConsolidation,
+    ** MergeFiles.cpp). Same active-flag convention as imerge/mwFlush above.
+    ** consolidationPlayer identifies which color is currently active (only
+    ** meaningful while consolidationActive[i] is set), since one writer
+    ** drive's consolidation job handles black then white in sequence.
+    ** consolidationTotalBytes/DoneBytes are real record*16-byte
+    ** (uncompressed-equivalent) counts, same convention as every other
+    ** progress line -- summed from each batch file's own trailer recordCount
+    ** before the merge starts, not a byte-for-byte disk read rate.
+    */
+    volatile int      consolidationActive[MAX_WRITERS];
+    int               consolidationPlayer[MAX_WRITERS];
+    volatile int64_t  consolidationTotalBytes[MAX_WRITERS];
+    volatile int64_t  consolidationDoneBytes[MAX_WRITERS];
+    uint64_t          consolidationStartTickMs[MAX_WRITERS];
+
+    /*
+    ** Real-time physical file count per writer/color -- unlike
+    ** mwBlack/WhiteFileCount (monotonically increasing, never decremented),
+    ** this tracks what's actually sitting on disk right now: incremented on
+    ** any file creation (a genuine GPU flush or a consolidation merge
+    ** output), decremented on any deletion (consolidation absorbing
+    ** originals, or DoCrossDriveIntermediateMerge consuming files).
+    ** Needed because consolidation creates gaps in the file-index range
+    ** (deletes some originals, replaces them with one file at a higher
+    ** index), so file count alone can no longer answer "how many files
+    ** really exist right now."
+    */
+    volatile int      mwBlackPhysicalFileCount[MAX_WRITERS];
+    volatile int      mwWhitePhysicalFileCount[MAX_WRITERS];
+
+    /*
     ** Fallback intermediate merge destination on the store drive (used when
     ** no medium drive has enough space for even one MAX_MERGE_FANIN batch).
     */
@@ -302,4 +372,5 @@ typedef struct __OthelloRingMasterState
     ThreadPool* pMergeWriterPool;
     ThreadPool* pGPUFeederThreadPool;
     ThreadPool* pStatsThreadPool;
+    ThreadPool* pConsolidationPool;   /* background small-file consolidator -- separate from pMergeWriterPool, draws from otherwise-idle cores */
 } OthelloRingMasterState, * POthelloRingMasterState;

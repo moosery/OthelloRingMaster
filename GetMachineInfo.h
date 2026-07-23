@@ -37,8 +37,9 @@ typedef struct __MachineInfo
 ** Function: GetMachineInfo
 ** @brief    Runs all three machine-capability probes (memory budget, drive
 **           detection, GPU query) and fills pMachineInfo.
-** @param    pCacheDir    - directory for the drive-benchmark cache
-** @param    pDriveStr    - drive letters to probe (see GetDriveInformation)
-** @param    pMachineInfo - out: filled with the probed machine information
+** @param    pCacheDir        - directory for the drive-benchmark cache
+** @param    pDriveStr        - drive letters to probe (see GetDriveInformation)
+** @param    memoryLimitBytes - --memory-limit override (0 = none, use MM_RECOMMENDED against real free RAM)
+** @param    pMachineInfo     - out: filled with the probed machine information
 */
-void GetMachineInfo(char* pCacheDir, char* pDriveStr, PMachineInfo pMachineInfo);
+void GetMachineInfo(char* pCacheDir, char* pDriveStr, uint64_t memoryLimitBytes, PMachineInfo pMachineInfo);

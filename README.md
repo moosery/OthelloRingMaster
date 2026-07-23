@@ -41,6 +41,9 @@ Store drive (Y:)
     LZ4-compress staging → in-memory pool segment (no disk I/O)
          │  [pool full: FlushMergeWriterBuffer k-way merges pool (black + white concurrently)
          │              → writer_black/white_NNNN.rsfz on D:, E:, ...]
+         │  [background, separate idle-core thread pool: DoBackgroundConsolidation opportunistically
+         │              merges small writer files together on D:/E: themselves, capped at
+         │              CONSOLIDATION_SIZE_CAP_BYTES -- shrinks what DoEndOfLevelMerge has to process]
          │  [NVMe low: DoCrossDriveIntermediateMerge → imerge files on F:]
          │
     DoEndOfLevelMerge (parallel: black thread + white thread)
@@ -69,6 +72,17 @@ Store drive (Y:)
 - **Merge-writer threads** -- one per fast NVMe directory, same staging/pool/flush design as
   `OthelloLevelBlaster`'s own (see that project's README for the full mechanics) -- opaque
   16-byte board keys move through this whole stage without any ring-specific handling.
+- **Background small-file consolidation** -- a dedicated thread pool (separate from the
+  merge-writer pool, so it draws from otherwise-idle cores and never competes with active
+  flush-writing) opportunistically merges small D:/E: writer files together as they
+  accumulate, using an independent prefix boundary alongside the one
+  `DoCrossDriveIntermediateMerge` already tracks. Files at or above
+  `CONSOLIDATION_SIZE_CAP_BYTES` (100GB, adjustable) are left alone -- not worth the merge
+  cost once a file is already that large; new incoming files start their own fresh
+  consolidation lineage independent of an already-graduated one. Shrinks both the fan-in and
+  the total volume `DoEndOfLevelMerge` has to process, on top of whatever
+  `DoCrossDriveIntermediateMerge` itself later folds in -- the two mechanisms coordinate only
+  via a shared lock and never need to know about each other beyond that.
 - **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_FANIN`)
   grouped-merge design as `OthelloLevelBlaster`. When a level's merge target is ring format
   (i.e. always, for the real per-level store), cascade's own intermediate group files become
@@ -127,6 +141,10 @@ OthelloRingMaster.exe [options]
   --compress-store-only  Compress only intermediate merge output; writer files stay .rsf
   --no-compress     Write writer/intermediate merge files as .rsf (uncompressed)
   --lz4-drives DEF  Drive letters that get LZ4 on top of varint (.rsfzl) [default: DEF]
+  --memory-limit SZ Force the memory budget instead of using real free RAM (e.g. "4GB",
+                    "512MB") -- testing/validation only, e.g. to force more frequent
+                    merge-writer flushes at small levels. Still capped by actual free RAM.
+                    [default: unset, uses recommended-vs-free-RAM]
   --help            Show this help
 ```
 

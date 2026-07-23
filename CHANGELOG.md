@@ -4,6 +4,61 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.0] - 2026-07-23
+
+### Background small-file consolidation (new feature)
+
+- **The idea**: with the RAM upgrade in place, the user noticed D:/E: writer files stay
+  relatively small (~20GB) against the much bigger 55.3GB buffer, and reasoned that
+  proactively merging small files together on otherwise-idle CPU cores -- shrinking both
+  fan-in and total volume before `DoEndOfLevelMerge` ever sees them -- should meaningfully
+  speed up the (currently dominant, 46-105+ hour) end-of-level merge phase, at negligible
+  cost given D:/E: are NVMe (3965-5393 MB/s) and RingMaster only actively used 4 of 32
+  available CPU threads.
+- **New dedicated thread pool** (`pConsolidationPool`, size 2, one per writer drive) --
+  deliberately separate from `pMergeWriterPool` so it never competes with active
+  flush-writing for the same threads.
+- **`DoBackgroundConsolidation`** (`MergeFiles.cpp`): merges runs of consecutive small
+  writer files via the existing `KWayMergeFiles`, triggered right after every flush
+  completes. Files at or above `CONSOLIDATION_SIZE_CAP_BYTES` (100GB, adjustable) are left
+  alone -- not worth the merge cost once a file is already that large; new incoming files
+  start their own fresh consolidation lineage rather than trying to grow an
+  already-graduated one further.
+- **Coexists with `DoCrossDriveIntermediateMerge` without either needing to know about the
+  other**: a new, independent prefix boundary (`mwBlack/WhiteConsolidatedUpTo`) tracks what
+  the consolidator has examined, separate from the existing `mwBlack/WhiteFilesConsumed`
+  boundary `DoCrossDriveIntermediateMerge` owns -- lets a graduated (already-large) file be
+  skipped without violating that other boundary's strict-prefix invariant. Both share the
+  existing `imergeCS` lock.
+- **Termination safety**: a new `terminateConsolidation` flag, distinct from the global
+  `terminateThreads` (Ctrl+C/shutdown) -- set alone at each level's normal solve->merge
+  transition so an in-flight consolidation wraps up promptly (deleting only its own
+  partial output file; original inputs are untouched either way) rather than running
+  arbitrarily long into the transition. Set alongside `terminateThreads` on a real
+  shutdown.
+- **New `--memory-limit SIZE` CLI flag** (e.g. `--memory-limit 512MB`) -- forces the memory
+  budget instead of using real free RAM, for validating this against small levels without
+  needing to wait for real multi-trillion-board volume. Wires up `MemoryMode::MM_SPECIFIED`
+  (`Utility/SysMemInfo.h`), which already existed but was never exposed on the command line.
+- **New observability**, since none of this is worth anything if it can't be watched
+  working: per-level `consolidationFilesCreated`/`consolidationFilesRemoved` counters; a
+  real-time physical file count (`mwBlack/WhitePhysicalFileCount`, incremented/decremented
+  on every create/delete) since the existing file-count fields never decrement and can't
+  answer "how many files really exist right now" once consolidation starts creating gaps
+  in the index range; and a live `Consol D:/E:` progress line (GB done/total, %, MB/s,
+  boards/s, ETA) matching the existing `Flush`/`Merge` line format.
+- **Fixed a real diagnostic gap found along the way**: `RSFZReadByte`'s six `Fatal()` calls
+  (`Utility/RingStoreFile.cpp`) reported only a bare message with no file path -- caught
+  live when a real `Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed")` fired with no
+  way to tell which file failed (root-caused separately to a USB power-management setting
+  bouncing the NAS connection, not real corruption). `RSFReader` now carries its own path
+  (real path for file-backed readers, a `<in-memory pool segment>` placeholder for
+  memory-backed ones), and all six Fatals now include it plus bytes-consumed/total,
+  records-read/total, and `ferror`/`feof` where relevant.
+- Not yet run against real production data -- validated via a separate, disposable store
+  (the live Y: store renamed aside first) before this touches the actual multi-week 6x6 run.
+
+
 ## [0.31.0] - 2026-07-21
 
 ### Fixed the per-level "uncompressed" stat to reflect real ring-format size

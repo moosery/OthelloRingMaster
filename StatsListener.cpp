@@ -214,9 +214,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
     /* Current-level drive breakdown (cumulative since level start) */
     n += snprintf(buf + n, bufSize - n,
-                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht\n");
+                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht  OnDskB  OnDskW\n");
     n += snprintf(buf + n, bufSize - n,
-                  "  ---  -----  ------------  ------------  ------------  ----  ----\n");
+                  "  ---  -----  ------------  ------------  ------------  ----  ----  ------  ------\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
@@ -227,25 +227,33 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         int liveBlack = pSt->mwBlackFileCount[i];
         int liveWhite = pSt->mwWhiteFileCount[i];
 
+        /* On-disk counts are real-time (created minus deleted, including
+        ** consolidation's own creates/deletes) -- unlike liveBlack/liveWhite
+        ** above (total ever created, never decremented), this answers "how
+        ** many files actually exist right now."
+        */
+        int onDiskBlack = pSt->mwBlackPhysicalFileCount[i];
+        int onDiskWhite = pSt->mwWhitePhysicalFileCount[i];
+
         bool showUncomp = (d->levelBytesUncompressed > 0
                            && d->levelBytesUncompressed != d->levelBytesWritten);
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
+                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d  %6d  %6d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten      / (1024.0 * 1024.0 * 1024.0),
                           d->levelBytesUncompressed / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          liveBlack, liveWhite);
+                          liveBlack, liveWhite, onDiskBlack, onDiskWhite);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d\n",
+                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d  %6d  %6d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          liveBlack, liveWhite);
+                          liveBlack, liveWhite, onDiskBlack, onDiskWhite);
     }
 
     /* MW compressed-pool segment counts: live vs. lifetime high-water (never
@@ -380,6 +388,42 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         }
     }
 
+    /* Active background consolidation (DoBackgroundConsolidation, one per
+    ** writer drive -- same live-progress convention as the Flush block
+    ** above). Same "records popped x 16 bytes" uncompressed-equivalent
+    ** convention as every other progress line, not a literal disk-write rate.
+    */
+    {
+        uint64_t nowMs = GetTickCount64();
+        for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+        {
+            if (pSt->consolidationActive[ti])
+            {
+                double   doneGB  = pSt->consolidationDoneBytes[ti]  / (1024.0 * 1024.0 * 1024.0);
+                double   totalGB = pSt->consolidationTotalBytes[ti] / (1024.0 * 1024.0 * 1024.0);
+                double   pct     = (pSt->consolidationTotalBytes[ti] > 0)
+                                   ? 100.0 * (double)pSt->consolidationDoneBytes[ti]
+                                           / (double)pSt->consolidationTotalBytes[ti]
+                                   : 0.0;
+                uint64_t elapsedMs = nowMs - pSt->consolidationStartTickMs[ti];
+                double   mbps      = (elapsedMs > 200 && pSt->consolidationDoneBytes[ti] > 0)
+                                   ? (double)pSt->consolidationDoneBytes[ti] / (1024.0 * 1024.0)
+                                     / (elapsedMs / 1000.0)
+                                   : 0.0;
+                static const char* kConsolPlayerNames[2] = { "white", "black" };
+                char detail[24];
+                snprintf(detail, sizeof(detail), "%c: %s", pSt->mwDirectory[ti][0],
+                         kConsolPlayerNames[pSt->consolidationPlayer[ti]]);
+                char etaStr[16];
+                FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
+                n += snprintf(buf + n, bufSize - n,
+                              "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
+                              "Consol", detail, doneGB, totalGB, pct, mbps,
+                              MbpsToBoardsPerSec(mbps), etaStr);
+            }
+        }
+    }
+
     /* Active end-of-level merge (per player, runs concurrently for white and black) */
     if (pSt->currentPhase && strcmp(pSt->currentPhase, "Merging to store") == 0)
     {
@@ -467,9 +511,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     /* --- Level history table (completed levels + current in-progress row) --- */
     n += snprintf(buf + n, bufSize - n, "\n");
     n += snprintf(buf + n, bufSize - n,
-                  "Lvl        BoardsIn        Generated         GpuDups         MrgDups         Written       SlvGB  Duration      ns/brd\n");
+                  "Lvl        BoardsIn        Generated         GpuDups         MrgDups         Written       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
     n += snprintf(buf + n, bufSize - n,
-                  "---  --------------  ---------------  --------------  --------------  --------------  ----------  --------  ----------\n");
+                  "---  --------------  ---------------  --------------  --------------  --------------  ----------  ----------  ------  ------  ----------\n");
     for (int lvl = 0; lvl < curLevel; lvl++)
     {
         if (n >= (int)bufSize - 512) break;   /* safety guard -- buffer nearly full */
@@ -479,7 +523,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         uint64_t ns = (ls->boardsReadFromStore > 0)
                       ? (uint64_t)(ls->totalNanos / (int64_t)ls->boardsReadFromStore) : 0;
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %8s  %10llu\n",
+                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
                       lvl,
                       (unsigned long long)ls->boardsReadFromStore,
                       (unsigned long long)ls->boardsGenerated,
@@ -488,6 +532,8 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                       (unsigned long long)ls->boardsWrittenToDisk,
                       ls->mwBytes / (1024.0 * 1024.0 * 1024.0),
                       dur,
+                      (unsigned long long)ls->consolidationFilesCreated,
+                      (unsigned long long)ls->consolidationFilesRemoved,
                       (unsigned long long)ns);
     }
     /* Current level row with live partial data and phase tag */
@@ -516,7 +562,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                      100.0 * (double)cur->boardsReadFromStore
                            / (double)pSt->currentLevelTotalBoards);
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %8s  %s\n",
+                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %s\n",
                       curLevel,
                       (unsigned long long)cur->boardsReadFromStore,
                       (unsigned long long)cur->boardsGenerated,
@@ -525,6 +571,8 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                       (unsigned long long)cur->boardsWrittenToDisk,
                       cur->mwBytes / (1024.0 * 1024.0 * 1024.0),
                       curDur,
+                      (unsigned long long)cur->consolidationFilesCreated,
+                      (unsigned long long)cur->consolidationFilesRemoved,
                       phaseStr);
     }
 

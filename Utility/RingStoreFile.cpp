@@ -596,6 +596,7 @@ void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count)
 struct __RSFReader
 {
     FILE*       f;
+    char        path[MAX_FULL_PATH_NAME];   /* real path for file-backed readers; a descriptive placeholder for memory-backed ones -- so a Fatal mid-stream identifies which file/segment failed */
     RSFTrailer  trailer;
     uint64_t    recordsRead;
     bool        compressed;
@@ -645,7 +646,8 @@ static uint8_t RSFZReadByte(RSFReader* r)
         while (r->lz4DecBufPos >= r->lz4DecBufFilled)
         {
             if (r->lz4FrameDone)
-                Fatal(FATAL_FILE_OPEN, "RSFZReadByte: read past end of LZ4 frame");
+                Fatal(FATAL_FILE_OPEN, "RSFZReadByte: read past end of LZ4 frame -- '%s' (%llu/%llu records read)",
+                      r->path, (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
 
             /* Refill compBuf from disk if empty */
             if (r->compBufPos >= r->compBufFilled)
@@ -653,13 +655,19 @@ static uint8_t RSFZReadByte(RSFReader* r)
                 uint64_t remaining = r->compBytesTotal - r->compBytesConsumed;
                 if (remaining == 0 || r->memMode)
                     Fatal(FATAL_FILE_OPEN,
-                          "RSFZReadByte: LZ4 compressed stream exhausted before frame end");
+                          "RSFZReadByte: LZ4 compressed stream exhausted before frame end -- '%s' "
+                          "(%llu/%llu bytes consumed, %llu/%llu records read)",
+                          r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                          (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
                 size_t toRead = (remaining < (uint64_t)r->compBufSize)
                                 ? (size_t)remaining : r->compBufSize;
                 r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
                 r->compBufPos    = 0;
                 if (r->compBufFilled == 0)
-                    Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed");
+                    Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed -- '%s' (%llu/%llu bytes consumed, "
+                          "ferror=%d, feof=%d)",
+                          r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                          ferror(r->f), feof(r->f));
             }
 
             size_t srcSize = r->compBufFilled - r->compBufPos;
@@ -670,8 +678,9 @@ static uint8_t RSFZReadByte(RSFReader* r)
                                           nullptr);
             if (LZ4F_isError(ret))
                 Fatal(FATAL_FILE_OPEN,
-                      "RSFZReadByte: LZ4 decompress error: %s",
-                      LZ4F_getErrorName(ret));
+                      "RSFZReadByte: LZ4 decompress error: %s -- '%s' (%llu/%llu bytes consumed)",
+                      LZ4F_getErrorName(ret), r->path,
+                      (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal);
             r->compBufPos        += srcSize;
             r->compBytesConsumed += srcSize;
             r->lz4DecBufPos       = 0;
@@ -690,12 +699,18 @@ static uint8_t RSFZReadByte(RSFReader* r)
     {
         uint64_t remaining = r->compBytesTotal - r->compBytesConsumed;
         if (remaining == 0 || r->memMode)
-            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint stream exhausted before record count reached");
+            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint stream exhausted before record count reached -- "
+                  "'%s' (%llu/%llu bytes consumed, %llu/%llu records read)",
+                  r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                  (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
         size_t toRead = (remaining < (uint64_t)r->compBufSize) ? (size_t)remaining : r->compBufSize;
         r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
         r->compBufPos    = 0;
         if (r->compBufFilled == 0)
-            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint read failed (short read on compressed stream)");
+            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint read failed (short read on compressed stream) -- "
+                  "'%s' (%llu/%llu bytes consumed, ferror=%d, feof=%d)",
+                  r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                  ferror(r->f), feof(r->f));
     }
     r->compBytesConsumed++;
     return r->compBuf[r->compBufPos++];
@@ -808,6 +823,7 @@ RSFReader* RSFOpen(const char* path)
     }
     memset(r, 0, sizeof(RSFReader));
     r->f          = f;
+    strncpy(r->path, path, sizeof(r->path) - 1);
     r->trailer    = trailer;
     r->compressed = compressed;
     RSFShapeMeta(RSF_SHAPE_PAIR64, &r->numFields, r->fieldBytes, &r->recordBytes);
@@ -871,6 +887,7 @@ RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_
     if (!r) Fatal(FATAL_ALLOCATION_FAILED, "RSFReaderOpenZMem: cannot allocate reader");
     memset(r, 0, sizeof(RSFReader));
 
+    strncpy(r->path, "<in-memory pool segment>", sizeof(r->path) - 1);
     r->compressed          = true;
     r->memMode             = true;
     r->trailer.recordCount = recordCount;
@@ -1008,6 +1025,7 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
     }
     memset(r, 0, sizeof(RSFReader));
     r->f          = f;
+    strncpy(r->path, path, sizeof(r->path) - 1);
     r->trailer    = trailer;
     r->compressed = true;
     r->shape      = shape;

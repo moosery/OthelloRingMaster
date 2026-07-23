@@ -14,18 +14,19 @@
 /* Forward declarations for helpers defined below, alphabetically. */
 static void getDriveInformation(char* pCacheDir, char* pDriveStr, PMachineDriveInfo driveInfo);
 static void getGpuInformation(PGpuInformation pGpuInfo);
-static void getSystemMemoryInfoBudget(PMemoryInfo pMemInfo);
+static void getSystemMemoryInfoBudget(uint64_t memoryLimitBytes, PMemoryInfo pMemInfo);
 
 /*
 ** Function: GetMachineInfo
 ** @brief    Runs all three machine-capability probes and fills pMachineInfo.
-** @param    pCacheDir    - directory for the drive-benchmark cache
-** @param    pDriveStr    - drive letters to probe
-** @param    pMachineInfo - out: filled with the probed machine information
+** @param    pCacheDir        - directory for the drive-benchmark cache
+** @param    pDriveStr        - drive letters to probe
+** @param    memoryLimitBytes - --memory-limit override (0 = none)
+** @param    pMachineInfo     - out: filled with the probed machine information
 */
-void GetMachineInfo(char* pCacheDir, char* pDriveStr, PMachineInfo pMachineInfo)
+void GetMachineInfo(char* pCacheDir, char* pDriveStr, uint64_t memoryLimitBytes, PMachineInfo pMachineInfo)
 {
-    getSystemMemoryInfoBudget(&pMachineInfo->g_memInfo);
+    getSystemMemoryInfoBudget(memoryLimitBytes, &pMachineInfo->g_memInfo);
     getDriveInformation(pCacheDir, pDriveStr, &(pMachineInfo->g_drives));
     getGpuInformation(&(pMachineInfo->g_gpuInfo));
 }
@@ -56,13 +57,22 @@ static void getGpuInformation(PGpuInformation pGpuInfo)
 
 /*
 ** Function: getSystemMemoryInfoBudget
-** @brief    Resolves the recommended memory budget against free RAM and prints it.
-** @param    pMemInfo - out: filled with the resolved memory budget
+** @brief    Resolves the memory budget against free RAM and prints it.
+** @param    memoryLimitBytes - --memory-limit override (0 = none, use MM_RECOMMENDED)
+** @param    pMemInfo         - out: filled with the resolved memory budget
 */
-static void getSystemMemoryInfoBudget(PMemoryInfo pMemInfo)
+static void getSystemMemoryInfoBudget(uint64_t memoryLimitBytes, PMemoryInfo pMemInfo)
 {
-    pMemInfo->requestedMode  = MM_RECOMMENDED;
-    pMemInfo->requestedBytes = 0;   /* not used for MM_RECOMMENDED */
+    if (memoryLimitBytes > 0)
+    {
+        pMemInfo->requestedMode  = MM_SPECIFIED;
+        pMemInfo->requestedBytes = memoryLimitBytes;
+    }
+    else
+    {
+        pMemInfo->requestedMode  = MM_RECOMMENDED;
+        pMemInfo->requestedBytes = 0;   /* not used for MM_RECOMMENDED */
+    }
 
     CalcMemoryBudget(pMemInfo);
 
@@ -73,5 +83,5 @@ static void getSystemMemoryInfoBudget(PMemoryInfo pMemInfo)
     sizeToGBString(pMemInfo->budgetedSize, budgetStr, sizeof(budgetStr));
     printf("Total Physical RAM     : %s\n", physStr);
     printf("Available Physical RAM : %s\n", availStr);
-    printf("Memory Budget          : %s\n", budgetStr);
+    printf("Memory Budget          : %s%s\n", budgetStr, memoryLimitBytes > 0 ? "  (--memory-limit override)" : "");
 }

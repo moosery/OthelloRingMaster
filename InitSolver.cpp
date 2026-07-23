@@ -152,7 +152,8 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
 {
     pState->playLevel        = 0;
     pState->numMergeWriters  = 0;
-    pState->terminateThreads = false;
+    pState->terminateThreads       = false;
+    pState->terminateConsolidation = false;
     size_t availableMemoryToAllocate = pMachineInfo->g_memInfo.budgetedSize;
 
     /* Four batch-sized slots: reader keeps 3 filled while GPU reads the other */
@@ -283,6 +284,8 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
         pState->mwWhiteFileCount[i]     = 0;
         pState->mwBlackFilesConsumed[i] = 0;
         pState->mwWhiteFilesConsumed[i] = 0;
+        pState->mwBlackConsolidatedUpTo[i] = 0;
+        pState->mwWhiteConsolidatedUpTo[i] = 0;
     }
 
     double totalAllocGB = (pState->pingPongBufferSize
@@ -635,7 +638,7 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         SHEmptyRecycleBinA(nullptr, root, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
     }
 
-    GetMachineInfo(pConfig->cacheDirName, pConfig->useDrives, pMachineInfo);
+    GetMachineInfo(pConfig->cacheDirName, pConfig->useDrives, pConfig->memoryLimitBytes, pMachineInfo);
     computeState(pConfig, pState, pMachineInfo);
 
     /* ScanForResumeLevel returns the index of the first missing store file.
@@ -683,13 +686,24 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     if (!pState->pStatsThreadPool)
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create stats thread pool");
 
+    /* Background small-file consolidator: one thread per writer drive,
+    ** mirroring pMergeWriterPool's own shape -- deliberately a SEPARATE pool
+    ** so it draws from otherwise-idle cores and never competes with active
+    ** flush-writing on pMergeWriterPool. See DoBackgroundConsolidation
+    ** (MergeFiles.cpp) and project_background_nvme_consolidation_design memory.
+    */
+    pState->pConsolidationPool = new ThreadPool(numMWThreads, "ConsolidationPool");
+    if (!pState->pConsolidationPool)
+        Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create consolidation thread pool");
+
     AcquireInstanceLock(pState->storeDirectory);
 
     pState->pMergeWriterPool->Start();
     pState->pGPUFeederThreadPool->Start();
     pState->pStatsThreadPool->Start();
+    pState->pConsolidationPool->Start();
 
-    /* Block until every worker thread in all three pools is genuinely
+    /* Block until every worker thread in all four pools is genuinely
     ** running (not just constructed) before the solve loop starts
     ** dispatching jobs -- otherwise the very first level's timing would
     ** silently include an unpredictable amount of thread-spin-up noise.
@@ -697,12 +711,15 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     pState->pMergeWriterPool->WaitUntilReady();
     pState->pGPUFeederThreadPool->WaitUntilReady();
     pState->pStatsThreadPool->WaitUntilReady();
+    pState->pConsolidationPool->WaitUntilReady();
 
     int lastLevel = (int)pConfig->boardSize * (int)pConfig->boardSize - 4;
     LoggerLog("\nSolver configuration:\n");
     LoggerLog("  Board size         : %dx%d  (levels 0..%d)\n",
               pConfig->boardSize, pConfig->boardSize, lastLevel);
     LoggerLog("  MW threads         : %d\n", numMWThreads);
+    LoggerLog("  Consolidation thrds: %d  (cap %llu GB)\n", numMWThreads,
+              (unsigned long long)CONSOLIDATION_SIZE_CAP_GB);
     LoggerLog("  GPU threads        : %d\n", numGPUFeederThreads);
     LoggerLog("  Stats port         : %d\n", (int)pConfig->statsPort);
     LoggerLog("  Store format       : %s\n",
@@ -734,14 +751,17 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
 
 /*
 ** Function: CleanupSolver
-** @brief    Releases the instance lock, stops and frees all three thread
+** @brief    Releases the instance lock, stops and frees all four thread
 **           pools, frees every large buffer, and destroys the imerge critical section.
 ** @param    pState - the solver state to tear down
 */
 void CleanupSolver(POthelloRingMasterState pState)
 {
     ReleaseInstanceLock();
-    pState->terminateThreads = true;
+    pState->terminateThreads       = true;
+    pState->terminateConsolidation = true;
+    pState->pConsolidationPool->Stop();
+    delete pState->pConsolidationPool;
     pState->pMergeWriterPool->Stop();
     delete pState->pMergeWriterPool;
     pState->pGPUFeederThreadPool->Stop();

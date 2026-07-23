@@ -958,8 +958,9 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     return unique;
 }
 
-/* Forward declaration (defined after FlushMergeWriterBuffer) */
+/* Forward declarations (defined after FlushMergeWriterBuffer) */
 static void DoCrossDriveIntermediateMerge(PSolveContext pCtx);
+static void SubmitBackgroundConsolidation(PSolveContext pCtx, int writerIdx);
 
 /*
 ** ============================================================
@@ -1163,7 +1164,8 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
                           &pSt->terminateThreads, &pSt->mwFlushDoneBytes[ti]);
         blackCount = RSFWriterClose(pw, &blackFileBytes);
         if (blackCount == 0) { DeleteFileA(blackPath); blackFileBytes = 0; }
-        else { pSt->mwBlackFileCount[ti]++; blackFilesCreated = 1; }
+        else { pSt->mwBlackFileCount[ti]++; blackFilesCreated = 1;
+               InterlockedIncrement((volatile LONG*)&pSt->mwBlackPhysicalFileCount[ti]); }
     };
 
     auto flushWhite = [&]()
@@ -1191,7 +1193,8 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
                           &pSt->terminateThreads, &pSt->mwFlushDoneBytes[ti]);
         whiteCount = RSFWriterClose(pw, &whiteFileBytes);
         if (whiteCount == 0) { DeleteFileA(whitePath); whiteFileBytes = 0; }
-        else { pSt->mwWhiteFileCount[ti]++; whiteFilesCreated = 1; }
+        else { pSt->mwWhiteFileCount[ti]++; whiteFilesCreated = 1;
+               InterlockedIncrement((volatile LONG*)&pSt->mwWhitePhysicalFileCount[ti]); }
     };
 
     std::thread blackThread(flushBlack);
@@ -1246,6 +1249,15 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
     }
     if (needsMerge)
         DoCrossDriveIntermediateMerge(pCtx);
+
+    /* Give the background consolidator a look at this drive too -- new
+    ** candidate files can only have appeared right here, after a flush
+    ** completes. A no-op queue entry (DoBackgroundConsolidation finds
+    ** nothing to do) is cheap and normal; skip queuing entirely if this
+    ** flush produced no files at all (both colors' pools were empty).
+    */
+    if (filesCreated > 0)
+        SubmitBackgroundConsolidation(pCtx, ti);
 }
 
 /*
@@ -1351,6 +1363,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
         int     numFiles         = 0;
         int64_t totalBytes       = 0;
         int64_t totalUncompBytes = 0;
+        int     filesPerWriter[MAX_WRITERS] = {};   /* how many of this player's gathered files came from each writer -- for the physical-file-count decrement below */
 
         for (int ti = 0; ti < pSt->numMergeWriters && numFiles < kMaxFiles; ti++)
         {
@@ -1387,6 +1400,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                     Fatal(FATAL_ALLOCATION_FAILED, "DoCrossDriveIntermediateMerge: path alloc");
                 strcpy(paths[numFiles], path);
                 sizes[numFiles] = sz;
+                filesPerWriter[ti]++;
                 totalBytes     += sz;
                 totalUncompBytes += PeekRecordCount(path) * (int64_t)sizeof(UINT64_PAIR);
                 numFiles++;
@@ -1642,6 +1656,20 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                 MemFree(paths[fi]);
             }
 
+            /* Real physical file count drops by exactly what was just
+            ** deleted, per writer -- these files may include ones a
+            ** background consolidation pass created (see
+            ** DoBackgroundConsolidation), which is fine; this loop doesn't
+            ** care how a file came to exist, only that it's gone now.
+            */
+            for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+            {
+                if (filesPerWriter[ti] == 0) continue;
+                volatile int* pPhys = (player == RSF_PLAYER_BLACK)
+                    ? &pSt->mwBlackPhysicalFileCount[ti] : &pSt->mwWhitePhysicalFileCount[ti];
+                InterlockedExchangeAdd((volatile LONG*)pPhys, -filesPerWriter[ti]);
+            }
+
             LoggerLog("DoCrossDriveIntermediateMerge: %s done (%llu unique)\n",
                       RSFPlayerStr(player), unique);
         }
@@ -1661,6 +1689,261 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
     }
 
     LeaveCriticalSection(&pSt->imergeCS);
+}
+
+/*
+** ============================================================
+** DoBackgroundConsolidation
+**
+** Proactively merges small D:/E: writer files together on a separate,
+** dedicated thread pool (pConsolidationPool) so real dedup work happens on
+** otherwise-idle cores during solve, shrinking the fan-in/volume the final
+** end-of-level merge into Y: has to process. Complements
+** DoCrossDriveIntermediateMerge above (reactive, file-count/space
+** triggered, runs on pMergeWriterPool instead) rather than replacing it --
+** the two never need to coordinate beyond sharing imergeCS.
+**
+** Uses its own independent prefix boundary (mwBlack/WhiteConsolidatedUpTo,
+** OthelloTypes.h) rather than mwBlack/WhiteFilesConsumed, so a file that's
+** already >= CONSOLIDATION_SIZE_CAP_BYTES can be skipped (boundary advances
+** past it, untouched) without violating DoCrossDriveIntermediateMerge's own
+** strict-prefix invariant on mwBlack/WhiteFilesConsumed.
+**
+** Whole operation (scan, merge, cleanup) runs under imergeCS -- batches are
+** capped at CONSOLIDATION_SIZE_CAP_BYTES, far smaller than a typical
+** DoCrossDriveIntermediateMerge pass, so lock hold time stays bounded; this
+** avoids needing a third "claimed but not yet finalized" state.
+** ============================================================
+*/
+
+/* Soft cap on files merged in one consolidation pass -- CONSOLIDATION_SIZE_CAP_BYTES
+** bounds this naturally in practice; this just guards against a pathological
+** run of many tiny files in one go.
+*/
+#define MAX_CONSOLIDATION_BATCH 64
+
+/*
+** Function: FindConsolidationCandidate
+** @brief    Locates writer file (writerIdx, player, idx), trying LZ4, then
+**           plain-compressed, then uncompressed naming -- same fallback
+**           order DoCrossDriveIntermediateMerge's own gather loop uses, so
+**           this behaves correctly even across a mixed-mode/transition run.
+** @param    outPath  - out: full path, if found
+** @param    outSize  - capacity of outPath
+** @param    pCtx     - solve context
+** @param    writerIdx - which writer drive/thread
+** @param    player   - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    idx      - file index to look up
+** @param    pFileSize - out: real on-disk byte size, if found
+** @return   true if the file exists.
+*/
+static bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCtx,
+                                        int writerIdx, int player, int idx, uint64_t* pFileSize)
+{
+    POthelloRingMasterState  pSt  = pCtx->pState;
+    POthelloRingMasterConfig pCfg = pCtx->pConfig;
+    const char* writerDir = pSt->mwDirectory[writerIdx];
+    char        writerDL  = writerDir[0];
+    bool        compress  = (pCfg->compressMode == COMPRESS_ALL);
+    bool        writerLZ4 = compress && pCfg->lz4Drives[0]
+                          && (strchr(pCfg->lz4Drives, writerDL) != nullptr);
+
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    bool found = false;
+
+    if (writerLZ4 && !found) {
+        RSFZLNameWriterFile(outPath, outSize, writerDir, player, idx);
+        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
+    }
+    if (compress && !found) {
+        RSFZNameWriterFile(outPath, outSize, writerDir, player, idx);
+        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
+    }
+    if (!found) {
+        RSFNameWriterFile(outPath, outSize, writerDir, player, idx);
+        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
+    }
+    if (!found)
+        return false;
+
+    *pFileSize = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+    return true;
+}
+
+/*
+** Function: DoBackgroundConsolidation
+** @brief    One consolidation attempt for one (writer drive, player) pair:
+**           finds the longest run of consecutive, still-small unconsumed
+**           files starting at this pair's own consolidation boundary, and
+**           if 2+ qualify, merges them into one new file. A no-op if there's
+**           nothing to do right now (not an error) -- see file section
+**           comment above for the full design.
+** @param    pCtx      - solve context
+** @param    writerIdx - which writer drive/thread (0..numMergeWriters-1)
+** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+*/
+static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int player)
+{
+    POthelloRingMasterState  pSt   = pCtx->pState;
+    POthelloRingMasterConfig pCfg  = pCtx->pConfig;
+    int                      level = (int)pSt->playLevel;
+
+    EnterCriticalSection(&pSt->imergeCS);
+
+    int* pConsumed = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFilesConsumed     : pSt->mwWhiteFilesConsumed;
+    int* pCount    = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFileCount         : pSt->mwWhiteFileCount;
+    int* pConsolUp = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo  : pSt->mwWhiteConsolidatedUpTo;
+
+    int start = pConsolUp[writerIdx];
+    if (start < pConsumed[writerIdx])
+        start = pConsumed[writerIdx];   /* never fall behind cross-drive merge's own consumption */
+
+    /* Skip past any already-graduated (>= cap) files at the front -- they're
+    ** done as far as this consolidator is concerned, just left in place for
+    ** the final merge to handle.
+    */
+    char     path[MAX_FULL_PATH_NAME];
+    uint64_t sz;
+    while (start < pCount[writerIdx]
+           && FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, start, &sz)
+           && sz >= CONSOLIDATION_SIZE_CAP_BYTES)
+        start++;
+    pConsolUp[writerIdx] = start;   /* record the skip even if nothing else happens below */
+
+    /* Collect a run of consecutive small files starting at 'start'. */
+    char*    batchPaths[MAX_CONSOLIDATION_BATCH];
+    int      batchCount   = 0;
+    uint64_t runningSize  = 0;
+    int      scan         = start;
+    while (scan < pCount[writerIdx] && batchCount < MAX_CONSOLIDATION_BATCH)
+    {
+        if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, scan, &sz))
+            break;   /* an empty flush's file was deleted -- stop, next pass will re-check */
+        if (sz >= CONSOLIDATION_SIZE_CAP_BYTES)
+            break;   /* graduated file ends this run */
+        if (batchCount > 0 && runningSize + sz >= CONSOLIDATION_SIZE_CAP_BYTES)
+            break;   /* combining would cross the cap -- leave it for next time */
+
+        batchPaths[batchCount] = (char*)MemMalloc("consolidatePath", strlen(path) + 1);
+        if (!batchPaths[batchCount])
+            Fatal(FATAL_ALLOCATION_FAILED, "DoBackgroundConsolidation: path alloc");
+        strcpy(batchPaths[batchCount], path);
+        runningSize += sz;
+        batchCount++;
+        scan++;
+    }
+
+    if (batchCount < 2)
+    {
+        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
+        LeaveCriticalSection(&pSt->imergeCS);
+        return;   /* nothing worth merging right now */
+    }
+
+    /* Merge the batch into one new file, appended at the current end of the
+    ** sequence (index = pCount[writerIdx]) -- same trick
+    ** DoCrossDriveIntermediateMerge relies on elsewhere: a higher index than
+    ** anything existing, so it's naturally still "pending" for whoever
+    ** merges next (cross-drive merge or the final end-of-level merge).
+    */
+    bool compress = (pCfg->compressMode == COMPRESS_ALL);
+    int  outIdx   = pCount[writerIdx];
+    char outPath[MAX_FULL_PATH_NAME];
+    bool lz4MW    = compress && pCfg->lz4Drives[0]
+                 && (strchr(pCfg->lz4Drives, pSt->mwDirectory[writerIdx][0]) != nullptr);
+    if (lz4MW)
+        RSFZLNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
+    else if (compress)
+        RSFZNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
+    else
+        RSFNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
+
+    /* Live progress setup -- same uncompressed-equivalent (recordCount * 16
+    ** bytes) convention every other progress line uses. Non-active fields
+    ** are set before the active flag so a concurrent stats read never sees
+    ** a half-initialized in-progress state.
+    */
+    int64_t totalProgressBytes = 0;
+    for (int i = 0; i < batchCount; i++)
+        totalProgressBytes += PeekRecordCount(batchPaths[i]) * (int64_t)sizeof(UINT64_PAIR);
+    pSt->consolidationPlayer[writerIdx]     = player;
+    pSt->consolidationTotalBytes[writerIdx] = totalProgressBytes;
+    pSt->consolidationDoneBytes[writerIdx]  = 0;
+    pSt->consolidationStartTickMs[writerIdx] = GetTickCount64();
+    pSt->consolidationActive[writerIdx]     = 1;
+
+    KWayMergeFiles(batchPaths, batchCount, outPath, &pSt->consolidationDoneBytes[writerIdx],
+                   compress, &pSt->terminateConsolidation);
+
+    pSt->consolidationActive[writerIdx] = 0;
+
+    if (pSt->terminateConsolidation)
+    {
+        /* Level finished (or Ctrl+C) mid-merge -- abandon cleanly. The output
+        ** file KWayMergeFiles just closed still has a valid trailer (it
+        ** always finalizes on the way out) but only holds a PARTIAL result,
+        ** so it must be deleted, not left looking complete. Originals are
+        ** untouched -- neither deleted nor marked consolidated -- so nothing
+        ** real is lost; they're just picked up again by whatever runs next
+        ** (a future level's fresh consolidation pass never sees them, since
+        ** every restart wipes the writer dirs wholesale, but a same-level
+        ** DoCrossDriveIntermediateMerge or the final merge will).
+        */
+        DeleteFileA(outPath);
+        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
+        LeaveCriticalSection(&pSt->imergeCS);
+        return;
+    }
+
+    /* Success: the new file is real and complete. Delete the originals it
+    ** replaced, then advance both counters together so the new file is
+    ** simultaneously "created" and its inputs are "already examined."
+    */
+    for (int i = 0; i < batchCount; i++)
+    {
+        DeleteFileA(batchPaths[i]);
+        MemFree(batchPaths[i]);
+    }
+    pCount[writerIdx]    = outIdx + 1;
+    pConsolUp[writerIdx] = scan;
+
+    /* Net physical file count change: +1 for the new merged file, -batchCount
+    ** for the originals it replaced -- one atomic op, no transient in-between
+    ** value another thread's read could observe.
+    */
+    volatile int* pPhys = (player == RSF_PLAYER_BLACK)
+        ? &pSt->mwBlackPhysicalFileCount[writerIdx] : &pSt->mwWhitePhysicalFileCount[writerIdx];
+    InterlockedExchangeAdd((volatile LONG*)pPhys, 1 - batchCount);
+
+    WIN32_FILE_ATTRIBUTE_DATA outFad = {};
+    uint64_t outBytes = GetFileAttributesExA(outPath, GetFileExInfoStandard, &outFad)
+        ? (((uint64_t)outFad.nFileSizeHigh << 32) | (uint64_t)outFad.nFileSizeLow) : 0;
+    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesCreated, 1);
+    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesRemoved, (LONG64)batchCount);
+    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
+
+    LeaveCriticalSection(&pSt->imergeCS);
+}
+
+/*
+** Function: SubmitBackgroundConsolidation
+** @brief    Queues one consolidation attempt for both colors on one writer
+**           drive onto pConsolidationPool -- called right after a flush
+**           completes for that drive, since that's the only time new
+**           candidate files can have appeared. A queued attempt that finds
+**           nothing to do is a normal, cheap no-op.
+** @param    pCtx      - solve context
+** @param    writerIdx - which writer drive/thread just flushed
+*/
+static void SubmitBackgroundConsolidation(PSolveContext pCtx, int writerIdx)
+{
+    pCtx->pState->pConsolidationPool->QueueJob(
+        [pCtx, writerIdx](uint32_t /*thdIdx*/)
+        {
+            DoBackgroundConsolidation(pCtx, writerIdx, RSF_PLAYER_BLACK);
+            DoBackgroundConsolidation(pCtx, writerIdx, RSF_PLAYER_WHITE);
+        }
+    );
 }
 
 /*

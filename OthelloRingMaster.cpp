@@ -61,6 +61,10 @@ static void PrintUsage(const char* prog)
     printf("                    the ring nested-index's own delta+varint+LZ4 tier regardless of this)\n");
     printf("  --lz4-drives DEF  Drive letters that get LZ4 on top of varint (.rsfzl) [default: DEF]\n");
     printf("                    Only applies when --compress is active. Use \"\" to disable.\n");
+    printf("  --memory-limit SZ Force the memory budget instead of using real free RAM\n");
+    printf("                    (e.g. \"4GB\", \"512MB\") -- testing/validation only, e.g. to force\n");
+    printf("                    more frequent merge-writer flushes at small levels. Still capped\n");
+    printf("                    by actual free RAM. [default: unset, uses recommended-vs-free-RAM]\n");
     printf("  --help            Show this help\n\n");
     printf("Auto-resume: if storeDir already contains level files from a previous run,\n");
     printf("  the solver automatically resumes from the first missing level.\n");
@@ -84,6 +88,7 @@ static void ParseArgs(int argc, char* argv[])
     strncpy(g_config.cacheDirName,        "C:\\OthelloRingMaster\\Cache",  sizeof(g_config.cacheDirName)        - 1);
     strncpy(g_config.storeDirNameNoDrive, "\\OthelloRingMaster\\Store",    sizeof(g_config.storeDirNameNoDrive) - 1);
     strncpy(g_config.lz4Drives,           "DEFY",                         sizeof(g_config.lz4Drives)           - 1);
+    g_config.memoryLimitBytes = 0;   /* 0 = no override, use MM_RECOMMENDED against real free RAM */
 
     for (int i = 1; i < argc; i++)
     {
@@ -156,6 +161,13 @@ static void ParseArgs(int argc, char* argv[])
             REQUIRE_NEXT("--port")
             g_config.statsPort = (uint16_t)atoi(argv[i]);
         }
+        else if (strcmp(argv[i], "--memory-limit") == 0)
+        {
+            REQUIRE_NEXT("--memory-limit")
+            uint64_t n = ParseMemorySize(argv[i]);
+            if (n == 0) { printf("ERROR: --memory-limit could not parse '%s'\n", argv[i]); exit(1); }
+            g_config.memoryLimitBytes = n;
+        }
         else
         {
             printf("ERROR: unknown argument '%s'\n\n", argv[i]);
@@ -199,7 +211,8 @@ static BOOL WINAPI CtrlHandler(DWORD dwCtrlType)
     if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT)
     {
         LoggerLog("Ctrl+C received - requesting graceful shutdown...\n");
-        g_state.terminateThreads = true;
+        g_state.terminateThreads       = true;
+        g_state.terminateConsolidation = true;
         return TRUE;
     }
     return FALSE;
@@ -391,7 +404,15 @@ int main(int argc, char* argv[])
             g_state.mwWhiteFileCount[i]     = 0;
             g_state.mwBlackFilesConsumed[i] = 0;
             g_state.mwWhiteFilesConsumed[i] = 0;
+            g_state.mwBlackConsolidatedUpTo[i] = 0;
+            g_state.mwWhiteConsolidatedUpTo[i] = 0;
+            g_state.consolidationActive[i]      = 0;
+            g_state.consolidationTotalBytes[i]  = 0;
+            g_state.consolidationDoneBytes[i]   = 0;
+            g_state.mwBlackPhysicalFileCount[i] = 0;
+            g_state.mwWhitePhysicalFileCount[i] = 0;
         }
+        g_state.terminateConsolidation = false;   /* fresh per level; see solve->merge transition below */
         for (int p = 0; p < 2; p++)
         {
             g_state.imergeActive[p]          = 0;
@@ -436,8 +457,19 @@ int main(int argc, char* argv[])
         SubmitGpuFeederJob(&ctx, (uint8_t)level);
         WaitForPoolIdle(g_state.pGPUFeederThreadPool);
 
-        /* Drain any merge-writer jobs still in flight, then flush remaining buffer segments */
+        /* Drain any merge-writer jobs still in flight, then flush remaining buffer segments.
+        ** pConsolidationPool must also go idle here, after pMergeWriterPool (which is the
+        ** only thing that queues consolidation jobs) -- otherwise a still-running background
+        ** consolidation could still be renaming/deleting/creating writer files at the exact
+        ** moment DoEndOfLevelMerge starts enumerating them. terminateConsolidation is set
+        ** first (not the global terminateThreads -- this isn't a real shutdown) so an
+        ** in-flight consolidation merge wraps up promptly (abandoning its partial output,
+        ** originals untouched -- see DoBackgroundConsolidation) rather than running
+        ** arbitrarily long into this transition.
+        */
         WaitForPoolIdle(g_state.pMergeWriterPool);
+        g_state.terminateConsolidation = true;
+        WaitForPoolIdle(g_state.pConsolidationPool);
         if (!g_state.terminateThreads)
         {
             g_state.currentPhase = "Flushing buffers";
