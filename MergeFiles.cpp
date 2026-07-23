@@ -1360,6 +1360,19 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
         int* consumedArr = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFilesConsumed
                                                         : pSt->mwWhiteFilesConsumed;
 
+        /* Lock out any live DoBackgroundConsolidation pass on these exact
+        ** (writer, player) pairs before touching their files -- nested
+        ** inside imergeCS (already held for this whole function, always
+        ** acquired in that order, never the reverse, so this can't deadlock
+        ** against DoBackgroundConsolidation, which only ever holds one such
+        ** lock and never imergeCS). Held across gather + merge + delete
+        ** below for this color, released before moving to the other color,
+        ** so that color's consolidation on every writer stays fully
+        ** concurrent with this rare, reactive path the whole time.
+        */
+        for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+            EnterCriticalSection(&pSt->fileIndexCS[ti][player]);
+
         /* Gather unconsumed writer files [consumed..snap) from each MW
         ** directory. Explicit index enumeration keeps us away from any file
         ** the other thread may currently be writing (its index >= snap by
@@ -1435,6 +1448,8 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
             MemFree(sizes);
             for (int ti = 0; ti < pSt->numMergeWriters; ti++)
                 consumedArr[ti] = snapArr[ti];
+            for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+                LeaveCriticalSection(&pSt->fileIndexCS[ti][player]);
             continue;
         }
 
@@ -1690,6 +1705,9 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 
         MemFree(paths);
         MemFree(sizes);
+
+        for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+            LeaveCriticalSection(&pSt->fileIndexCS[ti][player]);
     }
 
     for (int p = RSF_PLAYER_WHITE; p <= RSF_PLAYER_BLACK; p++)
@@ -1711,7 +1729,12 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 ** end-of-level merge into Y: has to process. Complements
 ** DoCrossDriveIntermediateMerge above (reactive, file-count/space
 ** triggered, runs on pMergeWriterPool instead) rather than replacing it --
-** the two never need to coordinate beyond sharing imergeCS.
+** the two coordinate only through fileIndexCS[writerIdx][player] (see that
+** lock's declaration comment, OthelloTypes.h): DoCrossDriveIntermediateMerge
+** additionally takes it, nested inside its own imergeCS, for exactly the
+** writer/color pairs it's about to touch, so it can't race a live
+** consolidation pass on those specific pairs while everything else stays
+** concurrent.
 **
 ** Uses its own independent prefix boundary (mwBlack/WhiteConsolidatedUpTo,
 ** OthelloTypes.h) rather than mwBlack/WhiteFilesConsumed, so a file that's
@@ -1719,10 +1742,20 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 ** past it, untouched) without violating DoCrossDriveIntermediateMerge's own
 ** strict-prefix invariant on mwBlack/WhiteFilesConsumed.
 **
-** Whole operation (scan, merge, cleanup) runs under imergeCS -- batches are
-** capped at CONSOLIDATION_SIZE_CAP_BYTES, far smaller than a typical
-** DoCrossDriveIntermediateMerge pass, so lock hold time stays bounded; this
-** avoids needing a third "claimed but not yet finalized" state.
+** Whole operation (scan, merge, cleanup) runs under fileIndexCS[writerIdx]
+** [player] ONLY -- not imergeCS. An earlier version of this held the global
+** imergeCS for the whole span; since batches can run up to
+** CONSOLIDATION_SIZE_CAP_BYTES (minutes of real merge I/O) and imergeCS is a
+** single system-wide lock, that meant one drive's consolidation silently
+** starved every other drive/color's consolidation attempts for its whole
+** duration (confirmed live 2026-07-23 -- one status column would run for
+** minutes while its counterpart never appeared at all). The finer
+** fileIndexCS[writerIdx][player] lock gives every (writer, color) pair full
+** independent concurrency while still correctly serializing two overlapping
+** attempts on the SAME pair (two queued jobs for one writer can land on
+** different pool threads back to back). See fileIndexCS's declaration
+** comment (OthelloTypes.h) for the full picture, including how
+** DoCrossDriveIntermediateMerge now coordinates against this lock too.
 ** ============================================================
 */
 
@@ -1798,7 +1831,12 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     POthelloRingMasterConfig pCfg  = pCtx->pConfig;
     int                      level = (int)pSt->playLevel;
 
-    EnterCriticalSection(&pSt->imergeCS);
+    /* Held for this whole function -- scan through cleanup -- not imergeCS.
+    ** See this lock's declaration comment (OthelloTypes.h) for why: only
+    ** this exact (writerIdx, player) pair is serialized, so every other
+    ** drive/color pair's consolidation runs fully concurrently with this one.
+    */
+    EnterCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
 
     int* pConsumed = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFilesConsumed     : pSt->mwWhiteFilesConsumed;
     int* pCount    = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFileCount         : pSt->mwWhiteFileCount;
@@ -1846,7 +1884,7 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     if (batchCount < 2)
     {
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        LeaveCriticalSection(&pSt->imergeCS);
+        LeaveCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
         return;   /* nothing worth merging right now */
     }
 
@@ -1858,14 +1896,13 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     */
     bool compress = (pCfg->compressMode == COMPRESS_ALL);
 
-    /* Nested inside imergeCS (always acquired in this order, never the
-    ** reverse, to avoid deadlock) from the outIdx read through the increment
-    ** below -- FlushMergeWriterBuffer holds this same (writerIdx, player)
-    ** lock for its own index-pick-through-increment span, so the two can
-    ** never both land on the same output index. See fileIndexCS's
-    ** declaration comment (OthelloTypes.h) for the corruption this fixes.
+    /* outIdx is picked under the SAME fileIndexCS[writerIdx][player] lock
+    ** entered at the top of this function (still held here) -- this is what
+    ** keeps FlushMergeWriterBuffer's own index pick for this exact
+    ** (writerIdx, player) pair from ever landing on the same output index.
+    ** See fileIndexCS's declaration comment (OthelloTypes.h) for the
+    ** corruption this fixes.
     */
-    EnterCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
     int  outIdx   = pCount[writerIdx];
     char outPath[MAX_FULL_PATH_NAME];
     bool lz4MW    = compress && pCfg->lz4Drives[0]
@@ -1911,7 +1948,6 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         DeleteFileA(outPath);
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
         LeaveCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
-        LeaveCriticalSection(&pSt->imergeCS);
         return;
     }
 
@@ -1943,7 +1979,6 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
 
     LeaveCriticalSection(&pSt->fileIndexCS[writerIdx][player]);
-    LeaveCriticalSection(&pSt->imergeCS);
 }
 
 /*

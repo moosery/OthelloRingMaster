@@ -23,7 +23,7 @@
 #include "Utility.h"
 
 /* Macros and Defines */
-#define VERSION "0.32.2"
+#define VERSION "0.32.3"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -292,26 +292,49 @@ typedef struct __OthelloRingMasterState
     CRITICAL_SECTION imergeCS;
 
     /*
-    ** Per-(writer, color) lock protecting file-index allocation specifically.
-    ** Found necessary 2026-07-23: FlushMergeWriterBuffer's own index pick
-    ** (mwBlack/WhiteFileCount[ti], read before writing, incremented only
-    ** after close) was never protected by any lock -- safe historically,
-    ** since only that one writer thread ever touched its own ti's counter.
-    ** DoBackgroundConsolidation (a separate thread pool) reads/writes the
-    ** SAME counter under imergeCS, but imergeCS alone doesn't help when the
-    ** other side never takes it -- a flush and a consolidation merge for the
-    ** same (writerIdx, player) could both read the counter before either
-    ** incremented it, both pick the same output index, and both write the
-    ** same file path concurrently, corrupting it (confirmed live: a
-    ** writer_black_NNNN.rsfzl file with a trailer recordCount far exceeding
-    ** what was actually readable). Indexed [writerIdx][player] (not a single
-    ** global lock) so unrelated drives/colors stay fully concurrent -- only
-    ** the exact (writer, color) pair that could actually collide is
-    ** serialized. FlushMergeWriterBuffer's flushBlack/flushWhite each hold
-    ** this for their own (ti, color) from index-read through increment;
-    ** DoBackgroundConsolidation holds it (nested inside imergeCS, always
-    ** acquired in that order to avoid deadlock) from outIdx-read through its
-    ** own increment.
+    ** Per-(writer, color) lock protecting file-index allocation AND, more
+    ** broadly, exclusive ownership of one (writer, color) pair's writer-file
+    ** sequence. Found necessary 2026-07-23: FlushMergeWriterBuffer's own
+    ** index pick (mwBlack/WhiteFileCount[ti], read before writing,
+    ** incremented only after close) was never protected by any lock -- safe
+    ** historically, since only that one writer thread ever touched its own
+    ** ti's counter. DoBackgroundConsolidation (a separate thread pool)
+    ** reads/writes the SAME counter; without this lock, a flush and a
+    ** consolidation merge for the same (writerIdx, player) could both read
+    ** the counter before either incremented it, both pick the same output
+    ** index, and both write the same file path concurrently, corrupting it
+    ** (confirmed live: a writer_black_NNNN.rsfzl file with a trailer
+    ** recordCount far exceeding what was actually readable). Indexed
+    ** [writerIdx][player] (not a single global lock) so unrelated
+    ** drives/colors stay fully concurrent -- only the exact (writer, color)
+    ** pair that could actually collide is serialized.
+    **
+    ** FlushMergeWriterBuffer's flushBlack/flushWhite each hold this for
+    ** their own (ti, color) from index-read through increment.
+    **
+    ** DoBackgroundConsolidation holds it for its ENTIRE scan-through-cleanup
+    ** span (not nested inside imergeCS -- found 2026-07-23 that the original
+    ** design nested it inside imergeCS instead, which meant EVERY
+    ** consolidation attempt on ANY drive/color serialized against every
+    ** other one globally, since imergeCS is a single lock: one drive's
+    ** multi-minute consolidation batch silently starved every other
+    ** drive/color's consolidation for its whole duration. Holding only this
+    ** finer lock for the whole span gives full cross-pair concurrency while
+    ** still correctly serializing two overlapping attempts on the identical
+    ** pair, e.g. two jobs both targeting the same writer queued back-to-back
+    ** on pConsolidationPool's shared FIFO).
+    **
+    ** DoCrossDriveIntermediateMerge (which still holds imergeCS for its
+    ** whole function, unchanged -- that lock's own job is serializing
+    ** concurrent invocations of itself) additionally acquires this lock,
+    ** nested inside imergeCS, for every writer it's about to gather/delete
+    ** files from for one color, held across that color's gather+merge+
+    ** delete and released before moving to the other color. This is the one
+    ** place two different fileIndexCS locks are ever held by the same
+    ** thread at once; always acquired in increasing writerIdx order (never
+    ** the reverse) and never nested under a fileIndexCS the calling thread
+    ** already holds, so this can't deadlock against DoBackgroundConsolidation
+    ** (which only ever holds exactly one fileIndexCS lock, never imergeCS).
     */
     CRITICAL_SECTION fileIndexCS[MAX_WRITERS][2];
 

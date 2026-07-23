@@ -4,6 +4,40 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.3] - 2026-07-23
+
+### Fixed a global-lock bottleneck starving background consolidation across drives
+
+- **Found live**: the user noticed the status display never showed a "Consol E:" progress
+  line, only ever "Consol D:". Root cause: `DoBackgroundConsolidation` (v0.32.0) held the
+  single, system-wide `imergeCS` lock for its *entire* operation, including the actual
+  `KWayMergeFiles` disk I/O -- and batches run up to `CONSOLIDATION_SIZE_CAP_BYTES` (100GB),
+  taking minutes. For that whole span every OTHER drive/color's consolidation attempt sat
+  blocked waiting on the same global lock, even though they touch entirely disjoint files.
+  This defeated the feature's own design goal (independent, concurrent per-drive
+  consolidation) -- confirmed by direct code reading, not just the visual symptom.
+- **Also confirmed along the way**: it's already possible today for two consolidation
+  attempts on the *identical* (writer, color) pair to be scheduled concurrently --
+  `pConsolidationPool` is a plain shared FIFO with no per-writer thread affinity, and a
+  drive that flushes twice in quick succession queues two jobs for the same writer that can
+  land on different pool threads. This was accidentally masked by the old global lock and
+  needed to keep working correctly after the fix.
+- **Fix**: `DoBackgroundConsolidation` now holds only the existing, granular
+  `fileIndexCS[writerIdx][player]` lock (introduced in v0.32.2) for its whole
+  scan-through-cleanup span, dropping `imergeCS` entirely. This still correctly serializes
+  two overlapping attempts on the same pair, while every other (drive, color) pair now runs
+  fully concurrently. `DoCrossDriveIntermediateMerge` (the older, reactive consolidation
+  path, still serialized against itself via `imergeCS` as before) now additionally acquires
+  the matching `fileIndexCS[ti][player]` locks -- nested inside its own `imergeCS`, always
+  in that order -- for exactly the writer/color pairs it's about to gather and delete files
+  from, so it can't race a live background-consolidation pass on those specific pairs. Lock
+  ordering is one-directional (`imergeCS` before `fileIndexCS`, increasing writer index),
+  so this introduces no deadlock risk.
+- User's explicit goal driving this: "We want concurrency as much as possible."
+- Not yet re-validated against a real run -- same disposable-store validation plan as
+  v0.32.2 applies here too.
+
+
 ## [0.32.2] - 2026-07-23
 
 ### Fixed a real data-corruption race between flush and consolidation

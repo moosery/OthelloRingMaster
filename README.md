@@ -82,7 +82,8 @@ Store drive (Y:)
   consolidation lineage independent of an already-graduated one. Shrinks both the fan-in and
   the total volume `DoEndOfLevelMerge` has to process, on top of whatever
   `DoCrossDriveIntermediateMerge` itself later folds in -- the two mechanisms coordinate only
-  via a shared lock and never need to know about each other beyond that.
+  through a lock scoped per (writer drive, color), so every drive/color pair's background
+  consolidation still runs fully concurrently with every other one.
 - **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_FANIN`)
   grouped-merge design as `OthelloLevelBlaster`. When a level's merge target is ring format
   (i.e. always, for the real per-level store), cascade's own intermediate group files become
