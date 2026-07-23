@@ -21,9 +21,10 @@
 
 /* Includes */
 #include "Utility.h"
+#include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.32.3"
+#define VERSION "0.32.4"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -76,6 +77,27 @@
 */
 #define CONSOLIDATION_SIZE_CAP_GB    100ULL
 #define CONSOLIDATION_SIZE_CAP_BYTES (CONSOLIDATION_SIZE_CAP_GB * 1024ULL * 1024ULL * 1024ULL)
+
+/*
+** Per-(writer drive, color) concurrency cap for background consolidation --
+** at most this many DoBackgroundConsolidation calls may hold a slot (see
+** ConsolidationSlotStats/consolSlotOwner below) for the same pair at once.
+** Enforced by consolSlotOwner, NOT by dedicated pool sizing -- see
+** CONSOLIDATION_POOL_THREADS below for why (a fixed per-pair pool count would
+** scale with drive count; this shouldn't).
+*/
+#define CONSOLIDATION_THREADS_PER_PAIR 3
+
+/*
+** Total worker threads in the single, shared background-consolidation pool
+** (pConsolidationPool). Deliberately a FLAT constant, independent of
+** numMergeWriters/drive count -- adding more NVMe drives should not require
+** more OS threads than this. Every (writer, color) pair's examination jobs
+** are queued to this one pool; per-pair concurrency is capped separately
+** (CONSOLIDATION_THREADS_PER_PAIR, via consolSlotOwner) so no single pair can
+** monopolize the shared pool.
+*/
+#define CONSOLIDATION_POOL_THREADS 12
 
 /* Structures and Types */
 
@@ -149,6 +171,47 @@ typedef struct __LevelStats
 } LevelStats, * PLevelStats;
 
 /*
+** Type:    ClaimRegistry
+** @brief   Per-(writer drive, color) set of writer-file indices currently
+**          "spoken for" -- either a brand-new index still being written (by
+**          a flush or a background-consolidation output), or an existing
+**          file claimed as input to a live consolidation/cross-drive merge.
+** @details See ClaimRegistry.h for the operations (ClaimSingle/ClaimTryRange/
+**          ClaimReleaseOne/ClaimReleaseRange/ClaimIsHeld). `cs` guards
+**          `claimed` only -- it must never be held across any file I/O or
+**          across another lock (imergeCS, another ClaimRegistry instance).
+**          Flush and consolidation both write directly to a file's final
+**          path from the moment it's opened (no temp-name-then-rename), so a
+**          directory scan must check ClaimIsHeld before trusting anything it
+**          finds there -- a partial file is otherwise indistinguishable from
+**          a complete one by size/attributes alone.
+*/
+typedef struct __ClaimRegistry
+{
+    CRITICAL_SECTION        cs;
+    std::unordered_set<int> claimed;
+} ClaimRegistry, * PClaimRegistry;
+
+/*
+** Type:    ConsolidationSlotStats
+** @brief   Live progress for one background-consolidation examination slot
+**          (see consolSlotOwner below for how a slot is claimed). One
+**          instance per (writer drive, color, slot) triple, MemMalloc'd as
+**          pConsolSlotStats (InitSolver.cpp) so the stats thread and every
+**          consolidation thread reach the same shared memory. Read/written
+**          without a lock, same convention as the rest of this project's
+**          live-display fields (torn/stale reads are acceptable for a
+**          status display; see e.g. cascadeActive below).
+*/
+typedef struct __ConsolidationSlotStats
+{
+    volatile int      active;
+    volatile int64_t  totalBytes;
+    volatile int64_t  doneBytes;
+    uint64_t          startTickMs;
+} ConsolidationSlotStats, * PConsolidationSlotStats;
+
+/*
 ** Type:    OthelloRingMasterConfig
 ** @brief   Fixed run configuration, set once from command-line args at
 **          startup and never mutated afterward.
@@ -220,24 +283,72 @@ typedef struct __OthelloRingMasterState
     char     mwDirectory[MAX_WRITERS][MAX_FULL_PATH_NAME];
     size_t   mwBufferSize;                  /* bytes per merge-writer buffer */
     void*    pMWBuffer[MAX_WRITERS];        /* one large buffer per thread */
-    int      mwBlackFileCount[MAX_WRITERS];     /* completed black writer files (incremented after close) */
-    int      mwWhiteFileCount[MAX_WRITERS];     /* completed white writer files (incremented after close) */
-    int      mwBlackFilesConsumed[MAX_WRITERS]; /* files already merged by DoCrossDriveIntermediateMerge  */
-    int      mwWhiteFilesConsumed[MAX_WRITERS]; /* files already merged by DoCrossDriveIntermediateMerge  */
+    /* Pure "files created this level" display counters (StatsListener.cpp's
+    ** liveBlack/liveWhite) -- InterlockedIncrement on every real create event
+    ** (a flush close, or a background-consolidation merge success). No longer
+    ** read-before-write to pick a new file's index -- that's FileTicketNext's
+    ** job (FileTicket.h) via mwNextFileIdx below, which is what lets flush and
+    ** consolidation allocate a name without ever contending for the same lock.
+    */
+    volatile int  mwBlackFileCount[MAX_WRITERS];
+    volatile int  mwWhiteFileCount[MAX_WRITERS];
+
+    /* Low-water-mark HINT for DoCrossDriveIntermediateMerge's gather-loop scan
+    ** start -- NOT a correctness invariant (that's now ClaimRegistry's job:
+    ** the gather loop checks ClaimIsHeld per candidate directly, so it can
+    ** never race a file a live consolidation merge is holding, regardless of
+    ** where this hint says to start). Only ever advanced under imergeCS.
+    */
+    int      mwBlackFilesConsumed[MAX_WRITERS];
+    int      mwWhiteFilesConsumed[MAX_WRITERS];
+
+    /* Lock-free per-(writer, color) ticket counters (FileTicket.h) -- the
+    ** sole source of new writer-file indices for both flush
+    ** (FlushMergeWriterBuffer) and background consolidation
+    ** (DoBackgroundConsolidation). InterlockedIncrement only; never reused
+    ** within a level, so an index that's ever been handed out never comes
+    ** back around, and a gathering loop can always treat "not found on disk"
+    ** as permanent, not "not written yet."
+    */
+    volatile LONG  mwNextFileIdx[MAX_WRITERS][2];
+
+    /* Per-(writer, color) claim registry (ClaimRegistry.h) -- which writer-
+    ** file indices are currently spoken for (mid-write, or claimed as input
+    ** to a live consolidation/cross-drive merge). See ClaimRegistry's own
+    ** type comment above for the full rationale.
+    */
+    ClaimRegistry  claimRegistry[MAX_WRITERS][2];
 
     /* Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp):
-    ** an independent prefix boundary, separate from mwBlackFilesConsumed/
+    ** an independent low-water-mark HINT, separate from mwBlackFilesConsumed/
     ** mwWhiteFilesConsumed above -- "everything below this index has already
     ** been looked at by the consolidator, either merged away and replaced by
     ** a file appended at a higher index, or left alone because it was already
-    ** >= CONSOLIDATION_SIZE_CAP." Always clamped to never fall behind the
-    ** real mwBlack/WhiteFilesConsumed (DoCrossDriveIntermediateMerge can
-    ** consume a file the consolidator hasn't examined yet -- that's fine,
-    ** it's just as done either way). The two mechanisms never need to
-    ** coordinate beyond sharing imergeCS.
+    ** >= CONSOLIDATION_SIZE_CAP." Purely a scan-start optimization now (real
+    ** correctness comes from ClaimRegistry + real file-existence checks per
+    ** candidate) -- touched by up to CONSOLIDATION_THREADS_PER_PAIR concurrent
+    ** examination threads per pair without a lock; a lost update just causes
+    ** some harmless re-scanning next time, never incorrectness, hence the
+    ** plain racy "advance if greater" writes used against it.
     */
-    int      mwBlackConsolidatedUpTo[MAX_WRITERS];
-    int      mwWhiteConsolidatedUpTo[MAX_WRITERS];
+    volatile int  mwBlackConsolidatedUpTo[MAX_WRITERS];
+    volatile int  mwWhiteConsolidatedUpTo[MAX_WRITERS];
+
+    /*
+    ** Per-(writer, color) slot ownership for background consolidation's
+    ** CONSOLIDATION_THREADS_PER_PAIR concurrency cap -- 0 = free, 1 = claimed.
+    ** DoBackgroundConsolidation claims the first free slot (s) via
+    ** InterlockedCompareExchange(&consolSlotOwner[wi][p][s], 1, 0) as the very
+    ** first thing it does (declining immediately, no side effects, if all
+    ** CONSOLIDATION_THREADS_PER_PAIR are already 1), and releases it
+    ** (InterlockedExchange back to 0) on every exit path. Does double duty as
+    ** both the concurrency cap (at most CONSOLIDATION_THREADS_PER_PAIR slots
+    ** exist per pair) and the stable slot number ConsolSlot() addresses --
+    ** needed because pConsolidationPool is one pool shared across every
+    ** (writer, color) pair, so a job's ThreadPool-assigned thdIdx is a
+    ** *global* worker index, not usable as a per-pair slot number.
+    */
+    volatile LONG  consolSlotOwner[MAX_WRITERS][2][CONSOLIDATION_THREADS_PER_PAIR];
     size_t   gpuAccumCapacity;   /* GPU accumulator board capacity (shared black+white) */
     size_t   mwStagingSize;      /* bytes per staging area = gpuAccumCapacity * sizeof(UINT64_PAIR) */
 
@@ -292,53 +403,6 @@ typedef struct __OthelloRingMasterState
     CRITICAL_SECTION imergeCS;
 
     /*
-    ** Per-(writer, color) lock protecting file-index allocation AND, more
-    ** broadly, exclusive ownership of one (writer, color) pair's writer-file
-    ** sequence. Found necessary 2026-07-23: FlushMergeWriterBuffer's own
-    ** index pick (mwBlack/WhiteFileCount[ti], read before writing,
-    ** incremented only after close) was never protected by any lock -- safe
-    ** historically, since only that one writer thread ever touched its own
-    ** ti's counter. DoBackgroundConsolidation (a separate thread pool)
-    ** reads/writes the SAME counter; without this lock, a flush and a
-    ** consolidation merge for the same (writerIdx, player) could both read
-    ** the counter before either incremented it, both pick the same output
-    ** index, and both write the same file path concurrently, corrupting it
-    ** (confirmed live: a writer_black_NNNN.rsfzl file with a trailer
-    ** recordCount far exceeding what was actually readable). Indexed
-    ** [writerIdx][player] (not a single global lock) so unrelated
-    ** drives/colors stay fully concurrent -- only the exact (writer, color)
-    ** pair that could actually collide is serialized.
-    **
-    ** FlushMergeWriterBuffer's flushBlack/flushWhite each hold this for
-    ** their own (ti, color) from index-read through increment.
-    **
-    ** DoBackgroundConsolidation holds it for its ENTIRE scan-through-cleanup
-    ** span (not nested inside imergeCS -- found 2026-07-23 that the original
-    ** design nested it inside imergeCS instead, which meant EVERY
-    ** consolidation attempt on ANY drive/color serialized against every
-    ** other one globally, since imergeCS is a single lock: one drive's
-    ** multi-minute consolidation batch silently starved every other
-    ** drive/color's consolidation for its whole duration. Holding only this
-    ** finer lock for the whole span gives full cross-pair concurrency while
-    ** still correctly serializing two overlapping attempts on the identical
-    ** pair, e.g. two jobs both targeting the same writer queued back-to-back
-    ** on pConsolidationPool's shared FIFO).
-    **
-    ** DoCrossDriveIntermediateMerge (which still holds imergeCS for its
-    ** whole function, unchanged -- that lock's own job is serializing
-    ** concurrent invocations of itself) additionally acquires this lock,
-    ** nested inside imergeCS, for every writer it's about to gather/delete
-    ** files from for one color, held across that color's gather+merge+
-    ** delete and released before moving to the other color. This is the one
-    ** place two different fileIndexCS locks are ever held by the same
-    ** thread at once; always acquired in increasing writerIdx order (never
-    ** the reverse) and never nested under a fileIndexCS the calling thread
-    ** already holds, so this can't deadlock against DoBackgroundConsolidation
-    ** (which only ever holds exactly one fileIndexCS lock, never imergeCS).
-    */
-    CRITICAL_SECTION fileIndexCS[MAX_WRITERS][2];
-
-    /*
     ** Per-writer intermediate merge progress (written by MW threads, read by
     ** stats thread). imergeActive[i] is set to 1 before the merge and 0
     ** after; the other fields are populated before imergeActive is set so
@@ -360,21 +424,17 @@ typedef struct __OthelloRingMasterState
     uint64_t          mwFlushStartTickMs[MAX_WRITERS];  /* GetTickCount64() when the flush starts */
 
     /*
-    ** Per-writer background consolidation progress (DoBackgroundConsolidation,
-    ** MergeFiles.cpp). Same active-flag convention as imerge/mwFlush above.
-    ** consolidationPlayer identifies which color is currently active (only
-    ** meaningful while consolidationActive[i] is set), since one writer
-    ** drive's consolidation job handles black then white in sequence.
-    ** consolidationTotalBytes/DoneBytes are real record*16-byte
-    ** (uncompressed-equivalent) counts, same convention as every other
-    ** progress line -- summed from each batch file's own trailer recordCount
-    ** before the merge starts, not a byte-for-byte disk read rate.
+    ** Live progress for every background-consolidation examination slot,
+    ** MemMalloc'd (InitSolver.cpp) as numMergeWriters*2*
+    ** CONSOLIDATION_THREADS_PER_PAIR ConsolidationSlotStats entries -- see
+    ** that type's comment above. Addressed via the ConsolSlot() helper
+    ** (below, after this struct, since it dereferences POthelloRingMasterState).
+    ** Replaces the old one-scalar-per-writer consolidationActive/Player/
+    ** TotalBytes/DoneBytes/StartTickMs fields, which could only ever
+    ** represent ONE in-progress merge per writer -- insufficient once
+    ** multiple concurrent merges per (writer, color) pair became possible.
     */
-    volatile int      consolidationActive[MAX_WRITERS];
-    int               consolidationPlayer[MAX_WRITERS];
-    volatile int64_t  consolidationTotalBytes[MAX_WRITERS];
-    volatile int64_t  consolidationDoneBytes[MAX_WRITERS];
-    uint64_t          consolidationStartTickMs[MAX_WRITERS];
+    ConsolidationSlotStats* pConsolSlotStats;
 
     /*
     ** Real-time physical file count per writer/color -- unlike
@@ -419,5 +479,33 @@ typedef struct __OthelloRingMasterState
     ThreadPool* pMergeWriterPool;
     ThreadPool* pGPUFeederThreadPool;
     ThreadPool* pStatsThreadPool;
-    ThreadPool* pConsolidationPool;   /* background small-file consolidator -- separate from pMergeWriterPool, draws from otherwise-idle cores */
+    /* Background small-file consolidator (DoBackgroundConsolidation,
+    ** MergeFiles.cpp) -- ONE shared pool, CONSOLIDATION_POOL_THREADS threads,
+    ** servicing every (writer, color) pair's examination jobs. Deliberately
+    ** flat-sized (not scaled by numMergeWriters) so adding more NVMe drives
+    ** never grows total thread count -- per-pair concurrency is capped
+    ** separately via consolSlotOwner instead of dedicated per-pair pools.
+    ** Separate from pMergeWriterPool so it draws from otherwise-idle cores.
+    */
+    ThreadPool* pConsolidationPool;
 } OthelloRingMasterState, * POthelloRingMasterState;
+
+/*
+** Function: ConsolSlot
+** @brief    Computes the address of one (writerIdx, player, slotIdx) entry
+**           inside the MemMalloc'd pConsolSlotStats block (InitSolver.cpp).
+**           slotIdx is the value claimed via consolSlotOwner[writerIdx][player]
+**           (0..CONSOLIDATION_THREADS_PER_PAIR-1) -- NOT a ThreadPool thdIdx,
+**           which is a global worker index shared across every pair now that
+**           pConsolidationPool is one pool for all of them.
+** @param    pSt       - solver state
+** @param    writerIdx - which writer drive (0..numMergeWriters-1)
+** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    slotIdx   - claimed consolSlotOwner slot (0..CONSOLIDATION_THREADS_PER_PAIR-1)
+** @return   Pointer to that slot's live-progress stats.
+*/
+static inline PConsolidationSlotStats ConsolSlot(POthelloRingMasterState pSt,
+                                                  int writerIdx, int player, int slotIdx)
+{
+    return &pSt->pConsolSlotStats[(writerIdx * 2 + player) * CONSOLIDATION_THREADS_PER_PAIR + slotIdx];
+}

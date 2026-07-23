@@ -4,6 +4,57 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.4] - 2026-07-23
+
+### Redesigned background consolidation: lock-free ticketing + claim registry (v2)
+
+- **Why**: re-validating v0.32.3 (the previous concurrency fix), the user watched the
+  entire GPU generation pipeline freeze for 3+ minutes while `Consol D: black` and
+  `Consol E: black` ran simultaneously. Root cause: `DoBackgroundConsolidation` held a
+  single lock (`fileIndexCS[writerIdx][player]`) for its *entire* merge -- including the
+  slow disk I/O -- and `FlushMergeWriterBuffer` needed that same lock just to pick its own
+  new file's index. With only 2 `pMergeWriterPool` threads total and the GPU feeder
+  blocking on one of them to even start its next flush job, both merge-writer threads
+  wedging behind two different drives' long consolidation locks stalled everything.
+  Shrinking the merge batch size was explicitly rejected ("that goes against what I
+  want... causes major fanin explosion") -- large output files (up to the 100GB cap) are
+  the whole point.
+- **Fix, worked out via a long ground-up design discussion**: separated "claim a unique
+  output filename" (now instant and lock-free) from "hold exclusive ownership of specific
+  files for the duration of a slow merge" (still serialized, but only against the exact
+  files actually in use, never against unrelated work):
+  - **`FileTicketNext`** (new `FileTicket.h`): a lock-free atomic per-(writer, color)
+    counter handing out a guaranteed-unique file index instantly, replacing the old
+    read-before-write of `mwBlack/WhiteFileCount[ti]` under `fileIndexCS`.
+  - **`ClaimRegistry`** (new `ClaimRegistry.h`): a thread-safe per-(writer, color) set of
+    "currently spoken for" file indices -- covers both a file mid-write (flush or a
+    consolidation output) and an existing file claimed as input to a live merge. Lock held
+    only for the set operation itself, never across I/O. Used by both
+    `DoBackgroundConsolidation` and `DoCrossDriveIntermediateMerge`, closing the gap where
+    the latter could otherwise race a live consolidation pass.
+  - **`DoBackgroundConsolidation`** rewritten around these primitives: claims a batch of
+    small, unclaimed files (no longer required to be contiguous), reserves drive space via
+    the existing `DriveLedger.h` before committing (a real gap in v1 -- it never checked
+    space at all), merges, and on success reclaims *both* the new file's reservation
+    overestimate *and* the deleted originals' full freed space (a bug caught during
+    planning by cross-checking `DoCrossDriveIntermediateMerge`'s own working pattern --
+    omitting the second reclaim would have silently under-reported free space on every
+    successful merge).
+  - **Thread pool redesigned twice during this same session's planning**: first as 2
+    dedicated pools per drive (one per color), 3 threads each -- then the user flagged
+    that this doesn't scale ("if I add 10 NVMes we would run out of cores"). Revised to
+    **one shared pool, flat `CONSOLIDATION_POOL_THREADS = 12`, independent of drive
+    count**, with per-pair concurrency (`CONSOLIDATION_THREADS_PER_PAIR = 3`) enforced by
+    a small `consolSlotOwner` claim array instead of dedicated pool sizing.
+  - **Stats**: the old one-scalar-per-writer `consolidationActive`/`Player`/`TotalBytes`/
+    `DoneBytes`/`StartTickMs` fields could only ever represent one merge per writer --
+    replaced with a MemMalloc'd `pConsolSlotStats` block (sized off real runtime
+    `numMergeWriters`, not a `MAX_WRITERS`-sized fixed array, per the user's explicit
+    preference), addressed via `ConsolSlot()`. The status display now prints one line per
+    active slot (e.g. `Consol D: black #1`, `Consol D: black #2`).
+- Not yet validated against a real run -- same disposable-store validation discipline as
+  prior consolidation releases applies here.
+
 ## [0.32.3] - 2026-07-23
 
 ### Fixed a global-lock bottleneck starving background consolidation across drives

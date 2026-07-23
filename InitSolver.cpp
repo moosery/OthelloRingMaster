@@ -286,6 +286,13 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
         pState->mwWhiteFilesConsumed[i] = 0;
         pState->mwBlackConsolidatedUpTo[i] = 0;
         pState->mwWhiteConsolidatedUpTo[i] = 0;
+        pState->mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
+        pState->mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
+        for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
+        {
+            pState->consolSlotOwner[i][RSF_PLAYER_BLACK][s] = 0;
+            pState->consolSlotOwner[i][RSF_PLAYER_WHITE][s] = 0;
+        }
     }
 
     double totalAllocGB = (pState->pingPongBufferSize
@@ -307,6 +314,20 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
                   "computeState: cannot allocate merge-writer buffer %d (%zu bytes)",
                   i, pState->mwBufferSize);
     }
+
+    /* Background-consolidation live-progress slots -- MemMalloc'd (not a
+    ** MAX_WRITERS-sized fixed array baked into the struct) and sized off the
+    ** real runtime numMergeWriters, so both consolidation threads and the
+    ** stats thread reach the same shared memory via pConsolSlotStats/
+    ** ConsolSlot() (OthelloTypes.h).
+    */
+    size_t numConsolSlots = (size_t)pState->numMergeWriters * 2 * CONSOLIDATION_THREADS_PER_PAIR;
+    pState->pConsolSlotStats = (ConsolidationSlotStats*)MemMalloc("consolSlotStats",
+                                   numConsolSlots * sizeof(ConsolidationSlotStats));
+    if (!pState->pConsolSlotStats)
+        Fatal(FATAL_ALLOCATION_FAILED,
+              "computeState: cannot allocate %zu consolidation stats slots", numConsolSlots);
+
     LoggerLog("Allocation complete.\n");
 }
 
@@ -675,7 +696,7 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     InitializeCriticalSection(&pState->imergeCS);
     for (int wi = 0; wi < MAX_WRITERS; wi++)
         for (int p = 0; p < 2; p++)
-            InitializeCriticalSection(&pState->fileIndexCS[wi][p]);
+            InitializeCriticalSection(&pState->claimRegistry[wi][p].cs);
 
     pState->pMergeWriterPool = new ThreadPool(numMWThreads, "MergeWriterPool");
     if (!pState->pMergeWriterPool)
@@ -689,13 +710,17 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     if (!pState->pStatsThreadPool)
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create stats thread pool");
 
-    /* Background small-file consolidator: one thread per writer drive,
-    ** mirroring pMergeWriterPool's own shape -- deliberately a SEPARATE pool
-    ** so it draws from otherwise-idle cores and never competes with active
-    ** flush-writing on pMergeWriterPool. See DoBackgroundConsolidation
-    ** (MergeFiles.cpp) and project_background_nvme_consolidation_design memory.
+    /* Background small-file consolidator: ONE shared pool, CONSOLIDATION_POOL_THREADS
+    ** threads, servicing every (writer, color) pair's examination jobs --
+    ** deliberately flat-sized (not scaled by numMWThreads/drive count) so
+    ** adding more NVMe drives never grows total thread count. Per-pair
+    ** concurrency is capped separately via consolSlotOwner (OthelloTypes.h).
+    ** A SEPARATE pool from pMergeWriterPool so it draws from otherwise-idle
+    ** cores and never competes with active flush-writing. See
+    ** DoBackgroundConsolidation (MergeFiles.cpp) and
+    ** project_background_nvme_consolidation_design memory.
     */
-    pState->pConsolidationPool = new ThreadPool(numMWThreads, "ConsolidationPool");
+    pState->pConsolidationPool = new ThreadPool(CONSOLIDATION_POOL_THREADS, "ConsolidationPool");
     if (!pState->pConsolidationPool)
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create consolidation thread pool");
 
@@ -721,7 +746,8 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     LoggerLog("  Board size         : %dx%d  (levels 0..%d)\n",
               pConfig->boardSize, pConfig->boardSize, lastLevel);
     LoggerLog("  MW threads         : %d\n", numMWThreads);
-    LoggerLog("  Consolidation thrds: %d  (cap %llu GB)\n", numMWThreads,
+    LoggerLog("  Consolidation thrds: %d shared  (cap %d per drive/color pair, size cap %llu GB)\n",
+              CONSOLIDATION_POOL_THREADS, CONSOLIDATION_THREADS_PER_PAIR,
               (unsigned long long)CONSOLIDATION_SIZE_CAP_GB);
     LoggerLog("  GPU threads        : %d\n", numGPUFeederThreads);
     LoggerLog("  Stats port         : %d\n", (int)pConfig->statsPort);
@@ -776,8 +802,9 @@ void CleanupSolver(POthelloRingMasterState pState)
     for (int i = 0; i < pState->numMergeWriters; i++)
         MemFree(pState->pMWBuffer[i]);
     MemFree(pState->pPingPongBuffer);
+    MemFree(pState->pConsolSlotStats);
     DeleteCriticalSection(&pState->imergeCS);
     for (int wi = 0; wi < MAX_WRITERS; wi++)
         for (int p = 0; p < 2; p++)
-            DeleteCriticalSection(&pState->fileIndexCS[wi][p]);
+            DeleteCriticalSection(&pState->claimRegistry[wi][p].cs);
 }

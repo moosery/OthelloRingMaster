@@ -406,11 +406,29 @@ int main(int argc, char* argv[])
             g_state.mwWhiteFilesConsumed[i] = 0;
             g_state.mwBlackConsolidatedUpTo[i] = 0;
             g_state.mwWhiteConsolidatedUpTo[i] = 0;
-            g_state.consolidationActive[i]      = 0;
-            g_state.consolidationTotalBytes[i]  = 0;
-            g_state.consolidationDoneBytes[i]   = 0;
+            g_state.mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
+            g_state.mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
             g_state.mwBlackPhysicalFileCount[i] = 0;
             g_state.mwWhitePhysicalFileCount[i] = 0;
+        }
+        /* Background-consolidation slot state: defensive re-clear, safe since
+        ** the previous level's WaitForPoolIdle(pConsolidationPool) below
+        ** already guarantees nothing is mid-merge at this point.
+        */
+        for (int wi = 0; wi < g_state.numMergeWriters; wi++)
+        {
+            for (int p = 0; p < 2; p++)
+            {
+                for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
+                {
+                    PConsolidationSlotStats pSlot = ConsolSlot(&g_state, wi, p, s);
+                    pSlot->active     = 0;
+                    pSlot->totalBytes = 0;
+                    pSlot->doneBytes  = 0;
+                    g_state.consolSlotOwner[wi][p][s] = 0;
+                }
+                g_state.claimRegistry[wi][p].claimed.clear();
+            }
         }
         g_state.terminateConsolidation = false;   /* fresh per level; see solve->merge transition below */
         for (int p = 0; p < 2; p++)

@@ -75,15 +75,17 @@ Store drive (Y:)
 - **Background small-file consolidation** -- a dedicated thread pool (separate from the
   merge-writer pool, so it draws from otherwise-idle cores and never competes with active
   flush-writing) opportunistically merges small D:/E: writer files together as they
-  accumulate, using an independent prefix boundary alongside the one
-  `DoCrossDriveIntermediateMerge` already tracks. Files at or above
+  accumulate. One shared pool (a flat thread count, independent of drive count) services
+  every (writer drive, color) pair, with up to a few concurrent merges allowed per pair at
+  once, each on disjoint files -- coordinated through a lock-free per-pair file-ticket
+  allocator plus a small claim registry (which file indices are currently spoken for),
+  rather than one lock per pair covering an entire merge. Files at or above
   `CONSOLIDATION_SIZE_CAP_BYTES` (100GB, adjustable) are left alone -- not worth the merge
   cost once a file is already that large; new incoming files start their own fresh
-  consolidation lineage independent of an already-graduated one. Shrinks both the fan-in and
-  the total volume `DoEndOfLevelMerge` has to process, on top of whatever
-  `DoCrossDriveIntermediateMerge` itself later folds in -- the two mechanisms coordinate only
-  through a lock scoped per (writer drive, color), so every drive/color pair's background
-  consolidation still runs fully concurrently with every other one.
+  consolidation lineage independent of an already-graduated one. Shrinks both the fan-in
+  and the total volume `DoEndOfLevelMerge` has to process, on top of whatever
+  `DoCrossDriveIntermediateMerge` itself later folds in -- that mechanism checks the same
+  claim registry before touching a file, so it can't race a live consolidation pass.
 - **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_FANIN`)
   grouped-merge design as `OthelloLevelBlaster`. When a level's merge target is ring format
   (i.e. always, for the real per-level store), cascade's own intermediate group files become
