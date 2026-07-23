@@ -144,7 +144,11 @@ OthelloRingMaster.exe [options]
   --memory-limit SZ Force the memory budget instead of using real free RAM (e.g. "4GB",
                     "512MB") -- testing/validation only, e.g. to force more frequent
                     merge-writer flushes at small levels. Still capped by actual free RAM.
-                    [default: unset, uses recommended-vs-free-RAM]
+                    Real floor: each merge-writer buffer must hold at least one full GPU
+                    flush, so the limit must clear (GPU VRAM * 80%) per writer drive --
+                    e.g. a 16GB-VRAM GPU with 2 fast drives needs >= ~25.6GB total to keep
+                    both writers active (below that, the solver drops to a single writer
+                    instead of Fataling). [default: unset, uses recommended-vs-free-RAM]
   --help            Show this help
 ```
 

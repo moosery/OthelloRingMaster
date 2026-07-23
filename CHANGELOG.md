@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.1] - 2026-07-23
+
+### Documented --memory-limit's real minimum
+
+- Caught immediately when the user tried a first validation run at `--memory-limit 512MB`:
+  `Fatal("Not enough RAM for even one merge-writer buffer (12 GB)")` (`InitSolver.cpp:171`,
+  `gpuMinBufSize = GPU VRAM * 80%`) -- correct, intentional behavior (a merge-writer buffer
+  must hold at least one full GPU flush), just previously undocumented. With 2 fast writer
+  drives, keeping both active (rather than silently dropping to one) needs the limit to
+  clear roughly double that floor. README's `--memory-limit` entry now states the real
+  constraint in concrete terms instead of just "still capped by actual free RAM."
+- No code changes -- documentation only.
+
+
 ## [0.32.0] - 2026-07-23
 
 ### Background small-file consolidation (new feature)
