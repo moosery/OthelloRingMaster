@@ -4,6 +4,32 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.8] - 2026-07-24
+
+### Improved Fatal() and read-failure diagnostics
+
+- **Context**: the real production run hit `RSFZReadByte: LZ4 read failed` reading a
+  1.1TB level-22 store file on the Y: NAS share. Diagnosis leaned entirely on `ferror`/
+  `feof` plus manual correlation against wall-clock guesses -- no timestamp was printed
+  with the failure itself, and no OS-level detail (errno, Win32 error code) was captured,
+  both of which would have made "transient network hiccup vs. real corruption" an
+  immediate read instead of an inference.
+- **`Fatal()`** (`Utility/Error.cpp`) now prefixes every message with a
+  `[YYYY-MM-DD HH:MM:SS]` local-time timestamp (via `GetLocalTime`, matching the
+  existing `completedAt` stamping convention in `OthelloRingMaster.cpp`) before printing
+  and exiting. Applied once, centrally, so every existing and future `Fatal()` call site
+  across the whole solution gets it for free.
+- **`RSFZReadByte`**'s two read-failure sites (`Utility/RingStoreFile.cpp`, the LZ4 and
+  varint-only refill paths) now also capture `errno`/`strerror(errno)` and the raw Win32
+  `GetLastError()` code immediately after the failed `fread()` -- before any other call
+  can clobber them -- and include both in the Fatal message alongside the existing
+  `ferror`/`feof` flags. `GetLastError()` in particular can surface a specific
+  network-failure code (vs. a generic I/O error) that `ferror`'s bare 0/1 flag can't
+  distinguish, directly helping tell a dropped SMB connection apart from genuine on-disk
+  corruption next time this fires.
+
+---
+
 ## [0.32.7] - 2026-07-24
 
 ### Fixed resume-history stats silently failing to restore

@@ -664,10 +664,19 @@ static uint8_t RSFZReadByte(RSFReader* r)
                 r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
                 r->compBufPos    = 0;
                 if (r->compBufFilled == 0)
+                {
+                    /* Captured immediately after the failed fread(), before any
+                    ** other call can clobber them -- errno/GetLastError() both
+                    ** reflect the CRT's own most recent failure, but only until
+                    ** the next libc/Win32 call touches them.
+                    */
+                    int   savedErrno  = errno;
+                    DWORD savedWinErr = GetLastError();
                     Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed -- '%s' (%llu/%llu bytes consumed, "
-                          "ferror=%d, feof=%d)",
+                          "ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)",
                           r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
-                          ferror(r->f), feof(r->f));
+                          ferror(r->f), feof(r->f), savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
+                }
             }
 
             size_t srcSize = r->compBufFilled - r->compBufPos;
@@ -707,10 +716,14 @@ static uint8_t RSFZReadByte(RSFReader* r)
         r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
         r->compBufPos    = 0;
         if (r->compBufFilled == 0)
+        {
+            int   savedErrno  = errno;
+            DWORD savedWinErr = GetLastError();
             Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint read failed (short read on compressed stream) -- "
-                  "'%s' (%llu/%llu bytes consumed, ferror=%d, feof=%d)",
+                  "'%s' (%llu/%llu bytes consumed, ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)",
                   r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
-                  ferror(r->f), feof(r->f));
+                  ferror(r->f), feof(r->f), savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
+        }
     }
     r->compBytesConsumed++;
     return r->compBuf[r->compBufPos++];

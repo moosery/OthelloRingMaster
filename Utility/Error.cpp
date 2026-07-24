@@ -13,6 +13,7 @@
 #include "Error.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <windows.h>
 
 /* Constants */
 #define MAX_ERROR_LEN 4095
@@ -74,14 +75,25 @@ void ErrorPrint(FILE* fpOut)
 
 /*
 ** Function: Fatal
-** @brief    Prints a formatted message to stderr and terminates the process
-**           immediately with rc as the exit code. Never returns.
+** @brief    Prints a timestamp-prefixed, formatted message to stderr and
+**           terminates the process immediately with rc as the exit code.
+**           Never returns.
 ** @param    rc          - exit code to terminate with
 ** @param    pszReasonFmt - printf-style format string describing the fatal condition
 ** @param    ...         - format arguments for pszReasonFmt
+** @details  The timestamp is applied here, once, so every existing and future
+**           Fatal() call site gets it for free -- without it, a Fatal buried
+**           in a multi-hour/day real run (this project's normal timescale)
+**           gives no way to correlate the failure against other logs
+**           (Windows Event Viewer, network drop times, etc.) after the fact.
 */
 void Fatal(RC rc, const char* pszReasonFmt, ...)
 {
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    fprintf(stderr, "[%04d-%02d-%02d %02d:%02d:%02d] ",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
     va_list argptr;
 
     va_start(argptr, pszReasonFmt);
