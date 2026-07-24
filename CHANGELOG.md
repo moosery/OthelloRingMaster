@@ -4,6 +4,44 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.6] - 2026-07-23
+
+### Fixed slow Ctrl+C shutdown (two separate causes)
+
+- **User-reported**: Ctrl+C was sensed immediately but the process took a few minutes to
+  actually exit -- happening even during pure GPU solve time, with no flush/consolidation/
+  merge activity in progress at all. That last detail ruled out consolidation as the
+  primary cause and pointed at the solve loop itself.
+- **Root cause (the dominant one)**: `RingNestedIndexStreamAll` (`OthelloBasics/RingNestedIndex.cpp`)
+  -- the function the GPU feeder uses to stream a level's stored boards during solve --
+  had no termination awareness at all. It read straight through every board in the level
+  via real disk I/O, calling its `onBoard` callback each time, with no way to stop early
+  except exhausting the file. The only termination check anywhere in this path was inside
+  the callback itself (`FeedBoardIntoBatch`, checking `terminateThreads`), but that only
+  turned each call into a no-op -- it never stopped `RingNestedIndexStreamAll`'s own loop
+  from continuing to stream (and really read from disk) through every remaining board.
+  For a level with billions of boards, that could genuinely take minutes if Ctrl+C landed
+  early in the level. Every other major per-record loop in this codebase (`KWayMergeFiles`,
+  `KWayMergeFilesToRingIndex`, `MergePoolToWriter`) already checked its termination flag
+  every record -- this one predates that convention and was never brought in line with it.
+- **Fix**: added an optional `pTerminate` parameter (default `nullptr`, preserving existing
+  behavior for callers that don't pass one) to `RingNestedIndexStreamAll`, checked once per
+  board across all four of its nested-loop shapes. A new `terminated` flag (kept separate
+  from the existing `ok` flag, which means "clean data, not corrupted") lets a
+  caller-requested stop unwind cleanly through every nesting level via the same
+  already-shared continue-condition, while still returning `true` (not "corrupted") so the
+  Fatal-on-corruption check at the call site is never mistakenly triggered by a normal
+  shutdown. Wired to `terminateThreads` at RingMaster's own call site
+  (`LevelSolverThread.cpp`); the Calculator's three call sites are untouched and keep their
+  existing behavior via the new parameter's default.
+- **Second, smaller cause**: `DoBackgroundConsolidation` (today's v2 redesign) didn't check
+  `terminateConsolidation` until deep into its execution -- a queued-but-not-yet-run
+  examination still ran its whole scan phase (up to `MAX_CONSOLIDATION_BATCH` real
+  `GetFileAttributesExA` disk-stat calls) before ever noticing shutdown. Under the heavy
+  self-chaining activity this run was exercising, that could add real (if more modest)
+  delay to `WaitForPoolIdle(pConsolidationPool)`. Fixed with an early bailout immediately
+  after the slot claim, before any scanning/claiming/reserving starts.
+
 ## [0.32.5] - 2026-07-23
 
 ### Fixed a v0.32.4 build error (volatile-qualifier mismatch)

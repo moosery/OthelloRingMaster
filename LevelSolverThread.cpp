@@ -325,9 +325,18 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
 
     /* Streams directly from disk -- never holds the whole level's board-key
     ** data resident, regardless of board count (see RingNestedIndex.h's
-    ** own Notes on RingNestedIndexStreamAll vs. Load()/ExpandAll()). */
+    ** own Notes on RingNestedIndexStreamAll vs. Load()/ExpandAll()).
+    ** pTerminate wired to terminateThreads (added 2026-07-23): without it,
+    ** Ctrl+C mid-solve had to wait for this entire loop to stream through
+    ** every remaining board in the level -- potentially billions of real
+    ** disk reads -- before the GPU feeder could ever notice shutdown was
+    ** requested. streamOk still comes back true on a caller-requested stop
+    ** (see the function's own header comment), so this Fatal only fires on
+    ** genuine corruption/truncation, never on a normal terminated shutdown.
+    */
     bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
-                                              [&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); });
+                                              [&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); },
+                                              &pSt->terminateThreads);
     if (!streamOk)
         Fatal(FATAL_MERGE_LOGIC_ERROR,
               "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "

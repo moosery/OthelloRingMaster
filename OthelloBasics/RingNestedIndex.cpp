@@ -389,7 +389,8 @@ void RingNestedIndexReader::ExpandAll(const std::function<void(const BOARD_KEY& 
 ** @brief    See RingNestedIndex.h.
 */
 bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
-                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard)
+                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard,
+                              const volatile bool* pTerminate)
 {
     bool hasRing1 = (ring1Path != nullptr);
     bool hasRing2 = (ring2Path != nullptr);
@@ -412,6 +413,16 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
 
     bool ok = true;
 
+    /* Separate from 'ok': ok means "clean data, no truncation/corruption";
+    ** terminated means "caller asked us to stop early via pTerminate," a
+    ** completely different, non-error reason to unwind. Kept as its own
+    ** flag (checked alongside ok in every one of the four onBoard loops
+    ** below, all of which already share 'ok' as a single cascading
+    ** continue-condition) so a caller-requested stop still returns true
+    ** (not corrupted) -- see the header comment for the full contract.
+    */
+    bool terminated = false;
+
     /* One-record lookahead on CellsInUse, and (since neither carries a
     ** count field any more -- see file Notes) on Ring_1/Ring_2 too. Each
     ** is a single flat stream spanning the WHOLE level, not per-parent-
@@ -432,7 +443,7 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
     bool haveCurRing2  = hasRing2 && (RSFReadShaped(pRing2, &curRing2, 1) == 1);
     bool haveNextRing2 = haveCurRing2 && (RSFReadShaped(pRing2, &nextRing2, 1) == 1);
 
-    while (haveCurCells && ok)
+    while (haveCurCells && ok && !terminated)
     {
         uint64_t pattern = curCells.hi;
 
@@ -445,7 +456,7 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
 
         if (hasRing1)
         {
-            for (uint64_t r1 = 0; ok && r1 < groupSpan; r1++)
+            for (uint64_t r1 = 0; ok && !terminated && r1 < groupSpan; r1++)
             {
                 if (!haveCurRing1) { if (haveNextCells) ok = false; break; }
 
@@ -454,15 +465,17 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
 
                 if (hasRing2)
                 {
-                    for (uint64_t r2 = 0; ok && r2 < ring2Span; r2++)
+                    for (uint64_t r2 = 0; ok && !terminated && r2 < ring2Span; r2++)
                     {
                         if (!haveCurRing2) { if (haveNextRing1) ok = false; break; }
 
                         uint32_t ring2Pattern = curRing2.pattern;
                         uint64_t ring34Span   = haveNextRing2 ? (nextRing2.offset - curRing2.offset) : UINT64_MAX;
 
-                        for (uint64_t r34 = 0; ok && r34 < ring34Span; r34++)
+                        for (uint64_t r34 = 0; ok && !terminated && r34 < ring34Span; r34++)
                         {
+                            if (pTerminate && *pTerminate) { terminated = true; break; }
+
                             Ring34Rec ring34Rec;
                             if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing2) ok = false; break; }
 
@@ -488,8 +501,10 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
                     ** ring2Span here is really "how many Ring_3_4 records
                     ** belong to this Ring_1 group."
                     */
-                    for (uint64_t r34 = 0; ok && r34 < ring2Span; r34++)
+                    for (uint64_t r34 = 0; ok && !terminated && r34 < ring2Span; r34++)
                     {
+                        if (pTerminate && *pTerminate) { terminated = true; break; }
+
                         Ring34Rec ring34Rec;
                         if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing1) ok = false; break; }
 
@@ -508,15 +523,17 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
         }
         else if (hasRing2)
         {
-            for (uint64_t r2 = 0; ok && r2 < groupSpan; r2++)
+            for (uint64_t r2 = 0; ok && !terminated && r2 < groupSpan; r2++)
             {
                 if (!haveCurRing2) { if (haveNextCells) ok = false; break; }
 
                 uint32_t ring2Pattern = curRing2.pattern;
                 uint64_t ring34Span   = haveNextRing2 ? (nextRing2.offset - curRing2.offset) : UINT64_MAX;
 
-                for (uint64_t r34 = 0; ok && r34 < ring34Span; r34++)
+                for (uint64_t r34 = 0; ok && !terminated && r34 < ring34Span; r34++)
                 {
+                    if (pTerminate && *pTerminate) { terminated = true; break; }
+
                     Ring34Rec ring34Rec;
                     if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextRing2) ok = false; break; }
 
@@ -534,8 +551,10 @@ bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path,
         }
         else
         {
-            for (uint64_t r34 = 0; ok && r34 < groupSpan; r34++)
+            for (uint64_t r34 = 0; ok && !terminated && r34 < groupSpan; r34++)
             {
+                if (pTerminate && *pTerminate) { terminated = true; break; }
+
                 Ring34Rec ring34Rec;
                 if (RSFReadShaped(pRing34, &ring34Rec, 1) != 1) { if (haveNextCells) ok = false; break; }
 

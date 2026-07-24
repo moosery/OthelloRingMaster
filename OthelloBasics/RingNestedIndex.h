@@ -325,11 +325,23 @@ struct RingNestedIndexReader
 ** @param    ring2Path      - path to the Ring_2 file, or nullptr if not applicable
 ** @param    ring34Path     - path to the Ring_3_4 file (always required)
 ** @param    onBoard        - called once per board with the reconstructed ring-ordered BOARD_KEY
+** @param    pTerminate     - out-of-band cancellation flag, checked once per board (all four
+**                            nested loop shapes share the same "ok" continue-condition, so
+**                            setting ok=false on this check cleanly unwinds every level at
+**                            once); nullptr (the default) means run to completion, matching
+**                            the original behavior for any caller that doesn't pass one.
+**                            Found necessary 2026-07-23: this was the only major per-record
+**                            loop in the solution with no termination awareness at all --
+**                            Ctrl+C mid-solve had to wait for the entire rest of the level's
+**                            boards to stream through before the GPU feeder could ever notice.
 ** @return   true if every applicable file opened and was read to a clean
-**           completion (no truncation/corruption partway through).
+**           completion (no truncation/corruption partway through). A caller-requested
+**           termination also returns true (not corruption) -- callers that care must check
+**           *pTerminate themselves to distinguish the two.
 */
 bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
-                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard);
+                              const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard,
+                              const volatile bool* pTerminate = nullptr);
 
 /*
 ** Type:    RingNestedIndexPullReader

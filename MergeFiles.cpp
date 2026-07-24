@@ -1906,6 +1906,23 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     if (slotIdx < 0)
         return;   /* pair is at its concurrency cap -- decline, nothing claimed yet */
 
+    /* Bail out here, before any scanning/claiming/reserving starts, if
+    ** shutdown was already requested by the time this queued job got to
+    ** run. Everything below this point does real work (up to
+    ** MAX_CONSOLIDATION_BATCH real GetFileAttributesExA disk-stat calls,
+    ** ClaimTryRange, FileTicketNext, DriveReserve) with no termination
+    ** check of its own until the KWayMergeFiles call much further down --
+    ** found live 2026-07-23: a burst of self-chained jobs queued right
+    ** before shutdown each had to run their whole scan phase before
+    ** noticing terminateConsolidation, adding real (if modest) delay to
+    ** the solve->merge transition's WaitForPoolIdle(pConsolidationPool).
+    */
+    if (pSt->terminateConsolidation)
+    {
+        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
+        return;
+    }
+
     int  ticketSnap = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[writerIdx][player], 0, 0);
     volatile int* pConsolUp = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo : pSt->mwWhiteConsolidatedUpTo;
 
