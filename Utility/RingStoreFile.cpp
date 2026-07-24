@@ -629,6 +629,91 @@ struct __RSFReader
     bool        lz4FrameDone;     /* true after LZ4F_decompress returned 0 */
 };
 
+/* Constants -- RSFRefillCompBuf's retry schedule. 5 attempts, backoff doubling
+** (2/5/10/20/30s, ~67s worst case) -- enough to ride out a brief NAS/SMB
+** connection drop (the observed real-world failure mode) without hanging
+** indefinitely on a genuinely dead link.
+*/
+#define RSF_REFILL_MAX_RETRIES 5
+static const int RSF_REFILL_BACKOFF_SECONDS[RSF_REFILL_MAX_RETRIES] = { 2, 5, 10, 20, 30 };
+
+/*
+** Function: RSFRefillCompBuf
+** @brief    Reads up to toRead bytes from r->f into r->compBuf, retrying
+**           through a close/reopen/reseek cycle on a transient read failure
+**           before giving up.
+** @details  A dropped network share (the real-world trigger: the Y: NAS
+**           connection bouncing) can leave the existing FILE* permanently
+**           dead even after the network itself recovers, so retrying fread()
+**           on the same handle isn't enough -- each retry reopens r->path
+**           fresh and reseeks to r->compBytesConsumed. That's always a valid
+**           absolute file offset because RSFOpen seeks back to file offset 0
+**           before returning the reader, so the compressed/varint stream
+**           always starts at the very beginning of the file (the trailer
+**           lives at the end and is read/validated first).
+**           Logging is deliberately throttled so a genuinely long outage
+**           doesn't scroll the console/log: full diagnostic detail (path,
+**           bytes consumed/total, ferror/feof/errno/GetLastError) on the
+**           first failure and again (via Fatal) if every retry is
+**           exhausted, but only a short one-line notice for each retry in
+**           between. A successful recovery still logs one line, so a
+**           transient failure is never completely silent even though the
+**           process doesn't crash.
+** @param    r      - the reader whose r->f/compBuf this refills
+** @param    toRead - number of bytes to attempt to read
+** @return   Bytes actually read. Never 0 -- Fatals instead once every retry
+**           is exhausted, preserving the prior all-or-nothing contract.
+*/
+static size_t RSFRefillCompBuf(RSFReader* r, size_t toRead)
+{
+    for (int attempt = 0; ; attempt++)
+    {
+        size_t got = r->f ? fread(r->compBuf, 1, toRead, r->f) : 0;
+        if (got > 0)
+        {
+            if (attempt > 0)
+                LoggerLog("RSFRefillCompBuf: recovered after %d retr%s -- '%s'\n",
+                          attempt, attempt == 1 ? "y" : "ies", r->path);
+            return got;
+        }
+
+        /* Captured immediately after the failed fread() (or skipped -- 0/-1
+        ** placeholders -- if r->f is already null from a failed reopen),
+        ** before any other call can clobber them.
+        */
+        int   savedErrno  = r->f ? errno : 0;
+        DWORD savedWinErr = GetLastError();
+        int   fe = r->f ? ferror(r->f) : -1;
+        int   eo = r->f ? feof(r->f)   : -1;
+
+        if (attempt == 0)
+            LoggerLog("RSFRefillCompBuf: read failed -- '%s' (%llu/%llu bytes consumed, "
+                       "ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)\n",
+                       r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                       fe, eo, savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
+
+        if (attempt >= RSF_REFILL_MAX_RETRIES)
+            Fatal(FATAL_FILE_OPEN, "RSFRefillCompBuf: read failed after %d retries -- '%s' "
+                  "(%llu/%llu bytes consumed, ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)",
+                  RSF_REFILL_MAX_RETRIES, r->path,
+                  (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                  fe, eo, savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
+
+        int backoffSec = RSF_REFILL_BACKOFF_SECONDS[attempt];
+        LoggerLog("RSFRefillCompBuf: retry %d/%d in %ds -- '%s'\n",
+                   attempt + 1, RSF_REFILL_MAX_RETRIES, backoffSec, r->path);
+        Sleep((DWORD)backoffSec * 1000);
+
+        if (r->f) fclose(r->f);
+        r->f = fopen(r->path, "rb");
+        if (r->f && _fseeki64(r->f, (int64_t)r->compBytesConsumed, SEEK_SET) != 0)
+        {
+            fclose(r->f);
+            r->f = nullptr;
+        }
+    }
+}
+
 /*
 ** Function: RSFZReadByte
 ** @brief    Returns the next decoded varint-stream byte from a reader,
@@ -661,22 +746,8 @@ static uint8_t RSFZReadByte(RSFReader* r)
                           (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
                 size_t toRead = (remaining < (uint64_t)r->compBufSize)
                                 ? (size_t)remaining : r->compBufSize;
-                r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
+                r->compBufFilled = RSFRefillCompBuf(r, toRead);
                 r->compBufPos    = 0;
-                if (r->compBufFilled == 0)
-                {
-                    /* Captured immediately after the failed fread(), before any
-                    ** other call can clobber them -- errno/GetLastError() both
-                    ** reflect the CRT's own most recent failure, but only until
-                    ** the next libc/Win32 call touches them.
-                    */
-                    int   savedErrno  = errno;
-                    DWORD savedWinErr = GetLastError();
-                    Fatal(FATAL_FILE_OPEN, "RSFZReadByte: LZ4 read failed -- '%s' (%llu/%llu bytes consumed, "
-                          "ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)",
-                          r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
-                          ferror(r->f), feof(r->f), savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
-                }
             }
 
             size_t srcSize = r->compBufFilled - r->compBufPos;
@@ -713,17 +784,8 @@ static uint8_t RSFZReadByte(RSFReader* r)
                   r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
                   (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
         size_t toRead = (remaining < (uint64_t)r->compBufSize) ? (size_t)remaining : r->compBufSize;
-        r->compBufFilled = fread(r->compBuf, 1, toRead, r->f);
+        r->compBufFilled = RSFRefillCompBuf(r, toRead);
         r->compBufPos    = 0;
-        if (r->compBufFilled == 0)
-        {
-            int   savedErrno  = errno;
-            DWORD savedWinErr = GetLastError();
-            Fatal(FATAL_FILE_OPEN, "RSFZReadByte: varint read failed (short read on compressed stream) -- "
-                  "'%s' (%llu/%llu bytes consumed, ferror=%d, feof=%d, errno=%d (%s), GetLastError=%lu)",
-                  r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
-                  ferror(r->f), feof(r->f), savedErrno, strerror(savedErrno), (unsigned long)savedWinErr);
-        }
     }
     r->compBytesConsumed++;
     return r->compBuf[r->compBufPos++];

@@ -4,6 +4,35 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.9] - 2026-07-24
+
+### Added automatic recovery from transient store-read failures
+
+- **Context**: a genuine `RSFZReadByte: LZ4 read failed` crashed the real production run
+  reading a 1.1TB level-22 store file over the Y: NAS share (see v0.32.8) -- a transient
+  network hiccup, not real corruption, but it still hard-stopped the whole process.
+- **`RSFRefillCompBuf`** (new, `Utility/RingStoreFile.cpp`), replacing the inline
+  `fread`+`Fatal` logic previously duplicated at both `RSFZReadByte` read-failure sites
+  (LZ4 and varint-only paths): on a read failure, closes and reopens the file fresh and
+  reseeks to `compBytesConsumed` before retrying -- a dropped network share can leave the
+  existing `FILE*` permanently dead even after the connection itself recovers, so retrying
+  on the same handle isn't enough. The reseek target is always valid because `RSFOpen`
+  seeks back to file offset 0 before returning a reader, so the compressed/varint stream
+  always starts at the very beginning of the file.
+- **Bounded**: 5 attempts, backoff doubling (2/5/10/20/30s, ~67s worst case) -- rides out a
+  brief connection drop without hanging indefinitely on a genuinely dead link. Every retry
+  still eventually Fatals with the full v0.32.8 diagnostic detail if the link never
+  recovers, preserving the project's standing "never silently drop real data" rule.
+- **Logging throttled deliberately**: full diagnostic detail (path, bytes consumed/total,
+  ferror/feof/errno/GetLastError) on the first failure and again on final give-up, but only
+  a short one-line notice for each retry in between -- so a long outage doesn't scroll the
+  console/log. A successful recovery still logs one line, so a transient failure that
+  self-heals is never completely silent even though the process doesn't crash.
+- This benefits every `RSFOpen`/`RSFZReadByte` reader solution-wide (GPU-feed level reads,
+  end-of-level merge reads, calculator lookups), not just the path that hit the failure.
+
+---
+
 ## [0.32.8] - 2026-07-24
 
 ### Improved Fatal() and read-failure diagnostics
