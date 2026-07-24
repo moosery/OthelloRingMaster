@@ -478,25 +478,130 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
 }
 
 /*
+** Type:    LevelStatsPreConsolidation
+** @brief   Frozen, byte-for-byte copy of LevelStats as it existed for every
+**          sentinel written before 2026-07-23 (v0.32.0), when background
+**          consolidation inserted 3 uint64_t fields
+**          (consolidationFilesCreated/Removed/BytesWritten) in the middle
+**          of the live struct. Every real sentinel for the current
+**          production run's levels 1-22 was written against this exact
+**          layout. Never add fields here or otherwise evolve it -- it
+**          exists solely so ReadSentinelStats can still translate those
+**          pre-existing files; if LevelStats changes shape again later,
+**          add another frozen snapshot rather than touching this one.
+*/
+typedef struct __LevelStatsPreConsolidation
+{
+    uint64_t boardsReadFromStore;
+    uint64_t boardsGenerated;
+    uint64_t gpuDupsRemoved;
+    uint64_t gpuFlushes;
+    uint64_t boardsReceivedFromGpu;
+    uint64_t boardsWrittenToDisk;
+    uint64_t mwFilesCreated;
+    uint64_t mwBytes;
+    uint64_t mrgDupsRemoved;
+    uint32_t mergeFilesWritten;
+    uint64_t mergeBytes;
+    uint64_t mergeActualBytes;
+    uint64_t passBoards;
+    uint64_t terminalBoards;
+    uint32_t maxMovesInLevel;
+    ClockTick startTick;
+    int64_t  solverNanos;
+    int64_t  totalNanos;
+    char     completedAt[24];
+    WriterDriveStats driveSnapshot[MAX_WRITER_DRIVES];
+    int      numDriveSnapshot;
+    uint64_t storeFreeBytes;
+} LevelStatsPreConsolidation;
+
+/*
+** Function: LevelStatsFromPreConsolidation
+** @brief    Field-by-field translation from the frozen pre-2026-07-23
+**           layout into the current LevelStats shape. The 3 consolidation
+**           counters didn't exist yet in the source, so they come out
+**           zeroed -- correct, since no consolidation ever ran on those
+**           levels.
+*/
+static void LevelStatsFromPreConsolidation(const LevelStatsPreConsolidation* src, LevelStats* dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->boardsReadFromStore   = src->boardsReadFromStore;
+    dst->boardsGenerated       = src->boardsGenerated;
+    dst->gpuDupsRemoved        = src->gpuDupsRemoved;
+    dst->gpuFlushes            = src->gpuFlushes;
+    dst->boardsReceivedFromGpu = src->boardsReceivedFromGpu;
+    dst->boardsWrittenToDisk   = src->boardsWrittenToDisk;
+    dst->mwFilesCreated        = src->mwFilesCreated;
+    dst->mwBytes               = src->mwBytes;
+    dst->mrgDupsRemoved        = src->mrgDupsRemoved;
+    dst->mergeFilesWritten     = src->mergeFilesWritten;
+    dst->mergeBytes            = src->mergeBytes;
+    dst->mergeActualBytes      = src->mergeActualBytes;
+    dst->passBoards            = src->passBoards;
+    dst->terminalBoards        = src->terminalBoards;
+    dst->maxMovesInLevel       = src->maxMovesInLevel;
+    dst->startTick             = src->startTick;
+    dst->solverNanos           = src->solverNanos;
+    dst->totalNanos            = src->totalNanos;
+    memcpy(dst->completedAt, src->completedAt, sizeof(dst->completedAt));
+    memcpy(dst->driveSnapshot, src->driveSnapshot, sizeof(dst->driveSnapshot));
+    dst->numDriveSnapshot      = src->numDriveSnapshot;
+    dst->storeFreeBytes        = src->storeFreeBytes;
+}
+
+/*
 ** Function: ReadSentinelStats
 ** @brief    Reads LevelStats from a _complete sentinel file.
 ** @param    path - sentinel file path
 ** @param    out  - out: filled with the sentinel's LevelStats payload
 ** @return   false if the file is zero-byte (legacy / manually created) or
-**           does not contain valid stats data.
+**           does not contain valid, recognized stats data.
+** @details  Compares the file's actual payload size against sizeof(LevelStats)
+**           rather than assuming today's shape is the only one on disk --
+**           sentinels older than 2026-07-23 (every real level 1-22 sentinel
+**           from the current production run) were written against
+**           LevelStatsPreConsolidation, 24 bytes smaller. Those are
+**           translated explicitly rather than rejected, so a struct growth
+**           doesn't silently blank out already-completed levels' history.
 */
 static bool ReadSentinelStats(const char* path, LevelStats* out)
 {
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER fileSize = {};
+    bool ok = GetFileSizeEx(h, &fileSize) != 0;
+
     uint64_t magic = 0;
     DWORD    nr    = 0;
-    bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
-              && nr == sizeof(magic)
-              && magic == RSF_SENTINEL_STATS_MAGIC
-              && ReadFile(h, out, (DWORD)sizeof(*out), &nr, NULL)
-              && nr == sizeof(*out);
+    ok = ok
+         && ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
+         && nr == sizeof(magic)
+         && magic == RSF_SENTINEL_STATS_MAGIC;
+
+    if (ok)
+    {
+        int64_t payloadBytes = fileSize.QuadPart - (int64_t)sizeof(magic);
+        if (payloadBytes == (int64_t)sizeof(*out))
+        {
+            ok = ReadFile(h, out, (DWORD)sizeof(*out), &nr, NULL) && nr == sizeof(*out);
+        }
+        else if (payloadBytes == (int64_t)sizeof(LevelStatsPreConsolidation))
+        {
+            LevelStatsPreConsolidation old = {};
+            ok = ReadFile(h, &old, (DWORD)sizeof(old), &nr, NULL) && nr == sizeof(old);
+            if (ok)
+                LevelStatsFromPreConsolidation(&old, out);
+        }
+        else
+        {
+            ok = false;
+        }
+    }
+
     CloseHandle(h);
     return ok;
 }

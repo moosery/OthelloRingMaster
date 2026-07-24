@@ -4,6 +4,40 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.7] - 2026-07-24
+
+### Fixed resume-history stats silently failing to restore
+
+- **User-reported**: after resuming the real production run at level 22, neither the
+  console log nor `OthelloRingMasterStatus` showed any per-level history for levels
+  0-21, even though every one of those levels has a valid `_complete` sentinel on disk.
+  Initially misdiagnosed this as expected in-memory-only behavior; the user correctly
+  pushed back -- resume has always re-read sentinels to restore this history.
+- **Root cause**: `ReadSentinelStats` (`InitSolver.cpp`) required the sentinel's stored
+  `LevelStats` payload to match `sizeof(LevelStats)` *exactly*. When background
+  consolidation first shipped (v0.32.0, 2026-07-23) it added 3 `uint64_t` fields
+  (`consolidationFilesCreated`/`FilesRemoved`/`BytesWritten`) in the *middle* of
+  `LevelStats`, growing it by 24 bytes. Every real sentinel for the current run's levels
+  1-22 was written before that date (confirmed: all exactly 1440 bytes on disk, dated
+  July 9-21), so the exact-size check now fails for all of them, and `ReadSentinelStats`
+  returns `false` silently -- `ScanForResumeLevel` never restores `levelStats[0..20]`.
+  Because the new fields land mid-struct rather than at the end, a naive "just read
+  fewer bytes" fix would have been actively unsafe: every field after the insertion
+  point (`mrgDupsRemoved` onward, including the whole timing/drive-snapshot tail) would
+  read from the wrong file offset and come back corrupted rather than merely missing.
+  This bug only affected historical stats *display* on resume -- board/counts data was
+  never at risk, since level-completeness detection only checks sentinel *existence*.
+- **Fix (one-time backward-compat patch, not just a forward-looking guard)**: added
+  `LevelStatsPreConsolidation`, a frozen byte-for-byte copy of the pre-2026-07-23
+  `LevelStats` layout, plus `LevelStatsFromPreConsolidation` to translate it field-by-field
+  into the current struct (the 3 new consolidation counters correctly come out zeroed,
+  since consolidation never ran on those levels). `ReadSentinelStats` now compares the
+  sentinel's actual payload size against both the current and the frozen old size and
+  translates accordingly, instead of requiring one exact match forever -- so both the
+  real run's existing levels 1-22 sentinels *and* future struct growth are handled.
+
+---
+
 ## [0.32.6] - 2026-07-23
 
 ### Fixed slow Ctrl+C shutdown (two separate causes)
