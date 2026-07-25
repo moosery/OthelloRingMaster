@@ -24,7 +24,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.32.10"
+#define VERSION "0.33.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -70,7 +70,7 @@
 #define DRIVE_SPACE_LOW_BYTES (DRIVE_SPACE_LOW_GB * 1024ULL * 1024ULL * 1024ULL)
 
 /*
-** Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp):
+** Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp):
 ** a file at or above this size is left alone -- not worth the merge cost for
 ** the marginal dedup reward once it's already this big; the final end-of-level
 ** merge will handle it. Adjustable constant, not derived from anything else.
@@ -79,25 +79,26 @@
 #define CONSOLIDATION_SIZE_CAP_BYTES (CONSOLIDATION_SIZE_CAP_GB * 1024ULL * 1024ULL * 1024ULL)
 
 /*
-** Per-(writer drive, color) concurrency cap for background consolidation --
-** at most this many DoBackgroundConsolidation calls may hold a slot (see
-** ConsolidationSlotStats/consolSlotOwner below) for the same pair at once.
-** Enforced by consolSlotOwner, NOT by dedicated pool sizing -- see
-** CONSOLIDATION_POOL_THREADS below for why (a fixed per-pair pool count would
-** scale with drive count; this shouldn't).
-*/
-#define CONSOLIDATION_THREADS_PER_PAIR 3
-
-/*
 ** Total worker threads in the single, shared background-consolidation pool
 ** (pConsolidationPool). Deliberately a FLAT constant, independent of
 ** numMergeWriters/drive count -- adding more NVMe drives should not require
-** more OS threads than this. Every (writer, color) pair's examination jobs
-** are queued to this one pool; per-pair concurrency is capped separately
-** (CONSOLIDATION_THREADS_PER_PAIR, via consolSlotOwner) so no single pair can
-** monopolize the shared pool.
+** more OS threads than this. Each thread runs ConsolidationWorkerLoop
+** (MergeFiles.cpp) for the whole level: sleep, sweep every (writer drive,
+** color) pair merging whatever's eligible, sleep again. No per-pair
+** concurrency cap exists -- ClaimRegistry alone mediates multiple workers
+** reaching the same pair in the same sweep, one wins the claim and merges,
+** the rest move on to the next pair.
 */
 #define CONSOLIDATION_POOL_THREADS 12
+
+/*
+** How long each consolidation worker sleeps between sweeps. A worker only
+** notices terminateConsolidation (or picks up newly-eligible files) at this
+** granularity, so this directly bounds how much extra latency the
+** solve->merge transition's WaitForPoolIdle(pConsolidationPool) can incur
+** beyond whatever in-flight KWayMergeFiles call is already unwinding.
+*/
+#define CONSOLIDATION_POLL_INTERVAL_MS 2000
 
 /* Structures and Types */
 
@@ -138,7 +139,7 @@ typedef struct __LevelStats
     uint64_t mwFilesCreated;
     uint64_t mwBytes;
 
-    /* Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp) */
+    /* Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp) */
     uint64_t consolidationFilesCreated;   /* merged-output files the consolidator produced this level */
     uint64_t consolidationFilesRemoved;   /* original files it absorbed/deleted (folded into those outputs) */
     uint64_t consolidationBytesWritten;   /* real on-disk bytes of consolidator-created files */
@@ -194,18 +195,23 @@ typedef struct __ClaimRegistry
 
 /*
 ** Type:    ConsolidationSlotStats
-** @brief   Live progress for one background-consolidation examination slot
-**          (see consolSlotOwner below for how a slot is claimed). One
-**          instance per (writer drive, color, slot) triple, MemMalloc'd as
-**          pConsolSlotStats (InitSolver.cpp) so the stats thread and every
-**          consolidation thread reach the same shared memory. Read/written
-**          without a lock, same convention as the rest of this project's
-**          live-display fields (torn/stale reads are acceptable for a
-**          status display; see e.g. cascadeActive below).
+** @brief   Live progress for one consolidation worker thread. One instance
+**          per worker (indexed by its stable ThreadPool worker index, 0..
+**          CONSOLIDATION_POOL_THREADS-1), MemMalloc'd as pConsolSlotStats
+**          (InitSolver.cpp) so the stats thread and every consolidation
+**          worker reach the same shared memory. writerIdx/player identify
+**          which pair this worker is currently merging (only meaningful
+**          while active is set) -- needed now that a slot's array position
+**          no longer implies a pair, unlike the old per-pair scheme. Read/
+**          written without a lock, same convention as the rest of this
+**          project's live-display fields (torn/stale reads are acceptable
+**          for a status display; see e.g. cascadeActive below).
 */
 typedef struct __ConsolidationSlotStats
 {
     volatile int      active;
+    int               writerIdx;   /* valid only while active */
+    int               player;      /* valid only while active */
     volatile int64_t  totalBytes;
     volatile int64_t  doneBytes;
     uint64_t          startTickMs;
@@ -245,7 +251,7 @@ typedef struct __OthelloRingMasterState
     /* Set (in addition to terminateThreads) on Ctrl+C/shutdown, AND set alone
     ** (terminateThreads left untouched) at each level's normal solve->merge
     ** transition, so any in-flight background consolidation
-    ** (DoBackgroundConsolidation, MergeFiles.cpp) wraps up promptly rather
+    ** (TryConsolidatePair, MergeFiles.cpp) wraps up promptly rather
     ** than running arbitrarily long into the transition window. Reset to
     ** false at the start of each new level.
     */
@@ -305,7 +311,7 @@ typedef struct __OthelloRingMasterState
     /* Lock-free per-(writer, color) ticket counters (FileTicket.h) -- the
     ** sole source of new writer-file indices for both flush
     ** (FlushMergeWriterBuffer) and background consolidation
-    ** (DoBackgroundConsolidation). InterlockedIncrement only; never reused
+    ** (TryConsolidatePair). InterlockedIncrement only; never reused
     ** within a level, so an index that's ever been handed out never comes
     ** back around, and a gathering loop can always treat "not found on disk"
     ** as permanent, not "not written yet."
@@ -319,36 +325,35 @@ typedef struct __OthelloRingMasterState
     */
     ClaimRegistry  claimRegistry[MAX_WRITERS][2];
 
-    /* Background small-file consolidator (DoBackgroundConsolidation, MergeFiles.cpp):
+    /* Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp):
     ** an independent low-water-mark HINT, separate from mwBlackFilesConsumed/
     ** mwWhiteFilesConsumed above -- "everything below this index has already
     ** been looked at by the consolidator, either merged away and replaced by
     ** a file appended at a higher index, or left alone because it was already
-    ** >= CONSOLIDATION_SIZE_CAP." Purely a scan-start optimization now (real
+    ** >= CONSOLIDATION_SIZE_CAP." Purely a scan-start optimization (real
     ** correctness comes from ClaimRegistry + real file-existence checks per
-    ** candidate) -- touched by up to CONSOLIDATION_THREADS_PER_PAIR concurrent
-    ** examination threads per pair without a lock; a lost update just causes
-    ** some harmless re-scanning next time, never incorrectness, hence the
-    ** plain racy "advance if greater" writes used against it.
+    ** candidate) -- touched by every consolidation worker thread that visits
+    ** this pair, without a lock; a lost update just causes some harmless
+    ** re-scanning next time, never incorrectness, hence the plain racy
+    ** "advance if greater" writes used against it.
     */
     volatile int  mwBlackConsolidatedUpTo[MAX_WRITERS];
     volatile int  mwWhiteConsolidatedUpTo[MAX_WRITERS];
 
-    /*
-    ** Per-(writer, color) slot ownership for background consolidation's
-    ** CONSOLIDATION_THREADS_PER_PAIR concurrency cap -- 0 = free, 1 = claimed.
-    ** DoBackgroundConsolidation claims the first free slot (s) via
-    ** InterlockedCompareExchange(&consolSlotOwner[wi][p][s], 1, 0) as the very
-    ** first thing it does (declining immediately, no side effects, if all
-    ** CONSOLIDATION_THREADS_PER_PAIR are already 1), and releases it
-    ** (InterlockedExchange back to 0) on every exit path. Does double duty as
-    ** both the concurrency cap (at most CONSOLIDATION_THREADS_PER_PAIR slots
-    ** exist per pair) and the stable slot number ConsolSlot() addresses --
-    ** needed because pConsolidationPool is one pool shared across every
-    ** (writer, color) pair, so a job's ThreadPool-assigned thdIdx is a
-    ** *global* worker index, not usable as a per-pair slot number.
+    /* Lock-free per-(writer, color) "someone's already examining this pair"
+    ** flag -- 0 = free, 1 = a worker is currently between building a
+    ** candidate batch and resolving its ClaimTryRange attempt for this
+    ** pair. A worker that finds this already 1 skips the pair for this
+    ** sweep entirely (moves on to the next pair) rather than blocking, so
+    ** multiple workers never redundantly re-scan the exact same files at
+    ** once. Deliberately narrow-scoped: released the instant the claim
+    ** attempt resolves (success or failure), well before the actual merge
+    ** I/O starts, so it never limits how many merges can run concurrently
+    ** on one pair -- only how many workers can be *deciding* what to merge
+    ** on it at the same instant.
     */
-    volatile LONG  consolSlotOwner[MAX_WRITERS][2][CONSOLIDATION_THREADS_PER_PAIR];
+    volatile LONG  consolScanning[MAX_WRITERS][2];
+
     size_t   gpuAccumCapacity;   /* GPU accumulator board capacity (shared black+white) */
     size_t   mwStagingSize;      /* bytes per staging area = gpuAccumCapacity * sizeof(UINT64_PAIR) */
 
@@ -424,15 +429,12 @@ typedef struct __OthelloRingMasterState
     uint64_t          mwFlushStartTickMs[MAX_WRITERS];  /* GetTickCount64() when the flush starts */
 
     /*
-    ** Live progress for every background-consolidation examination slot,
-    ** MemMalloc'd (InitSolver.cpp) as numMergeWriters*2*
-    ** CONSOLIDATION_THREADS_PER_PAIR ConsolidationSlotStats entries -- see
-    ** that type's comment above. Addressed via the ConsolSlot() helper
-    ** (below, after this struct, since it dereferences POthelloRingMasterState).
-    ** Replaces the old one-scalar-per-writer consolidationActive/Player/
-    ** TotalBytes/DoneBytes/StartTickMs fields, which could only ever
-    ** represent ONE in-progress merge per writer -- insufficient once
-    ** multiple concurrent merges per (writer, color) pair became possible.
+    ** Live progress for every consolidation worker thread, MemMalloc'd
+    ** (InitSolver.cpp) as CONSOLIDATION_POOL_THREADS ConsolidationSlotStats
+    ** entries -- one per worker, indexed by its own stable ThreadPool
+    ** worker index. See that type's comment above. Addressed via the
+    ** ConsolSlot() helper (below, after this struct, since it dereferences
+    ** POthelloRingMasterState).
     */
     ConsolidationSlotStats* pConsolSlotStats;
 
@@ -479,12 +481,12 @@ typedef struct __OthelloRingMasterState
     ThreadPool* pMergeWriterPool;
     ThreadPool* pGPUFeederThreadPool;
     ThreadPool* pStatsThreadPool;
-    /* Background small-file consolidator (DoBackgroundConsolidation,
-    ** MergeFiles.cpp) -- ONE shared pool, CONSOLIDATION_POOL_THREADS threads,
-    ** servicing every (writer, color) pair's examination jobs. Deliberately
-    ** flat-sized (not scaled by numMergeWriters) so adding more NVMe drives
-    ** never grows total thread count -- per-pair concurrency is capped
-    ** separately via consolSlotOwner instead of dedicated per-pair pools.
+    /* Background small-file consolidator (ConsolidationWorkerLoop,
+    ** TryConsolidatePair, MergeFiles.cpp) -- CONSOLIDATION_POOL_THREADS
+    ** persistent worker threads, each looping sleep/sweep-every-pair/sleep
+    ** for the whole level, queued fresh at each level's start (see
+    ** OthelloRingMaster.cpp). Deliberately flat-sized (not scaled by
+    ** numMergeWriters) so adding more NVMe drives never grows thread count.
     ** Separate from pMergeWriterPool so it draws from otherwise-idle cores.
     */
     ThreadPool* pConsolidationPool;
@@ -492,20 +494,13 @@ typedef struct __OthelloRingMasterState
 
 /*
 ** Function: ConsolSlot
-** @brief    Computes the address of one (writerIdx, player, slotIdx) entry
+** @brief    Computes the address of one consolidation worker's stats entry
 **           inside the MemMalloc'd pConsolSlotStats block (InitSolver.cpp).
-**           slotIdx is the value claimed via consolSlotOwner[writerIdx][player]
-**           (0..CONSOLIDATION_THREADS_PER_PAIR-1) -- NOT a ThreadPool thdIdx,
-**           which is a global worker index shared across every pair now that
-**           pConsolidationPool is one pool for all of them.
 ** @param    pSt       - solver state
-** @param    writerIdx - which writer drive (0..numMergeWriters-1)
-** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    slotIdx   - claimed consolSlotOwner slot (0..CONSOLIDATION_THREADS_PER_PAIR-1)
-** @return   Pointer to that slot's live-progress stats.
+** @param    workerIdx - the worker's stable ThreadPool index (0..CONSOLIDATION_POOL_THREADS-1)
+** @return   Pointer to that worker's live-progress stats.
 */
-static inline PConsolidationSlotStats ConsolSlot(POthelloRingMasterState pSt,
-                                                  int writerIdx, int player, int slotIdx)
+static inline PConsolidationSlotStats ConsolSlot(POthelloRingMasterState pSt, int workerIdx)
 {
-    return &pSt->pConsolSlotStats[(writerIdx * 2 + player) * CONSOLIDATION_THREADS_PER_PAIR + slotIdx];
+    return &pSt->pConsolSlotStats[workerIdx];
 }

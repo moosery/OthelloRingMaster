@@ -410,27 +410,27 @@ int main(int argc, char* argv[])
             g_state.mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
             g_state.mwBlackPhysicalFileCount[i] = 0;
             g_state.mwWhitePhysicalFileCount[i] = 0;
+            g_state.consolScanning[i][RSF_PLAYER_BLACK] = 0;
+            g_state.consolScanning[i][RSF_PLAYER_WHITE] = 0;
         }
-        /* Background-consolidation slot state: defensive re-clear, safe since
-        ** the previous level's WaitForPoolIdle(pConsolidationPool) below
-        ** already guarantees nothing is mid-merge at this point.
+        /* Background-consolidation worker stats: defensive re-clear, safe
+        ** since the previous level's WaitForPoolIdle(pConsolidationPool)
+        ** below already guarantees every worker has exited (nothing mid-merge)
+        ** at this point.
         */
-        for (int wi = 0; wi < g_state.numMergeWriters; wi++)
+        for (int w = 0; w < CONSOLIDATION_POOL_THREADS; w++)
         {
-            for (int p = 0; p < 2; p++)
-            {
-                for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
-                {
-                    PConsolidationSlotStats pSlot = ConsolSlot(&g_state, wi, p, s);
-                    pSlot->active     = 0;
-                    pSlot->totalBytes = 0;
-                    pSlot->doneBytes  = 0;
-                    g_state.consolSlotOwner[wi][p][s] = 0;
-                }
-                g_state.claimRegistry[wi][p].claimed.clear();
-            }
+            PConsolidationSlotStats pSlot = ConsolSlot(&g_state, w);
+            pSlot->active     = 0;
+            pSlot->totalBytes = 0;
+            pSlot->doneBytes  = 0;
         }
+        for (int wi = 0; wi < g_state.numMergeWriters; wi++)
+            for (int p = 0; p < 2; p++)
+                g_state.claimRegistry[wi][p].claimed.clear();
+
         g_state.terminateConsolidation = false;   /* fresh per level; see solve->merge transition below */
+        StartConsolidationWorkers(&ctx);          /* queue this level's CONSOLIDATION_POOL_THREADS workers */
         for (int p = 0; p < 2; p++)
         {
             g_state.imergeActive[p]          = 0;
@@ -476,14 +476,18 @@ int main(int argc, char* argv[])
         WaitForPoolIdle(g_state.pGPUFeederThreadPool);
 
         /* Drain any merge-writer jobs still in flight, then flush remaining buffer segments.
-        ** pConsolidationPool must also go idle here, after pMergeWriterPool (which is the
-        ** only thing that queues consolidation jobs) -- otherwise a still-running background
-        ** consolidation could still be renaming/deleting/creating writer files at the exact
-        ** moment DoEndOfLevelMerge starts enumerating them. terminateConsolidation is set
-        ** first (not the global terminateThreads -- this isn't a real shutdown) so an
-        ** in-flight consolidation merge wraps up promptly (abandoning its partial output,
-        ** originals untouched -- see DoBackgroundConsolidation) rather than running
-        ** arbitrarily long into this transition.
+        ** pConsolidationPool must also go idle here, after pMergeWriterPool --
+        ** otherwise a still-running background consolidation could still be
+        ** renaming/deleting/creating writer files at the exact moment
+        ** DoEndOfLevelMerge starts enumerating them. terminateConsolidation is
+        ** set first (not the global terminateThreads -- this isn't a real
+        ** shutdown) so every consolidation worker notices within at most one
+        ** TryConsolidatePair call plus CONSOLIDATION_POLL_INTERVAL_MS, wraps
+        ** up any in-flight merge promptly (abandoning its partial output,
+        ** originals untouched -- see TryConsolidatePair), and returns from
+        ** ConsolidationWorkerLoop -- rather than running arbitrarily long into
+        ** this transition. WaitForPoolIdle blocks until every worker's
+        ** long-running loop-job has actually returned.
         */
         WaitForPoolIdle(g_state.pMergeWriterPool);
         g_state.terminateConsolidation = true;

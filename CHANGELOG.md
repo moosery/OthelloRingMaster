@@ -4,6 +4,47 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.0] - 2026-07-24
+
+### Background consolidation redesigned: polling worker pool replaces event-driven jobs
+
+- **Motivation**: even after v0.32.10 fixed the large-file-blocks-everything bug, the
+  event-driven design (self-chaining jobs triggered by each flush, per-pair
+  `consolSlotOwner` concurrency slots) carried real accidental complexity for what the
+  user pointed out could be a much simpler shape: dedicated worker threads that just
+  periodically sweep every (drive, color) pair and merge whatever's eligible.
+- **New design**: `CONSOLIDATION_POOL_THREADS` persistent worker threads, each running
+  `ConsolidationWorkerLoop` for the whole level -- sleep `CONSOLIDATION_POLL_INTERVAL_MS`
+  (2s), sweep every (writer drive, color) pair via the renamed `TryConsolidatePair`
+  (merging *all* currently-unclaimed, under-100GB-cap files found for that pair, not
+  just two), sleep again -- queued fresh at each level's start by the new
+  `StartConsolidationWorkers` (called right where `terminateConsolidation` resets to
+  `false`), replacing the old flush-triggered `SubmitConsolidationExamination` self-chain.
+- **Removed**: the per-pair `consolSlotOwner` concurrency-cap array and
+  `CONSOLIDATION_THREADS_PER_PAIR` constant entirely -- no per-pair cap exists anymore;
+  `ClaimRegistry` alone mediates multiple workers reaching the same pair.
+  `ConsolidationSlotStats` is now indexed by each worker's own stable ThreadPool index
+  (flat `CONSOLIDATION_POOL_THREADS`-sized array) instead of `(writer, color, slot)`,
+  with new `writerIdx`/`player` fields on each entry so the status display can still
+  label which pair a given active worker is merging.
+- **New `consolScanning[writer][color]` lock-free flag** (`InterlockedCompareExchange`):
+  prevents multiple workers from redundantly re-scanning/re-statting the same pair's
+  files in the same sweep -- a worker that finds a pair already being examined skips it
+  for this sweep (never blocks) rather than wastefully duplicating the scan. Deliberately
+  narrow-scoped: released the instant a claim attempt resolves (success or failure),
+  well before any real merge I/O starts, so it never limits how many merges can run
+  concurrently on one pair, only how many workers can be *deciding* what to merge on it
+  at the same instant.
+- Shutdown responsiveness improved further: each worker checks `terminateConsolidation`
+  between every single pair in its sweep (not just once per cycle), so at most one
+  `TryConsolidatePair` call's worth of extra work can happen per worker after shutdown is
+  requested -- tighter than the old self-chaining design could guarantee.
+- `StatsListener`'s `Consol` status line now shows one line per active worker, labeled
+  with the worker's own index (e.g. `D: black (w3)`) rather than a synthetic per-pair
+  slot number.
+
+---
+
 ## [0.32.10] - 2026-07-24
 
 ### Fixed a large-but-under-cap file permanently blocking consolidation behind it

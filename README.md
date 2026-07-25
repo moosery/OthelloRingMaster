@@ -41,8 +41,8 @@ Store drive (Y:)
     LZ4-compress staging → in-memory pool segment (no disk I/O)
          │  [pool full: FlushMergeWriterBuffer k-way merges pool (black + white concurrently)
          │              → writer_black/white_NNNN.rsfz on D:, E:, ...]
-         │  [background, separate idle-core thread pool: DoBackgroundConsolidation opportunistically
-         │              merges small writer files together on D:/E: themselves, capped at
+         │  [background, separate idle-core thread pool: TryConsolidatePair opportunistically
+         │              merges small writer files together on D:/E: themselves, inputs capped at
          │              CONSOLIDATION_SIZE_CAP_BYTES -- shrinks what DoEndOfLevelMerge has to process]
          │  [NVMe low: DoCrossDriveIntermediateMerge → imerge files on F:]
          │
@@ -72,20 +72,22 @@ Store drive (Y:)
 - **Merge-writer threads** -- one per fast NVMe directory, same staging/pool/flush design as
   `OthelloLevelBlaster`'s own (see that project's README for the full mechanics) -- opaque
   16-byte board keys move through this whole stage without any ring-specific handling.
-- **Background small-file consolidation** -- a dedicated thread pool (separate from the
-  merge-writer pool, so it draws from otherwise-idle cores and never competes with active
-  flush-writing) opportunistically merges small D:/E: writer files together as they
-  accumulate. One shared pool (a flat thread count, independent of drive count) services
-  every (writer drive, color) pair, with up to a few concurrent merges allowed per pair at
-  once, each on disjoint files -- coordinated through a lock-free per-pair file-ticket
-  allocator plus a small claim registry (which file indices are currently spoken for),
-  rather than one lock per pair covering an entire merge. Files at or above
-  `CONSOLIDATION_SIZE_CAP_BYTES` (100GB, adjustable) are left alone -- not worth the merge
-  cost once a file is already that large; new incoming files start their own fresh
-  consolidation lineage independent of an already-graduated one. Shrinks both the fan-in
-  and the total volume `DoEndOfLevelMerge` has to process, on top of whatever
-  `DoCrossDriveIntermediateMerge` itself later folds in -- that mechanism checks the same
-  claim registry before touching a file, so it can't race a live consolidation pass.
+- **Background small-file consolidation** -- a dedicated pool of persistent worker threads
+  (separate from the merge-writer pool, so it draws from otherwise-idle cores and never
+  competes with active flush-writing), flat-sized and independent of drive count. Each
+  worker loops for the whole level: sleep, sweep every (writer drive, color) pair merging
+  whatever's eligible, sleep again -- no per-pair concurrency cap, since ClaimRegistry
+  alone (a lock-free per-pair file-ticket allocator plus a small claim registry tracking
+  which file indices are currently spoken for) already mediates multiple workers reaching
+  the same pair in the same sweep. Files at or above `CONSOLIDATION_SIZE_CAP_BYTES`
+  (100GB, adjustable) are excluded as merge *inputs* -- not worth the merge cost once a
+  file is already that large -- but the cap never constrains how large a merge's *output*
+  can grow: two files each individually under the cap always merge freely, and the result
+  then naturally excludes itself from future consideration once it crosses the cap on its
+  own next examination. Shrinks both the fan-in and the total volume `DoEndOfLevelMerge`
+  has to process, on top of whatever `DoCrossDriveIntermediateMerge` itself later folds in
+  -- that mechanism checks the same claim registry before touching a file, so it can't
+  race a live consolidation pass.
 - **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_FANIN`)
   grouped-merge design as `OthelloLevelBlaster`. When a level's merge target is ring format
   (i.e. always, for the real per-level store), cascade's own intermediate group files become

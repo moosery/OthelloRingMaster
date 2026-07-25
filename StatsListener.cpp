@@ -388,48 +388,40 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         }
     }
 
-    /* Active background consolidation (DoBackgroundConsolidation) -- up to
-    ** CONSOLIDATION_THREADS_PER_PAIR concurrent examinations can be active
-    ** per (writer, color) pair now that pConsolidationPool is one shared
-    ** pool servicing every pair, so this prints one line per active slot
-    ** (labeled "#1"/"#2"/... to disambiguate concurrent slots on the same
-    ** pair) rather than assuming at most one per writer. Same "records
-    ** popped x 16 bytes" uncompressed-equivalent convention as every other
-    ** progress line, not a literal disk-write rate.
+    /* Active background consolidation (TryConsolidatePair) -- one line per
+    ** active consolidation worker (CONSOLIDATION_POOL_THREADS total, no
+    ** per-pair cap), labeled with the worker's own index since more than
+    ** one worker can in principle be merging the same (writer, color) pair
+    ** at once. Same "records popped x 16 bytes" uncompressed-equivalent
+    ** convention as every other progress line, not a literal disk-write rate.
     */
     {
         uint64_t nowMs = GetTickCount64();
         static const char* kConsolPlayerNames[2] = { "white", "black" };
-        for (int wi = 0; wi < pSt->numMergeWriters; wi++)
+        for (int w = 0; w < CONSOLIDATION_POOL_THREADS; w++)
         {
-            for (int p = 0; p <= 1; p++)
-            {
-                for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
-                {
-                    PConsolidationSlotStats pSlot = ConsolSlot(pSt, wi, p, s);
-                    if (!pSlot->active) continue;
+            PConsolidationSlotStats pSlot = ConsolSlot(pSt, w);
+            if (!pSlot->active) continue;
 
-                    double   doneGB  = pSlot->doneBytes  / (1024.0 * 1024.0 * 1024.0);
-                    double   totalGB = pSlot->totalBytes / (1024.0 * 1024.0 * 1024.0);
-                    double   pct     = (pSlot->totalBytes > 0)
-                                       ? 100.0 * (double)pSlot->doneBytes / (double)pSlot->totalBytes
-                                       : 0.0;
-                    uint64_t elapsedMs = nowMs - pSlot->startTickMs;
-                    double   mbps      = (elapsedMs > 200 && pSlot->doneBytes > 0)
-                                       ? (double)pSlot->doneBytes / (1024.0 * 1024.0)
-                                         / (elapsedMs / 1000.0)
-                                       : 0.0;
-                    char detail[28];
-                    snprintf(detail, sizeof(detail), "%c: %s #%d", pSt->mwDirectory[wi][0],
-                             kConsolPlayerNames[p], s + 1);
-                    char etaStr[16];
-                    FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-                    n += snprintf(buf + n, bufSize - n,
-                                  "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
-                                  "Consol", detail, doneGB, totalGB, pct, mbps,
-                                  MbpsToBoardsPerSec(mbps), etaStr);
-                }
-            }
+            double   doneGB  = pSlot->doneBytes  / (1024.0 * 1024.0 * 1024.0);
+            double   totalGB = pSlot->totalBytes / (1024.0 * 1024.0 * 1024.0);
+            double   pct     = (pSlot->totalBytes > 0)
+                               ? 100.0 * (double)pSlot->doneBytes / (double)pSlot->totalBytes
+                               : 0.0;
+            uint64_t elapsedMs = nowMs - pSlot->startTickMs;
+            double   mbps      = (elapsedMs > 200 && pSlot->doneBytes > 0)
+                               ? (double)pSlot->doneBytes / (1024.0 * 1024.0)
+                                 / (elapsedMs / 1000.0)
+                               : 0.0;
+            char detail[28];
+            snprintf(detail, sizeof(detail), "%c: %s (w%d)", pSt->mwDirectory[pSlot->writerIdx][0],
+                     kConsolPlayerNames[pSlot->player], w);
+            char etaStr[16];
+            FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
+            n += snprintf(buf + n, bufSize - n,
+                          "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
+                          "Consol", detail, doneGB, totalGB, pct, mbps,
+                          MbpsToBoardsPerSec(mbps), etaStr);
         }
     }
 

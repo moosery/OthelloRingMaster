@@ -44,3 +44,15 @@ void FlushMergeWriterBuffer(int thdIdx, PSolveContext pCtx);
 ** @param    pCtx - solve context
 */
 void DoEndOfLevelMerge(PSolveContext pCtx);
+
+/*
+** Function: StartConsolidationWorkers
+** @brief    Queues CONSOLIDATION_POOL_THREADS persistent background-
+**           consolidation worker threads for the level about to run.
+** @details  Call once per level, right after terminateConsolidation is
+**           reset to false. Each worker loops (sleep, sweep every writer
+**           drive/color pair, sleep again) until terminateConsolidation is
+**           set at the solve->merge transition.
+** @param    pCtx - solve context
+*/
+void StartConsolidationWorkers(PSolveContext pCtx);

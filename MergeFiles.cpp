@@ -960,9 +960,8 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     return unique;
 }
 
-/* Forward declarations (defined after FlushMergeWriterBuffer) */
+/* Forward declaration (defined after FlushMergeWriterBuffer) */
 static void DoCrossDriveIntermediateMerge(PSolveContext pCtx);
-static void SubmitConsolidationExamination(PSolveContext pCtx, int writerIdx, int player);
 
 /*
 ** ============================================================
@@ -1146,7 +1145,7 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
         if (!hasBlack) return;
         /* FileTicketNext + ClaimSingle replace the old fileIndexCS-protected
         ** read-before-write of mwBlackFileCount[ti] -- lock-free, so this
-        ** flush can never be blocked by a concurrent DoBackgroundConsolidation
+        ** flush can never be blocked by a concurrent TryConsolidatePair
         ** merge on the same (ti, black) pair, however long that merge takes.
         ** See FileTicket.h/ClaimRegistry.h and OthelloTypes.h's mwNextFileIdx
         ** comment for the corruption bug this design fixes.
@@ -1263,15 +1262,11 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
     if (needsMerge)
         DoCrossDriveIntermediateMerge(pCtx);
 
-    /* Give the background consolidator a look at this drive/color too -- a
-    ** new candidate file can only have appeared right here, after a flush
-    ** completes. A no-op queue entry (DoBackgroundConsolidation finds
-    ** nothing to do, or the pair is already at its concurrency cap) is cheap
-    ** and normal; skip queuing entirely for a color whose pool was empty
-    ** this flush.
+    /* Background consolidation is no longer triggered from here -- the
+    ** consolidation worker pool polls every (writer, color) pair on its own
+    ** schedule (ConsolidationWorkerLoop, below) rather than being woken by
+    ** each flush.
     */
-    if (blackFilesCreated) SubmitConsolidationExamination(pCtx, ti, RSF_PLAYER_BLACK);
-    if (whiteFilesCreated) SubmitConsolidationExamination(pCtx, ti, RSF_PLAYER_WHITE);
 }
 
 /*
@@ -1298,7 +1293,7 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
 ** (mwNextFileIdx, OthelloTypes.h) under the lock, but that snapshot alone no
 ** longer guarantees a candidate file is safe to touch -- a ticketed index
 ** can belong to a file still being written, or one currently claimed as
-** input to a live DoBackgroundConsolidation merge. The gather loop below
+** input to a live TryConsolidatePair merge. The gather loop below
 ** claims each candidate via ClaimTryRange (ClaimRegistry.h) before trusting
 ** it; losing that race stops the scan for that writer right there (a
 ** deliberate simplicity trade-off -- consumedArr[ti] is a single scalar
@@ -1735,7 +1730,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
             /* Real physical file count drops by exactly what was just
             ** deleted, per writer -- these files may include ones a
             ** background consolidation pass created (see
-            ** DoBackgroundConsolidation), which is fine; this loop doesn't
+            ** TryConsolidatePair), which is fine; this loop doesn't
             ** care how a file came to exist, only that it's gone now.
             */
             for (int ti = 0; ti < pSt->numMergeWriters; ti++)
@@ -1770,38 +1765,36 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 
 /*
 ** ============================================================
-** DoBackgroundConsolidation
+** TryConsolidatePair / ConsolidationWorkerLoop
 **
 ** Proactively merges small D:/E: writer files together on a single, shared
-** thread pool (pConsolidationPool, CONSOLIDATION_POOL_THREADS threads,
-** servicing every (writer, color) pair) so real dedup work happens on
-** otherwise-idle cores during solve, shrinking the fan-in/volume the final
-** end-of-level merge into Y: has to process. Complements
-** DoCrossDriveIntermediateMerge above (reactive, file-count/space
-** triggered, runs on pMergeWriterPool instead) rather than replacing it.
+** thread pool (pConsolidationPool, CONSOLIDATION_POOL_THREADS persistent
+** worker threads) so real dedup work happens on otherwise-idle cores during
+** solve, shrinking the fan-in/volume the final end-of-level merge into Y:
+** has to process. Complements DoCrossDriveIntermediateMerge above (reactive,
+** file-count/space triggered, runs on pMergeWriterPool instead) rather than
+** replacing it.
 **
-** Coordination is now entirely through ClaimRegistry (ClaimRegistry.h,
+** Design (replaces an earlier event-driven, self-chaining-job version --
+** see project_background_nvme_consolidation_design memory for that
+** history): each worker thread runs ConsolidationWorkerLoop for the whole
+** level -- sleep CONSOLIDATION_POLL_INTERVAL_MS, sweep every (writer drive,
+** color) pair via TryConsolidatePair, sleep again -- queued fresh at each
+** level's start by StartConsolidationWorkers (called from
+** OthelloRingMaster.cpp right where terminateConsolidation is reset to
+** false). No per-pair concurrency cap exists: if multiple workers reach the
+** same pair in the same sweep, ClaimRegistry alone decides who actually
+** merges (one wins the claim, the rest find nothing left to do and move
+** on) -- simpler than the old consolSlotOwner slot-ownership array, which
+** existed only to enforce a cap this design no longer needs.
+**
+** Coordination is entirely through ClaimRegistry (ClaimRegistry.h,
 ** OthelloTypes.h), not a lock spanning the whole operation: FileTicketNext
 ** hands out a unique output index instantly (lock-free), ClaimTryRange
 ** claims a batch of existing input files all-or-nothing, and
 ** DoCrossDriveIntermediateMerge checks ClaimIsHeld per candidate before
 ** touching a file, so it can't race a live consolidation pass. Nothing here
-** holds a lock across the actual merge I/O -- a previous version held
-** fileIndexCS[writerIdx][player] for the whole scan-through-cleanup span,
-** which meant flush (which needed that same lock) could get blocked behind
-** a multi-minute consolidation merge on the identical pair, and (once
-** multiple drives could consolidate concurrently) could stall the entire
-** GPU generation pipeline (confirmed live 2026-07-23). ClaimRegistry fixes
-** this at its root: flush and consolidation never contend for the same lock
-** at all now.
-**
-** Concurrency: up to CONSOLIDATION_THREADS_PER_PAIR examinations may run at
-** once for the SAME (writer, color) pair, each on disjoint files, via the
-** consolSlotOwner claim array (OthelloTypes.h) -- see the slot-claim step at
-** the top of DoBackgroundConsolidation below. Every examination self-chains
-** (queues the next one) on completion, in addition to being triggered by
-** every flush that produces a new file, so a pair keeps getting swept as
-** long as material exists.
+** holds a lock across the actual merge I/O.
 **
 ** Uses its own independent low-water-mark HINT (mwBlack/WhiteConsolidatedUpTo,
 ** OthelloTypes.h) purely as a scan-start optimization -- real correctness
@@ -1868,63 +1861,40 @@ static bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveCont
 }
 
 /*
-** Function: DoBackgroundConsolidation
-** @brief    One consolidation examination for one (writer drive, player)
-**           pair: claims one of CONSOLIDATION_THREADS_PER_PAIR concurrency
-**           slots, scans for a batch of small, unclaimed files (skipping
-**           over anything claimed or already graduated), and if 2+ qualify
-**           and there's room on the drive, merges them into one new file.
-**           A no-op if there's nothing to do, if it loses a claim race, or
-**           if the pair is already at its concurrency cap -- none of these
-**           are errors. Self-chains (queues the next examination for this
-**           same pair) on every path except level-end termination -- see
-**           file section comment above for the full design.
+** Function: TryConsolidatePair
+** @brief    One consolidation sweep for one (writer drive, player) pair:
+**           scans for a batch of small, unclaimed files under the size cap
+**           (skipping over anything claimed or already graduated), and if
+**           2+ qualify and there's room on the drive, merges them into one
+**           new file. A no-op if there's nothing to do or it loses a claim
+**           race -- neither is an error; the caller (ConsolidationWorkerLoop)
+**           will look again next sweep.
 ** @param    pCtx      - solve context
 ** @param    writerIdx - which writer drive (0..numMergeWriters-1)
 ** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    workerIdx - calling worker's stable ConsolSlot() stats index
 */
-static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int player)
+static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, uint32_t workerIdx)
 {
     POthelloRingMasterState  pSt   = pCtx->pState;
     POthelloRingMasterConfig pCfg  = pCtx->pConfig;
     int                      level = (int)pSt->playLevel;
 
-    /* Step 0: claim one of this pair's CONSOLIDATION_THREADS_PER_PAIR slots.
-    ** With one shared pConsolidationPool, a job's ThreadPool-assigned thdIdx
-    ** is a global worker index, not usable as a per-pair slot number -- this
-    ** array does double duty as both the concurrency cap and the stable slot
-    ** number ConsolSlot() addresses. Declining (all slots taken) touches
-    ** nothing else and doesn't self-chain: the threads already holding those
-    ** slots each self-chain on their own completion, and future flushes
-    ** queue further attempts too, so this decline isn't on the only path to
-    ** progress.
-    */
-    volatile LONG* pSlotOwner = pSt->consolSlotOwner[writerIdx][player];
-    int slotIdx = -1;
-    for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
-    {
-        if (InterlockedCompareExchange(&pSlotOwner[s], 1, 0) == 0)
-        { slotIdx = s; break; }
-    }
-    if (slotIdx < 0)
-        return;   /* pair is at its concurrency cap -- decline, nothing claimed yet */
-
-    /* Bail out here, before any scanning/claiming/reserving starts, if
-    ** shutdown was already requested by the time this queued job got to
-    ** run. Everything below this point does real work (up to
-    ** MAX_CONSOLIDATION_BATCH real GetFileAttributesExA disk-stat calls,
-    ** ClaimTryRange, FileTicketNext, DriveReserve) with no termination
-    ** check of its own until the KWayMergeFiles call much further down --
-    ** found live 2026-07-23: a burst of self-chained jobs queued right
-    ** before shutdown each had to run their whole scan phase before
-    ** noticing terminateConsolidation, adding real (if modest) delay to
-    ** the solve->merge transition's WaitForPoolIdle(pConsolidationPool).
-    */
     if (pSt->terminateConsolidation)
-    {
-        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
         return;
-    }
+
+    /* Skip this pair entirely (rather than block) if another worker is
+    ** already between building a candidate batch and resolving its own
+    ** ClaimTryRange attempt here -- avoids every worker redundantly
+    ** re-scanning/re-statting the exact same files when several converge
+    ** on one pair in the same sweep. Released well before any real merge
+    ** I/O starts (see release points below), so it never limits how many
+    ** merges can run concurrently on this pair, only how many workers can
+    ** be deciding what to merge on it at the same instant.
+    */
+    volatile LONG* pScanning = &pSt->consolScanning[writerIdx][player];
+    if (InterlockedCompareExchange(pScanning, 1, 0) != 0)
+        return;
 
     int  ticketSnap = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[writerIdx][player], 0, 0);
     volatile int* pConsolUp = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo : pSt->mwWhiteConsolidatedUpTo;
@@ -1979,7 +1949,7 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
 
         batchPaths[batchCount] = (char*)MemMalloc("consolidatePath", strlen(path) + 1);
         if (!batchPaths[batchCount])
-            Fatal(FATAL_ALLOCATION_FAILED, "DoBackgroundConsolidation: path alloc");
+            Fatal(FATAL_ALLOCATION_FAILED, "TryConsolidatePair: path alloc");
         strcpy(batchPaths[batchCount], path);
         batchIndices[batchCount] = idx;
         runningSize += sz;
@@ -1989,20 +1959,17 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
 
     if (batchCount < 2)
     {
+        InterlockedExchange(pScanning, 0);
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
-        if (!pSt->terminateConsolidation)
-            SubmitConsolidationExamination(pCtx, writerIdx, player);
-        return;   /* nothing worth merging right now */
+        return;   /* nothing worth merging right now -- next sweep looks again */
     }
 
-    if (!ClaimTryRange(pSt, writerIdx, player, batchIndices, batchCount))
+    bool gotClaim = ClaimTryRange(pSt, writerIdx, player, batchIndices, batchCount);
+    InterlockedExchange(pScanning, 0);   /* claim attempt resolved either way -- release before any merge I/O */
+    if (!gotClaim)
     {
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
-        if (!pSt->terminateConsolidation)
-            SubmitConsolidationExamination(pCtx, writerIdx, player);
-        return;   /* lost the race -- normal; nothing claimed, nothing to release */
+        return;   /* lost the race -- normal (e.g. DoCrossDriveIntermediateMerge got there first); nothing claimed, nothing to release */
     }
 
     /* Merge the batch into one new file, appended at a brand-new ticketed
@@ -2020,9 +1987,6 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         ClaimReleaseOne(pSt, writerIdx, player, outIdx);
         ClaimReleaseRange(pSt, writerIdx, player, batchIndices, batchCount);
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
-        if (!pSt->terminateConsolidation)
-            SubmitConsolidationExamination(pCtx, writerIdx, player);
         return;   /* no room right now -- no retry loop; DoCrossDriveIntermediateMerge's own space-pressure trigger covers real low-space situations */
     }
 
@@ -2041,10 +2005,12 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
     ** are set before the active flag so a concurrent stats read never sees
     ** a half-initialized in-progress state.
     */
-    PConsolidationSlotStats pSlot = ConsolSlot(pSt, writerIdx, player, slotIdx);
+    PConsolidationSlotStats pSlot = ConsolSlot(pSt, workerIdx);
     int64_t totalProgressBytes = 0;
     for (int i = 0; i < batchCount; i++)
         totalProgressBytes += PeekRecordCount(batchPaths[i]) * (int64_t)sizeof(UINT64_PAIR);
+    pSlot->writerIdx   = writerIdx;
+    pSlot->player      = player;
     pSlot->totalBytes  = totalProgressBytes;
     pSlot->doneBytes   = 0;
     pSlot->startTickMs = GetTickCount64();
@@ -2065,15 +2031,13 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         ** real is lost; they're just picked up again by whatever runs next
         ** (a future level's fresh consolidation pass never sees them, since
         ** every restart wipes the writer dirs wholesale, but a same-level
-        ** DoCrossDriveIntermediateMerge or the final merge will). Do NOT
-        ** self-chain -- the level is ending.
+        ** DoCrossDriveIntermediateMerge or the final merge will).
         */
         DeleteFileA(outPath);
         ClaimReleaseOne(pSt, writerIdx, player, outIdx);
         ClaimReleaseRange(pSt, writerIdx, player, batchIndices, batchCount);
         DriveReclaim(pSt, driveLetter, (int64_t)runningSize);
         for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
         return;
     }
 
@@ -2124,41 +2088,55 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
 
     if (idx > pConsolUp[writerIdx])
         pConsolUp[writerIdx] = idx;   /* best-effort hint advance past this batch (racy write, harmless if lost) */
-
-    InterlockedExchange((volatile LONG*)&pSlotOwner[slotIdx], 0);
-
-    if (!pSt->terminateConsolidation)
-        SubmitConsolidationExamination(pCtx, writerIdx, player);   /* self-chain */
 }
 
 /*
-** Function: SubmitConsolidationExamination
-** @brief    Queues one consolidation examination for one (writer drive,
-**           color) pair onto the single shared pConsolidationPool --
-**           called right after a flush produces a new file for that pair
-**           (that's the only time new candidate files can have appeared),
-**           and self-chained by DoBackgroundConsolidation on every
-**           completion except level-end termination. A queued attempt that
-**           finds nothing to do, or that finds the pair already at its
-**           concurrency cap, is a normal, cheap no-op.
+** Function: ConsolidationWorkerLoop
+** @brief    Body run by each of the CONSOLIDATION_POOL_THREADS consolidation
+**           workers for the whole level: sleep, sweep every (writer drive,
+**           color) pair via TryConsolidatePair, sleep again, until
+**           terminateConsolidation is set. Checks the flag between every
+**           pair (not just once per sweep) so shutdown is noticed promptly
+**           -- at most one TryConsolidatePair call's worth of extra work
+**           per worker, a tighter bound than the old self-chaining design
+**           could give (see project_background_nvme_consolidation_design
+**           memory for the v0.32.6 fix this improves on).
 ** @param    pCtx      - solve context
-** @param    writerIdx - which writer drive
-** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    workerIdx - this worker's stable ThreadPool index, used to
+**                       address its own ConsolSlot() stats entry
 */
-static void SubmitConsolidationExamination(PSolveContext pCtx, int writerIdx, int player)
+static void ConsolidationWorkerLoop(PSolveContext pCtx, uint32_t workerIdx)
 {
-    pCtx->pState->pConsolidationPool->QueueJob(
-        [pCtx, writerIdx, player](uint32_t /*thdIdx*/)
+    POthelloRingMasterState pSt = pCtx->pState;
+    while (!pSt->terminateConsolidation)
+    {
+        for (int writerIdx = 0; writerIdx < pSt->numMergeWriters && !pSt->terminateConsolidation; writerIdx++)
         {
-            /* thdIdx is a global worker index shared across every (writer,
-            ** color) pair now that pConsolidationPool is one pool for all of
-            ** them -- not usable as a per-pair slot number. See consolSlotOwner
-            ** (OthelloTypes.h) for how DoBackgroundConsolidation claims its
-            ** own slot internally.
-            */
-            DoBackgroundConsolidation(pCtx, writerIdx, player);
+            TryConsolidatePair(pCtx, writerIdx, RSF_PLAYER_BLACK, workerIdx);
+            if (pSt->terminateConsolidation) break;
+            TryConsolidatePair(pCtx, writerIdx, RSF_PLAYER_WHITE, workerIdx);
         }
-    );
+        if (pSt->terminateConsolidation) break;
+        Sleep(CONSOLIDATION_POLL_INTERVAL_MS);
+    }
+}
+
+/*
+** Function: StartConsolidationWorkers
+** @brief    Queues CONSOLIDATION_POOL_THREADS long-running
+**           ConsolidationWorkerLoop jobs onto pConsolidationPool -- one per
+**           worker thread, each running until terminateConsolidation is
+**           set. Call once per level, right after terminateConsolidation is
+**           reset to false (OthelloRingMaster.cpp).
+** @param    pCtx - solve context
+*/
+void StartConsolidationWorkers(PSolveContext pCtx)
+{
+    for (uint32_t i = 0; i < CONSOLIDATION_POOL_THREADS; i++)
+    {
+        pCtx->pState->pConsolidationPool->QueueJob(
+            [pCtx](uint32_t workerIdx) { ConsolidationWorkerLoop(pCtx, workerIdx); });
+    }
 }
 
 /*

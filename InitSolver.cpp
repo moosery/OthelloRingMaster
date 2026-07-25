@@ -288,11 +288,8 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
         pState->mwWhiteConsolidatedUpTo[i] = 0;
         pState->mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
         pState->mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
-        for (int s = 0; s < CONSOLIDATION_THREADS_PER_PAIR; s++)
-        {
-            pState->consolSlotOwner[i][RSF_PLAYER_BLACK][s] = 0;
-            pState->consolSlotOwner[i][RSF_PLAYER_WHITE][s] = 0;
-        }
+        pState->consolScanning[i][RSF_PLAYER_BLACK] = 0;
+        pState->consolScanning[i][RSF_PLAYER_WHITE] = 0;
     }
 
     double totalAllocGB = (pState->pingPongBufferSize
@@ -315,13 +312,12 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
                   i, pState->mwBufferSize);
     }
 
-    /* Background-consolidation live-progress slots -- MemMalloc'd (not a
-    ** MAX_WRITERS-sized fixed array baked into the struct) and sized off the
-    ** real runtime numMergeWriters, so both consolidation threads and the
-    ** stats thread reach the same shared memory via pConsolSlotStats/
-    ** ConsolSlot() (OthelloTypes.h).
+    /* Background-consolidation worker live-progress slots -- MemMalloc'd
+    ** (not a fixed array baked into the struct), one per worker thread, so
+    ** both consolidation workers and the stats thread reach the same
+    ** shared memory via pConsolSlotStats/ConsolSlot() (OthelloTypes.h).
     */
-    size_t numConsolSlots = (size_t)pState->numMergeWriters * 2 * CONSOLIDATION_THREADS_PER_PAIR;
+    size_t numConsolSlots = (size_t)CONSOLIDATION_POOL_THREADS;
     pState->pConsolSlotStats = (ConsolidationSlotStats*)MemMalloc("consolSlotStats",
                                    numConsolSlots * sizeof(ConsolidationSlotStats));
     if (!pState->pConsolSlotStats)
@@ -816,14 +812,16 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create stats thread pool");
 
     /* Background small-file consolidator: ONE shared pool, CONSOLIDATION_POOL_THREADS
-    ** threads, servicing every (writer, color) pair's examination jobs --
-    ** deliberately flat-sized (not scaled by numMWThreads/drive count) so
-    ** adding more NVMe drives never grows total thread count. Per-pair
-    ** concurrency is capped separately via consolSlotOwner (OthelloTypes.h).
-    ** A SEPARATE pool from pMergeWriterPool so it draws from otherwise-idle
-    ** cores and never competes with active flush-writing. See
-    ** DoBackgroundConsolidation (MergeFiles.cpp) and
-    ** project_background_nvme_consolidation_design memory.
+    ** persistent worker threads -- deliberately flat-sized (not scaled by
+    ** numMWThreads/drive count) so adding more NVMe drives never grows
+    ** total thread count. Each worker runs ConsolidationWorkerLoop for the
+    ** whole level (queued fresh at level start, see OthelloRingMaster.cpp):
+    ** sleep, sweep every (writer, color) pair merging whatever's eligible,
+    ** sleep again -- no per-pair concurrency cap, ClaimRegistry alone
+    ** mediates multiple workers reaching the same pair. A SEPARATE pool
+    ** from pMergeWriterPool so it draws from otherwise-idle cores and never
+    ** competes with active flush-writing. See TryConsolidatePair
+    ** (MergeFiles.cpp) and project_background_nvme_consolidation_design memory.
     */
     pState->pConsolidationPool = new ThreadPool(CONSOLIDATION_POOL_THREADS, "ConsolidationPool");
     if (!pState->pConsolidationPool)
@@ -851,8 +849,8 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     LoggerLog("  Board size         : %dx%d  (levels 0..%d)\n",
               pConfig->boardSize, pConfig->boardSize, lastLevel);
     LoggerLog("  MW threads         : %d\n", numMWThreads);
-    LoggerLog("  Consolidation thrds: %d shared  (cap %d per drive/color pair, size cap %llu GB)\n",
-              CONSOLIDATION_POOL_THREADS, CONSOLIDATION_THREADS_PER_PAIR,
+    LoggerLog("  Consolidation thrds: %d shared  (poll every %dms, size cap %llu GB)\n",
+              CONSOLIDATION_POOL_THREADS, CONSOLIDATION_POLL_INTERVAL_MS,
               (unsigned long long)CONSOLIDATION_SIZE_CAP_GB);
     LoggerLog("  GPU threads        : %d\n", numGPUFeederThreads);
     LoggerLog("  Stats port         : %d\n", (int)pConfig->statsPort);
