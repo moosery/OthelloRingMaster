@@ -1810,9 +1810,12 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 ** ============================================================
 */
 
-/* Soft cap on files merged in one consolidation pass -- CONSOLIDATION_SIZE_CAP_BYTES
-** bounds this naturally in practice; this just guards against a pathological
-** run of many tiny files in one go.
+/* Hard cap on files merged in one consolidation pass. Since the batch-build
+** loop no longer bounds a batch's combined size (see the comment at its
+** "no combined-size check" point below -- only each individual input file's
+** own size is checked against CONSOLIDATION_SIZE_CAP_BYTES), this count is
+** now the only thing standing between a long run of small eligible files
+** and an unbounded single merge.
 */
 #define MAX_CONSOLIDATION_BATCH 64
 
@@ -1960,7 +1963,19 @@ static void DoBackgroundConsolidation(PSolveContext pCtx, int writerIdx, int pla
         if (ClaimIsHeld(pSt, writerIdx, player, idx)) { idx++; continue; }
         if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, idx, &sz)) { idx++; continue; }
         if (sz >= CONSOLIDATION_SIZE_CAP_BYTES) { idx++; continue; }
-        if (batchCount > 0 && runningSize + sz >= CONSOLIDATION_SIZE_CAP_BYTES) break;   /* combining would cross the cap -- leave it for next time */
+        /* Deliberately no combined-size check here: the cap gates which
+        ** individual files are worth considering as inputs (the check just
+        ** above), not how big the merge OUTPUT is allowed to be. A file
+        ** already close to the cap (e.g. 90GB) is still a perfectly good
+        ** input -- excluding it here once used to mean it could never pair
+        ** with anything, permanently blocking every smaller file behind it
+        ** in ticket order (found live, 2026-07-24: a 90GB file sat at the
+        ** front of D:white's queue and stalled all consolidation behind it
+        ** for the rest of the level). Once a merge's output does reach the
+        ** cap, it naturally graduates out of future consideration via the
+        ** same per-file check on its next examination -- no separate
+        ** combined-size gate is needed to achieve that.
+        */
 
         batchPaths[batchCount] = (char*)MemMalloc("consolidatePath", strlen(path) + 1);
         if (!batchPaths[batchCount])

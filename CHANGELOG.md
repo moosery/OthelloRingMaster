@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.32.10] - 2026-07-24
+
+### Fixed a large-but-under-cap file permanently blocking consolidation behind it
+
+- **User-caught**: `OthelloRingMasterStatus` showed no consolidation activity for D:white
+  for an extended stretch, even though the writer directory had 3 files sitting at ~25-26GB
+  each -- comfortably mergeable. User correctly pushed back on "nothing eligible right now"
+  as an explanation and asked for the real directory listing.
+- **Root cause**: `writer_white_0006.rsfzl` was 90.17GB -- under the 100GB cap on its own
+  (so never excluded as "already graduated"), but too close to the cap to combine with
+  *anything* (even the smallest available file would push the total over 100GB). Since the
+  consolidation scanner always starts from the lowest remaining unclaimed file, `0006`
+  (the lowest index) was selected as the batch's first member every single time, then the
+  old combined-size check (`runningSize + sz >= CAP`) rejected every subsequent candidate
+  and aborted the whole batch with only 1 file in it -- never enough to merge (needs 2+).
+  This never resolved on retry: `0006` doesn't change size, so it kept winning the
+  "lowest available" scan every time, permanently blocking every smaller file behind it
+  (`0007`/`0008`/`0009`/`0010`, all easily combinable with each other) from ever being
+  considered, for the rest of the level. No data was at risk -- the stuck files still get
+  picked up correctly by the final end-of-level merge -- but consolidation's fan-in benefit
+  was silently lost for that pair once this happened.
+- **Fix**: removed the combined-size check entirely. The 100GB cap now gates only whether
+  an individual file is still worth considering as a merge *input* (the existing, unchanged
+  `sz >= CAP` check) -- not how large the merge *output* is allowed to be. A 90GB file and a
+  30GB file now merge freely into a ~120GB output; that output then naturally excludes
+  itself from future batches via the same per-file check on its next examination, achieving
+  the intended "leave big files alone" behavior without needing a separate combined-size
+  gate that could stall behind an unlucky large file. `MAX_CONSOLIDATION_BATCH` (64 files)
+  is now the only remaining bound on how large a single merge can grow.
+
+---
+
 ## [0.32.9] - 2026-07-24
 
 ### Added automatic recovery from transient store-read failures
