@@ -1375,6 +1375,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
         pSt->imergeTotalInputBytes[player] = 0;
         pSt->imergeDoneInputBytes[player]  = 0;
         pSt->imergeStartTickMs[player]     = GetTickCount64();
+        pSt->imergeFileCount[player]       = 0;
         if (pSt->terminateThreads) break;
 
         int* snapArr     = (player == RSF_PLAYER_BLACK) ? snapBlack               : snapWhite;
@@ -1604,6 +1605,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                       RSFPlayerStr(player), outPath, numFiles,
                       totalBytes / (1024.0 * 1024.0 * 1024.0));
 
+            pSt->imergeFileCount[player] = numFiles;
             uint64_t unique = KWayMergeFiles(paths, numFiles, outPath,
                                               &pSt->imergeDoneInputBytes[player], compress, &pSt->terminateThreads);
 
@@ -1686,6 +1688,7 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                       RSFPlayerStr(player), outPath, numFiles,
                       totalBytes / (1024.0 * 1024.0 * 1024.0));
 
+            pSt->imergeFileCount[player] = numFiles;
             uint64_t unique = KWayMergeFiles(paths, numFiles, outPath,
                                               &pSt->imergeDoneInputBytes[player], compress, &pSt->terminateThreads);
 
@@ -2011,6 +2014,7 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
         totalProgressBytes += PeekRecordCount(batchPaths[i]) * (int64_t)sizeof(UINT64_PAIR);
     pSlot->writerIdx   = writerIdx;
     pSlot->player      = player;
+    pSlot->fileCount   = batchCount;
     pSlot->totalBytes  = totalProgressBytes;
     pSlot->doneBytes   = 0;
     pSlot->startTickMs = GetTickCount64();

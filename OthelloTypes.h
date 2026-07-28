@@ -24,7 +24,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.33.0"
+#define VERSION "0.33.1"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -212,6 +212,7 @@ typedef struct __ConsolidationSlotStats
     volatile int      active;
     int               writerIdx;   /* valid only while active */
     int               player;      /* valid only while active */
+    int               fileCount;   /* valid only while active -- number of input files this merge is combining */
     volatile int64_t  totalBytes;
     volatile int64_t  doneBytes;
     uint64_t          startTickMs;
@@ -417,6 +418,7 @@ typedef struct __OthelloRingMasterState
     volatile int64_t  imergeTotalInputBytes[MAX_WRITERS];
     volatile int64_t  imergeDoneInputBytes[MAX_WRITERS];
     uint64_t          imergeStartTickMs[MAX_WRITERS];   /* GetTickCount64() when the imerge starts */
+    int               imergeFileCount[MAX_WRITERS];     /* valid only while imergeActive -- number of input files this cross-drive merge is combining */
 
     /*
     ** Per-writer buffer-full flush progress (RunMergeWriterJob ->

@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.1] - 2026-07-28
+
+### Added file counts to the Consol/iMerge status lines
+
+- `OthelloRingMasterStatus` showed bytes/percentage/MB-per-sec/ETA for active background
+  consolidation and cross-drive intermediate merges, but never how many files a given
+  merge was actually combining -- unlike `DoEndOfLevelMerge`'s own progress line, which
+  already reports this (`src: Nf+Np`).
+- New `ConsolidationSlotStats.fileCount` (set in `TryConsolidatePair` alongside
+  `writerIdx`/`player`, right before the slot goes active) and
+  `OthelloRingMasterState.imergeFileCount[2]` (set in `DoCrossDriveIntermediateMerge`,
+  right before each of its two `KWayMergeFiles` calls, using the same final post-gather
+  `numFiles` value its own log line already prints) extend the existing
+  `mergeInputFileCount`/`mergeInputPoolReaderCount` convention to these two status lines.
+  Both now print a trailing `   files: N` field.
+
 ## [0.33.0] - 2026-07-24
 
 ### Background consolidation redesigned: polling worker pool replaces event-driven jobs

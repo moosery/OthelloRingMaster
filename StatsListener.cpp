@@ -347,9 +347,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                 char etaStr[16];
                 FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
                 n += snprintf(buf + n, bufSize - n,
-                              "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
+                              "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
+                              "   files: %d\n",
                               "iMerge", kPlayerNames[p], doneGB, totalGB, pct, mbps,
-                              MbpsToBoardsPerSec(mbps), etaStr);
+                              MbpsToBoardsPerSec(mbps), etaStr, pSt->imergeFileCount[p]);
             }
         }
     }
@@ -419,9 +420,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             char etaStr[16];
             FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
             n += snprintf(buf + n, bufSize - n,
-                          "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
+                          "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
+                          "   files: %d\n",
                           "Consol", detail, doneGB, totalGB, pct, mbps,
-                          MbpsToBoardsPerSec(mbps), etaStr);
+                          MbpsToBoardsPerSec(mbps), etaStr, pSlot->fileCount);
         }
     }
 
