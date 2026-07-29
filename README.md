@@ -166,6 +166,7 @@ While the solver runs, query live status from another terminal:
 
 ```
 OthelloRingMasterStatus.exe
+OthelloRingMasterStatus.exe --consol   # per-file background-consolidation detail
 ```
 
 ### Retrograde calculator

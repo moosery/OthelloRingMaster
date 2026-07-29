@@ -1806,14 +1806,15 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 ** ============================================================
 */
 
-/* Hard cap on files merged in one consolidation pass. Since the batch-build
-** loop no longer bounds a batch's combined size (see the comment at its
-** "no combined-size check" point below -- only each individual input file's
-** own size is checked against CONSOLIDATION_SIZE_CAP_BYTES), this count is
-** now the only thing standing between a long run of small eligible files
-** and an unbounded single merge.
+/* MAX_CONSOLIDATION_BATCH (hard cap on files merged in one consolidation
+** pass) now lives in OthelloTypes.h, shared with ConsolidationSlotStats'
+** batchIndices sizing -- since the batch-build loop no longer bounds a
+** batch's combined size (see the comment at its "no combined-size check"
+** point below -- only each individual input file's own size is checked
+** against CONSOLIDATION_SIZE_CAP_BYTES), this count is the only thing
+** standing between a long run of small eligible files and an unbounded
+** single merge.
 */
-#define MAX_CONSOLIDATION_BATCH 64
 
 /*
 ** Function: FindConsolidationCandidate
@@ -1830,8 +1831,8 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
 ** @param    pFileSize - out: real on-disk byte size, if found
 ** @return   true if the file exists.
 */
-static bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCtx,
-                                        int writerIdx, int player, int idx, uint64_t* pFileSize)
+bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCtx,
+                                 int writerIdx, int player, int idx, uint64_t* pFileSize)
 {
     POthelloRingMasterState  pSt  = pCtx->pState;
     POthelloRingMasterConfig pCfg = pCtx->pConfig;
@@ -2015,6 +2016,9 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
     pSlot->writerIdx   = writerIdx;
     pSlot->player      = player;
     pSlot->fileCount   = batchCount;
+    for (int i = 0; i < batchCount; i++)
+        pSlot->batchIndices[i] = batchIndices[i];
+    pSlot->outIdx      = outIdx;
     pSlot->totalBytes  = totalProgressBytes;
     pSlot->doneBytes   = 0;
     pSlot->startTickMs = GetTickCount64();

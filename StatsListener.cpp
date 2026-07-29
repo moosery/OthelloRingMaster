@@ -26,6 +26,9 @@
 #include "DriveLedger.h"
 #include "OthelloTypes.h"
 #include "Logger.h"
+#include "MergeFiles.h"
+#include "ClaimRegistry.h"
+#include "Mem.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -584,9 +587,94 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 }
 
 /*
+** Function: BuildConsolResponse
+** @brief    Builds the --consol diagnostic response: every writer-file index
+**           currently found on disk for every (writer drive, color) pair,
+**           its real on-disk size, and its current disposition. Deliberately
+**           uses the exact same real GetFileAttributesExA-based bytes
+**           FindConsolidationCandidate/TryConsolidatePair gate the size cap
+**           on -- NOT the uncompressed-equivalent (recordCount*16) figure the
+**           live progress lines above use -- so "too large to consolidate"
+**           here always agrees with what the consolidator itself decided.
+** @param    pCtx    - solve context
+** @param    buf     - out: response text
+** @param    bufSize - capacity of buf
+*/
+static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
+{
+    POthelloRingMasterState pSt = pCtx->pState;
+    static const char* kPlayerNames[2] = { "white", "black" };   /* indexed by RSF_PLAYER_WHITE(0)/BLACK(1) */
+    size_t n = 0;
+
+    for (int wi = 0; wi < pSt->numMergeWriters; wi++)
+    {
+        for (int player = 0; player <= 1; player++)
+        {
+            n += snprintf(buf + n, bufSize - n, "=== %c: %s ===\n",
+                          pSt->mwDirectory[wi][0], kPlayerNames[player]);
+
+            int ticketSnap = (int)pSt->mwNextFileIdx[wi][player];
+            int shown = 0;
+            for (int idx = 0; idx < ticketSnap; idx++)
+            {
+                char     path[MAX_FULL_PATH_NAME];
+                uint64_t sz;
+                if (!FindConsolidationCandidate(path, sizeof(path), pCtx, wi, player, idx, &sz))
+                    continue;   /* already consolidated away, or never existed */
+
+                const char* baseName = strrchr(path, '\\');
+                baseName = baseName ? baseName + 1 : path;
+
+                char status[64];
+                strcpy(status, "eligible");
+                bool matched = false;
+                for (int w = 0; w < CONSOLIDATION_POOL_THREADS && !matched; w++)
+                {
+                    PConsolidationSlotStats pSlot = ConsolSlot(pSt, w);
+                    if (!pSlot->active || pSlot->writerIdx != wi || pSlot->player != player)
+                        continue;
+                    if (idx == pSlot->outIdx)
+                    {
+                        snprintf(status, sizeof(status), "new output, merge in progress (w%d)", w);
+                        matched = true;
+                        continue;
+                    }
+                    for (int k = 0; k < pSlot->fileCount; k++)
+                    {
+                        if (pSlot->batchIndices[k] == idx)
+                        {
+                            snprintf(status, sizeof(status),
+                                     "actively being consolidated by thread %s (w%d)",
+                                     kPlayerNames[player], w);
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched)
+                {
+                    if (ClaimIsHeld(pSt, wi, player, idx))
+                        strcpy(status, "reserved (cross-drive merge)");
+                    else if (sz >= CONSOLIDATION_SIZE_CAP_BYTES)
+                        strcpy(status, "too large to consolidate");
+                }
+
+                n += snprintf(buf + n, bufSize - n, "  %-28s %9.2f GB  %s\n",
+                              baseName, sz / (1024.0 * 1024.0 * 1024.0), status);
+                shown++;
+            }
+            if (shown == 0)
+                n += snprintf(buf + n, bufSize - n, "  (none)\n");
+        }
+    }
+    n += snprintf(buf + n, bufSize - n, "END\n");
+    (void)n;
+}
+
+/*
 ** Function: HandleClient
-** @brief    Reads one command (STATUS or STOP) from an accepted client
-**           socket, responds, and closes the connection.
+** @brief    Reads one command (STATUS, CONSOL, or STOP) from an accepted
+**           client socket, responds, and closes the connection.
 ** @param    client - the accepted client socket
 ** @param    pCtx   - solve context
 */
@@ -606,6 +694,24 @@ static void HandleClient(SOCKET client, PSolveContext pCtx)
         send(client, msg, (int)strlen(msg), 0);
         LoggerLog("STOP command received via stats port -- requesting graceful shutdown...\n");
         pCtx->pState->terminateThreads = true;
+    }
+    else if (_stricmp(cmd, "CONSOL") == 0)
+    {
+        size_t bufSize = 256 * 1024;
+        char*  buf     = (char*)MemMalloc("consolResponse", bufSize);
+        if (buf)
+        {
+            BuildConsolResponse(pCtx, buf, bufSize);
+            int toSend = (int)strlen(buf);
+            int sent   = 0;
+            while (sent < toSend)
+            {
+                int r = send(client, buf + sent, toSend - sent, 0);
+                if (r == SOCKET_ERROR) break;
+                sent += r;
+            }
+            MemFree(buf);
+        }
     }
     else
     {

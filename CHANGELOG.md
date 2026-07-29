@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.2] - 2026-07-29
+
+### New `--consol` diagnostic: per-file consolidation status
+
+- Motivated by a real production mystery: 7 real writer files sat unconsolidated in
+  `writerDir` for ~12 hours while every active consolidation merge showed exactly
+  `files: 2`. The user's specific "are we claiming files and not releasing them" hypothesis
+  was ruled out by a line-by-line re-trace of `TryConsolidatePair`'s claim/release symmetry
+  and `ClaimRegistry.h`'s primitives (both confirmed correct on every exit path) -- but the
+  underlying mystery needed real per-file visibility to actually explain, not more static
+  code reading.
+- New `OthelloRingMasterStatus --consol` flag sends a `CONSOL` command (new alongside
+  `STATUS`/`STOP`) to a new `BuildConsolResponse` (`StatsListener.cpp`). For every
+  (writer drive, color) pair, it walks every ticket index up to that pair's current
+  `mwNextFileIdx` snapshot via the now-exposed `FindConsolidationCandidate`
+  (`MergeFiles.cpp`/`.h`, no longer `static`), and for every index still physically on disk
+  prints its filename, real on-disk size, and current disposition: actively being
+  consolidated by a specific worker, the new output file a specific worker's merge is
+  currently writing, reserved by a cross-drive intermediate merge, too large for the
+  background consolidator to touch, or eligible and simply not yet picked up.
+- Deliberately uses the same real `GetFileAttributesExA`-based on-disk byte size
+  `FindConsolidationCandidate` already gates `CONSOLIDATION_SIZE_CAP_BYTES` on -- not the
+  uncompressed-equivalent (`recordCount * 16`) figure the live Consol/iMerge progress
+  lines use for their percentage/MB-per-sec display -- so "too large to consolidate" here
+  always agrees with what the consolidator itself actually decided.
+- `ConsolidationSlotStats` gained `batchIndices[MAX_CONSOLIDATION_BATCH]` and `outIdx`
+  (populated in `TryConsolidatePair` right alongside `fileCount`) so the diagnostic can
+  attribute a given on-disk file to the exact worker/slot handling it, rather than
+  guessing from aggregate byte counts. `MAX_CONSOLIDATION_BATCH` moved from a local
+  `MergeFiles.cpp` define into `OthelloTypes.h` so `ConsolidationSlotStats` can size
+  against it.
+
 ## [0.33.1] - 2026-07-28
 
 ### Added file counts to the Consol/iMerge status lines

@@ -37,6 +37,7 @@ static void PrintUsage(const char* prog)
     printf("Usage: %s [options]\n\n", prog);
     printf("  --port N    Connect to solver on port N  [default: %d]\n", DEFAULT_PORT);
     printf("  --stop      Send stop command instead of status query\n");
+    printf("  --consol    Show per-file background-consolidation detail instead of status\n");
     printf("  --help      Show this help\n\n");
     printf("Connects to a running OthelloRingMaster.exe on localhost and prints\n");
     printf("live level progress, drive stats, and completed-level history.\n");
@@ -53,8 +54,9 @@ static void PrintUsage(const char* prog)
 */
 int main(int argc, char* argv[])
 {
-    bool doStop = false;
-    int  port   = DEFAULT_PORT;
+    bool doStop   = false;
+    bool doConsol = false;
+    int  port     = DEFAULT_PORT;
 
     for (int i = 1; i < argc; i++)
     {
@@ -65,6 +67,8 @@ int main(int argc, char* argv[])
         }
         else if (_stricmp(argv[i], "--stop") == 0)
             doStop = true;
+        else if (_stricmp(argv[i], "--consol") == 0)
+            doConsol = true;
         else if (_stricmp(argv[i], "--port") == 0 && i + 1 < argc)
             port = atoi(argv[++i]);
         else
@@ -99,7 +103,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const char* cmd = doStop ? "STOP\n" : "STATUS\n";
+    const char* cmd = doStop ? "STOP\n" : (doConsol ? "CONSOL\n" : "STATUS\n");
     send(s, cmd, (int)strlen(cmd), 0);
 
     /* Timestamp the query on the client side -- the solver's response

@@ -24,7 +24,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.33.1"
+#define VERSION "0.33.2"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -90,6 +90,14 @@
 ** the rest move on to the next pair.
 */
 #define CONSOLIDATION_POOL_THREADS 12
+
+/*
+** Cap on how many input files one TryConsolidatePair batch can gather in a
+** single merge. Shared with ConsolidationSlotStats' batchIndices sizing
+** (OthelloTypes.h) so the --consol diagnostic display can address the exact
+** same array TryConsolidatePair (MergeFiles.cpp) fills in.
+*/
+#define MAX_CONSOLIDATION_BATCH 64
 
 /*
 ** How long each consolidation worker sleeps between sweeps. A worker only
@@ -213,6 +221,8 @@ typedef struct __ConsolidationSlotStats
     int               writerIdx;   /* valid only while active */
     int               player;      /* valid only while active */
     int               fileCount;   /* valid only while active -- number of input files this merge is combining */
+    int               batchIndices[MAX_CONSOLIDATION_BATCH];  /* valid only while active -- ticket indices of this merge's input files (first fileCount entries) */
+    int               outIdx;      /* valid only while active -- ticket index of this merge's new output file */
     volatile int64_t  totalBytes;
     volatile int64_t  doneBytes;
     uint64_t          startTickMs;

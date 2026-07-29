@@ -56,3 +56,22 @@ void DoEndOfLevelMerge(PSolveContext pCtx);
 ** @param    pCtx - solve context
 */
 void StartConsolidationWorkers(PSolveContext pCtx);
+
+/*
+** Function: FindConsolidationCandidate
+** @brief    Locates writer file (writerIdx, player, idx), trying LZ4, then
+**           plain-compressed, then uncompressed naming. Exposed (not static)
+**           so StatsListener.cpp's --consol diagnostic can look up the exact
+**           same real on-disk files/sizes TryConsolidatePair itself reasons
+**           about, rather than re-deriving its own directory scan.
+** @param    outPath   - out: full path, if found
+** @param    outSize   - capacity of outPath
+** @param    pCtx      - solve context
+** @param    writerIdx - which writer drive/thread
+** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    idx       - file index to look up
+** @param    pFileSize - out: real on-disk byte size, if found
+** @return   true if the file exists.
+*/
+bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCtx,
+                                 int writerIdx, int player, int idx, uint64_t* pFileSize);
