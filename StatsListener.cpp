@@ -610,10 +610,21 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
     {
         for (int player = 0; player <= 1; player++)
         {
-            n += snprintf(buf + n, bufSize - n, "=== %c: %s ===\n",
-                          pSt->mwDirectory[wi][0], kPlayerNames[player]);
-
+            /* player is RSF_PLAYER_WHITE(0)/RSF_PLAYER_BLACK(1), same convention
+            ** as kPlayerNames above -- pick the matching low-water-mark array
+            ** without needing RSFFileName.h's macros in this file.
+            */
+            volatile int* pConsolUpArr = (player == 1) ? pSt->mwBlackConsolidatedUpTo
+                                                        : pSt->mwWhiteConsolidatedUpTo;
             int ticketSnap = (int)pSt->mwNextFileIdx[wi][player];
+            int consolUp   = pConsolUpArr[wi];
+            int scanning   = pSt->consolScanning[wi][player];
+
+            n += snprintf(buf + n, bufSize - n,
+                          "=== %c: %-5s ===  pConsolUp: %-6d  ticketSnap: %-6d  scanning: %s\n",
+                          pSt->mwDirectory[wi][0], kPlayerNames[player],
+                          consolUp, ticketSnap, scanning ? "yes" : "no");
+
             int shown = 0;
             for (int idx = 0; idx < ticketSnap; idx++)
             {

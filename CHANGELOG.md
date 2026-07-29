@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.3] - 2026-07-29
+
+### `--consol` now also shows the scan-mechanism state per pair
+
+- Per-file disposition alone couldn't rule out one failure mode: the low-water-mark scan
+  hint (`mwBlack/WhiteConsolidatedUpTo`) sitting ahead of a file `--consol` reports as
+  "eligible" would mean `TryConsolidatePair`'s own scan never looks back far enough to
+  find it, even though nothing about the file itself is wrong. Code review suggests this
+  can't currently happen (the scan-start loop only ever advances past missing/oversized
+  indices, never past a genuinely eligible one), but the diagnostic should let that be
+  confirmed from real data rather than trusted from a read-through.
+- Each pair's header line in `BuildConsolResponse` (`StatsListener.cpp`) now also prints
+  `pConsolUp` (the low-water mark), `ticketSnap` (the upper bound the scan is using), and
+  `scanning` (whether `consolScanning` is held for this pair at the moment of the query,
+  i.e. some worker is between building a batch and resolving its claim right now).
+
 ## [0.33.2] - 2026-07-29
 
 ### New `--consol` diagnostic: per-file consolidation status
