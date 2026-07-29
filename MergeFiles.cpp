@@ -1865,6 +1865,46 @@ bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCt
 }
 
 /*
+** Function: ConsolidationFindScanStart
+** @brief    Finds the first index >= from that's either currently claimed by
+**           someone else or a genuinely eligible (real, unclaimed, under-cap)
+**           candidate -- skipping past anything confirmed permanently gone
+**           (missing) or oversized along the way.
+** @details  Used both to pick a batch's starting point AND, after a
+**           successful merge, to recompute the low-water mark -- reusing the
+**           exact same logic guarantees pConsolUp only ever advances past
+**           indices that are provably safe to never examine again, never
+**           past one that's merely claimed by someone else right now and
+**           could still become a valid future candidate once released. See
+**           the CHANGELOG entry for the real bug this fixes: the batch-build
+**           loop SKIPS (not stops at) a claimed index to keep gathering
+**           further candidates, so its own raw terminal scan position isn't
+**           safe to use for advancing pConsolUp directly.
+** @param    pCtx       - solve context
+** @param    writerIdx  - which writer drive
+** @param    player     - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    from       - index to start scanning from
+** @param    ticketSnap - upper bound (exclusive) to scan up to
+** @return   the first claimed-or-eligible index found, or ticketSnap if
+**           nothing qualifies below it.
+*/
+static int ConsolidationFindScanStart(PSolveContext pCtx, int writerIdx, int player, int from, int ticketSnap)
+{
+    POthelloRingMasterState pSt = pCtx->pState;
+    int      start = from;
+    char     path[MAX_FULL_PATH_NAME];
+    uint64_t sz;
+    while (start < ticketSnap)
+    {
+        if (ClaimIsHeld(pSt, writerIdx, player, start)) break;
+        if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, start, &sz)) { start++; continue; }
+        if (sz >= CONSOLIDATION_SIZE_CAP_BYTES) { start++; continue; }
+        break;
+    }
+    return start;
+}
+
+/*
 ** Function: TryConsolidatePair
 ** @brief    One consolidation sweep for one (writer drive, player) pair:
 **           scans for a batch of small, unclaimed files under the size cap
@@ -1909,16 +1949,7 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
     ** (ClaimIsHeld + real file-existence checks are what keep this correct),
     ** so a racy/imprecise advance here only costs some harmless re-scanning.
     */
-    int start = pConsolUp[writerIdx];
-    char     path[MAX_FULL_PATH_NAME];
-    uint64_t sz;
-    while (start < ticketSnap)
-    {
-        if (ClaimIsHeld(pSt, writerIdx, player, start)) break;
-        if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, start, &sz)) { start++; continue; }
-        if (sz >= CONSOLIDATION_SIZE_CAP_BYTES) { start++; continue; }
-        break;
-    }
+    int start = ConsolidationFindScanStart(pCtx, writerIdx, player, pConsolUp[writerIdx], ticketSnap);
     if (start > pConsolUp[writerIdx])
         pConsolUp[writerIdx] = start;
 
@@ -1932,6 +1963,8 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
     int      batchCount   = 0;
     uint64_t runningSize  = 0;
     int      idx          = start;
+    char     path[MAX_FULL_PATH_NAME];
+    uint64_t sz;
     while (idx < ticketSnap && batchCount < MAX_CONSOLIDATION_BATCH)
     {
         if (ClaimIsHeld(pSt, writerIdx, player, idx)) { idx++; continue; }
@@ -2094,8 +2127,23 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesRemoved, (LONG64)batchCount);
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
 
-    if (idx > pConsolUp[writerIdx])
-        pConsolUp[writerIdx] = idx;   /* best-effort hint advance past this batch (racy write, harmless if lost) */
+    /* Recompute the low-water mark with the SAME safe-stopping scan used to
+    ** find 'start' above -- NOT the batch-build loop's raw terminal 'idx'.
+    ** The batch-build loop skips past indices claimed by someone else (most
+    ** commonly: flush's own in-progress output ticket) to keep gathering
+    ** further candidates, so 'idx' can end up past a ticket that was only
+    ** ever transiently unavailable at scan time. Advancing pConsolUp to
+    ** 'idx' directly would permanently orphan that ticket the moment its
+    ** claim released, since no future scan ever starts below pConsolUp --
+    ** this was a real, confirmed bug (found live via --consol showing a
+    ** genuinely eligible file sitting past pConsolUp). Re-running from
+    ** 'start' now that our own batch's files are deleted correctly stops at
+    ** the first still-claimed-by-someone-else index, or the first newly-
+    ** eligible one, exactly like the original scan-start computation.
+    */
+    int newUp = ConsolidationFindScanStart(pCtx, writerIdx, player, start, ticketSnap);
+    if (newUp > pConsolUp[writerIdx])
+        pConsolUp[writerIdx] = newUp;   /* best-effort hint advance (racy write, harmless if lost) */
 }
 
 /*

@@ -4,6 +4,35 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.5] - 2026-07-29
+
+### Fixed the real root cause of the "files stuck / merges cap at 2" mystery
+
+- **Found via `--consol` against the live run**: `D: white` showed `pConsolUp: 7` while
+  `writer_white_0006.rsfzl` still existed, unclaimed, under the size cap -- genuinely
+  eligible, but sitting *behind* the low-water mark. Since every future
+  `TryConsolidatePair` scan starts from `pConsolUp`, that file could never be examined
+  again -- a real, permanent orphan, exactly the mechanism behind the original 7-stuck-
+  files/`files:2`-forever pattern.
+- **Root cause**: the batch-build loop *skips* (doesn't stop at) any index currently
+  claimed by someone else, so it can keep gathering further candidates beyond it. But
+  flush claims its own new output ticket (`FileTicketNext`+`ClaimSingle`) for the entire
+  duration of the write -- so if a consolidation scan runs while a ticket is mid-flush,
+  it gets skipped over, not stopped at. If that merge then succeeds, the old code
+  advanced `pConsolUp` to the batch-build loop's raw terminal scan position -- which sits
+  *past* that transiently-claimed ticket. Once the flush finished and released its claim,
+  the ticket became a real, permanently-unclaimed file that no future scan would ever
+  reach again, since scans never start below `pConsolUp`. With 12 workers sweeping every
+  ~2s against flushes that can take minutes, this race is common enough to compound into
+  a growing pile of orphans over many hours -- matching every symptom originally observed.
+- **Fix**: extracted the find-start loop into `ConsolidationFindScanStart` (same
+  break-on-claimed-or-eligible, skip-past-missing-or-oversized logic as before, now
+  reusable). On success, `pConsolUp` is advanced by re-running this SAME safe-stopping
+  scan (now that this merge's own files are deleted) instead of trusting the batch-build
+  loop's raw terminal index. This guarantees `pConsolUp` only ever advances past indices
+  proven permanently gone or oversized, never past one merely claimed by someone else at
+  scan time.
+
 ## [0.33.4] - 2026-07-29
 
 ### Fixed `--consol` mislabeling an in-progress flush as a cross-drive merge
