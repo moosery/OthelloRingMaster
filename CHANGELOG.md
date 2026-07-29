@@ -4,6 +4,25 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.4] - 2026-07-29
+
+### Fixed `--consol` mislabeling an in-progress flush as a cross-drive merge
+
+- First real query against a live run showed both writer drives' `0001` files as
+  "reserved (cross-drive merge)" while a flush was actively running on both drives at
+  the same time -- user caught it: "the 0001's are probably reserved since they are
+  involved in the flush," not a cross-drive merge. Correct: `--consol`'s "not matched to
+  any active consolidation slot" fallback assumed any remaining `ClaimIsHeld` claim must
+  be `DoCrossDriveIntermediateMerge` holding an input, but flush claims its own new
+  output ticket too (`FileTicketNext` + `ClaimSingle` in `FlushMergeWriterBuffer`, held
+  for the file's entire write, released only on close) -- indistinguishable from an
+  iMerge input claim by `ClaimIsHeld` alone.
+- `BuildConsolResponse` (`StatsListener.cpp`) now checks `mwFlushActive[writerIdx] &&
+  idx == ticketSnap - 1` first -- flush always targets the newest ticket for a pair, so
+  a held claim there while that writer's flush is active is the flush's own file, not a
+  cross-drive-merge input. Reports "reserved, flush writing this file" in that case,
+  "reserved (cross-drive merge)" otherwise.
+
 ## [0.33.3] - 2026-07-29
 
 ### `--consol` now also shows the scan-mechanism state per pair

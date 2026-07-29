@@ -24,7 +24,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.33.3"
+#define VERSION "0.33.4"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */

@@ -665,7 +665,20 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
                 if (!matched)
                 {
                     if (ClaimIsHeld(pSt, wi, player, idx))
-                        strcpy(status, "reserved (cross-drive merge)");
+                    {
+                        /* Flush claims its own new output ticket (FileTicketNext +
+                        ** ClaimSingle in FlushMergeWriterBuffer) for the whole time
+                        ** it's writing, releasing only on close -- indistinguishable
+                        ** from an iMerge input claim by ClaimIsHeld alone. Flush
+                        ** always targets the newest ticket for a pair, so a held
+                        ** claim on idx == ticketSnap-1 while this writer's flush is
+                        ** active is that file, not a cross-drive merge input.
+                        */
+                        if (pSt->mwFlushActive[wi] && idx == ticketSnap - 1)
+                            strcpy(status, "reserved, flush writing this file");
+                        else
+                            strcpy(status, "reserved (cross-drive merge)");
+                    }
                     else if (sz >= CONSOLIDATION_SIZE_CAP_BYTES)
                         strcpy(status, "too large to consolidate");
                 }
