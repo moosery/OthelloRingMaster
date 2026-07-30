@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.6] - 2026-07-29
+
+### Fixed OthelloRingMasterStoreStats silently blanking BoardsGenerated/DupsRemoved for every level
+
+- User ran `OthelloRingMasterStoreStats.exe` against the real store and noticed
+  `BoardsGenerated`/`DupsRemoved`/`DupsRemovedPercent`/`CumulativeBoardsGenerated` were
+  blank for every single level, including ones completed long ago.
+- Root cause: `StoreStatsScan.cpp`'s `readLevelGenerationStats` read each level's
+  `_complete` sentinel's embedded `LevelStats` payload with a raw, fixed-size
+  `ReadFile(..., sizeof(stats), ...)` check. `LevelStats` grew (consolidation counters
+  inserted mid-struct at v0.32.0) after most real sentinels were already written, so
+  every real sentinel's payload is the older, smaller size -- the size check silently
+  failed for all of them, leaving the CSV columns blank with no error. This is the exact
+  same class of bug `InitSolver.cpp`'s `ReadSentinelStats` was already fixed for at
+  v0.32.7 (see the Sentinel Stats Backward-Compat Regression entry below) -- but that fix
+  never reached this separate, independent reader in the StoreStats tool.
+- Fixed by moving the backward-compatible reader itself (the frozen
+  `LevelStatsPreConsolidation` struct, `LevelStatsFromPreConsolidation` translator, and
+  the size-comparing read logic) out of `InitSolver.cpp` and into `OthelloTypes.h` as a
+  new shared `ReadSentinelLevelStats(path, out)`, used by both `InitSolver.cpp`'s
+  resume-history restoration and `StoreStatsScan.cpp`'s read-only reporting -- so the two
+  can't drift apart again the next time `LevelStats` changes shape.
+
 ## [0.33.5] - 2026-07-29
 
 ### Fixed the real root cause of the "files stuck / merges cap at 2" mystery

@@ -138,21 +138,14 @@ static bool readLevelGenerationStats(const char* storeDir, int boardSize, int le
     char sentPath[MAX_FULL_PATH_NAME];
     SentinelNameComplete(sentPath, sizeof(sentPath), storeDir, boardSize, level);
 
-    HANDLE h = CreateFileA(sentPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        return false;
-
-    uint64_t   magic = 0;
-    LevelStats stats  = {};
-    DWORD      nr     = 0;
-    bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
-              && nr == sizeof(magic)
-              && magic == RSF_SENTINEL_STATS_MAGIC
-              && ReadFile(h, &stats, (DWORD)sizeof(stats), &nr, NULL)
-              && nr == sizeof(stats);
-    CloseHandle(h);
-
-    if (!ok)
+    /* ReadSentinelLevelStats (OthelloTypes.h) backward-compatibly translates
+    ** older, smaller sentinel payloads (see LevelStatsPreConsolidation) --
+    ** a raw fixed-size read here would silently fail (and leave this level's
+    ** CSV columns blank) for every real sentinel older than LevelStats' most
+    ** recent growth, which is every level from the current production run.
+    */
+    LevelStats stats = {};
+    if (!ReadSentinelLevelStats(sentPath, &stats))
         return false;
 
     /* Stage 2 (merge-writer pool cross-segment dedup, MergePoolToWriter) has
