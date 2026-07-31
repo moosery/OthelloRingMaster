@@ -25,7 +25,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.33.7"
+#define VERSION "0.33.8"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -512,6 +512,20 @@ typedef struct __OthelloRingMasterState
     */
     volatile int  mwBlackFileCount[MAX_WRITERS];
     volatile int  mwWhiteFileCount[MAX_WRITERS];
+
+    /* Live-only (deliberately NOT part of LevelStats -- see that struct's own
+    ** backward-compat history, OthelloTypes.h's LevelStatsPreConsolidation
+    ** comment, and the sentinel-stats-regression memory; this is a pure
+    ** current-level diagnostic, not something that needs persisting across a
+    ** restart) running total of every successful TryConsolidatePair merge's
+    ** real on-disk INPUT bytes this level, summed across all writers/colors.
+    ** Compare against the already-persisted levelStats[playLevel].consolidationBytesWritten
+    ** (the OUTPUT total) to see how much real space consolidation is
+    ** reclaiming -- KWayMergeFiles genuinely dedupes on the board key, not
+    ** just merge-sorts, so a real gap here reflects real removed duplicates
+    ** (plus any compression-ratio change from re-encoding a bigger file).
+    */
+    volatile int64_t consolidationBytesInput;
 
     /* Low-water-mark HINT for DoCrossDriveIntermediateMerge's gather-loop scan
     ** start -- NOT a correctness invariant (that's now ClaimRegistry's job:

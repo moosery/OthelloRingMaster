@@ -153,6 +153,26 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                   "  Boards written to disk : %llu  (%.2f GB)\n",
                   (unsigned long long)cur->boardsWrittenToDisk,
                   cur->mwBytes / (1024.0 * 1024.0 * 1024.0));
+    {
+        /* Real on-disk input vs output bytes across every successful
+        ** TryConsolidatePair merge this level -- consolidationBytesInput is
+        ** live-only (OthelloTypes.h), consolidationBytesWritten is the
+        ** already-persisted output total. KWayMergeFiles genuinely dedupes
+        ** on the board key, so a real gap here is real reclaimed space, not
+        ** just file-count reduction.
+        */
+        int64_t consIn  = pSt->consolidationBytesInput;
+        int64_t consOut = (int64_t)cur->consolidationBytesWritten;
+        if (consIn > 0)
+        {
+            double  pctSaved = 100.0 * (double)(consIn - consOut) / (double)consIn;
+            n += snprintf(buf + n, bufSize - n,
+                          "  Consol reclaimed       : %.2f GB -> %.2f GB  (%.2f%% saved)\n",
+                          consIn  / (1024.0 * 1024.0 * 1024.0),
+                          consOut / (1024.0 * 1024.0 * 1024.0),
+                          pctSaved);
+        }
+    }
     if (cur->passBoards > 0 || cur->terminalBoards > 0)
     {
         n += snprintf(buf + n, bufSize - n,

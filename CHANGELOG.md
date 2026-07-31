@@ -4,6 +4,28 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.8] - 2026-07-31
+
+### Added live visibility into how much real space consolidation is reclaiming
+
+- User pushed back on an offhand claim that background consolidation "isn't really a
+  space-saving mechanism" -- correctly. Checked `KWayMergeFiles` directly: it genuinely
+  deduplicates on the board key (`hi`/`lo`), not just merge-sorts, so every consolidation
+  merge really can and does remove boards that independently ended up in two different
+  writer files, not just repack them into fewer, bigger ones.
+- Rather than add new record-counting infrastructure, surfaced data that was already
+  being computed and silently discarded: `TryConsolidatePair` (`MergeFiles.cpp`) already
+  computes `runningSize` (real on-disk bytes of a batch's inputs) and `outBytes` (real
+  on-disk bytes of the merged output) for its own drive-reclaim bookkeeping -- the gap
+  between them was simply never surfaced anywhere.
+- New live-only `OthelloRingMasterState.consolidationBytesInput` (deliberately NOT added
+  to `LevelStats` -- that struct has a real backward-compat history from growing
+  carelessly, see the v0.32.7/v0.33.6 entries, and this is a pure current-level
+  diagnostic with no need to persist across a restart) accumulates every successful
+  merge's input-side bytes; compared live against the already-persisted
+  `levelStats[level].consolidationBytesWritten` (output side). New STATUS line:
+  `Consol reclaimed: X.XX GB -> Y.YY GB (Z.ZZ% saved)`.
+
 ## [0.33.7] - 2026-07-31
 
 ### Added mid-level checkpoint/restart

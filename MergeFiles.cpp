@@ -2141,6 +2141,7 @@ static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, ui
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesCreated, 1);
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesRemoved, (LONG64)batchCount);
     InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
+    InterlockedAdd64((volatile LONG64*)&pSt->consolidationBytesInput, (LONG64)runningSize);
 
     /* Recompute the low-water mark with the SAME safe-stopping scan used to
     ** find 'start' above -- NOT the batch-build loop's raw terminal 'idx'.

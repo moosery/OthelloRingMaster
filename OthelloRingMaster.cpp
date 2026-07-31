@@ -420,6 +420,7 @@ int main(int argc, char* argv[])
         ** the one genuinely correctness-critical field in this block.
         */
         bool resumingThisLevelFromCheckpoint = g_state.resumeFromCheckpoint && level == g_state.resumeLevel;
+        g_state.consolidationBytesInput = 0;
         for (int i = 0; i < g_state.numMergeWriters; i++)
         {
             g_state.mwBlackFileCount[i]     = 0;
