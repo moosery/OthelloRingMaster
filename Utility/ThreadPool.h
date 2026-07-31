@@ -20,6 +20,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <windows.h>   /* Sleep(), used by WaitForPoolIdle */
 
 /* Macros and Defines */
 #define MAX_QUEUE_DEPTH 5000
@@ -165,3 +166,17 @@ private:
     std::vector<std::thread>                    threads;
     std::queue<std::function<void(uint32_t)>>   jobs;
 };
+
+/*
+** Function: WaitForPoolIdle
+** @brief    Blocks until a thread pool has no in-flight jobs. Shared here
+**           (rather than duplicated per caller) so every caller -- the main
+**           level-transition loop, checkpoint orchestration, etc. -- waits
+**           on pools the identical way.
+** @param    pPool - the thread pool to wait on
+*/
+static inline void WaitForPoolIdle(ThreadPool* pPool)
+{
+    while (pPool->IsBusy())
+        Sleep(1);
+}

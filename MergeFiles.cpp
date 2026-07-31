@@ -1644,6 +1644,21 @@ static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
                 MemFree(paths[fi]);
             }
 
+            /* Real physical file count drops by exactly what was just
+            ** deleted, per writer -- same accounting as the normal path
+            ** below; this branch used to skip it entirely (found via a
+            ** live OnDskB/OnDskW-vs-real-dir-listing cross-check, though it
+            ** turned out inactive on the run that exposed the discrepancy --
+            ** F: never actually filled up, so this branch had never run).
+            */
+            for (int ti = 0; ti < pSt->numMergeWriters; ti++)
+            {
+                if (filesPerWriter[ti] == 0) continue;
+                volatile int* pPhys = (player == RSF_PLAYER_BLACK)
+                    ? &pSt->mwBlackPhysicalFileCount[ti] : &pSt->mwWhitePhysicalFileCount[ti];
+                InterlockedExchangeAdd((volatile LONG*)pPhys, -filesPerWriter[ti]);
+            }
+
             /* Clear medium-drive imerge counters for this player -- all those files were consumed */
             for (int d = 0; d < pSt->numMergeDirs; d++)
             {

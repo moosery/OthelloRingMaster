@@ -26,6 +26,7 @@
 #include "DriveLedger.h"
 #include "LevelSolverThread.h"
 #include "MergeFiles.h"
+#include "Checkpoint.h"
 #include "StatsListener.h"
 #include "RSFFileName.h"
 #include "RingConversion.h"
@@ -65,6 +66,9 @@ static void PrintUsage(const char* prog)
     printf("                    (e.g. \"4GB\", \"512MB\") -- testing/validation only, e.g. to force\n");
     printf("                    more frequent merge-writer flushes at small levels. Still capped\n");
     printf("                    by actual free RAM. [default: unset, uses recommended-vs-free-RAM]\n");
+    printf("  --checkpoint-interval-hours H\n");
+    printf("                    Mid-level checkpoint interval in hours (fractional allowed, e.g.\n");
+    printf("                    0.05 for testing). <= 0 disables periodic checkpointing. [default: 5]\n");
     printf("  --help            Show this help\n\n");
     printf("Auto-resume: if storeDir already contains level files from a previous run,\n");
     printf("  the solver automatically resumes from the first missing level.\n");
@@ -89,6 +93,7 @@ static void ParseArgs(int argc, char* argv[])
     strncpy(g_config.storeDirNameNoDrive, "\\OthelloRingMaster\\Store",    sizeof(g_config.storeDirNameNoDrive) - 1);
     strncpy(g_config.lz4Drives,           "DEFY",                         sizeof(g_config.lz4Drives)           - 1);
     g_config.memoryLimitBytes = 0;   /* 0 = no override, use MM_RECOMMENDED against real free RAM */
+    g_config.checkpointIntervalHours = 5.0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -168,6 +173,11 @@ static void ParseArgs(int argc, char* argv[])
             if (n == 0) { printf("ERROR: --memory-limit could not parse '%s'\n", argv[i]); exit(1); }
             g_config.memoryLimitBytes = n;
         }
+        else if (strcmp(argv[i], "--checkpoint-interval-hours") == 0)
+        {
+            REQUIRE_NEXT("--checkpoint-interval-hours")
+            g_config.checkpointIntervalHours = atof(argv[i]);
+        }
         else
         {
             printf("ERROR: unknown argument '%s'\n\n", argv[i]);
@@ -218,16 +228,10 @@ static BOOL WINAPI CtrlHandler(DWORD dwCtrlType)
     return FALSE;
 }
 
-/*
-** Function: WaitForPoolIdle
-** @brief    Blocks until a thread pool has no in-flight jobs.
-** @param    pPool - the thread pool to wait on
+/* WaitForPoolIdle moved to Utility/ThreadPool.h -- shared with the new
+** checkpoint orchestration code (Checkpoint.cpp), which needs the identical
+** wait behavior when draining pConsolidationPool for a mid-level checkpoint.
 */
-static void WaitForPoolIdle(ThreadPool* pPool)
-{
-    while (pPool->IsBusy())
-        Sleep(1);
-}
 
 /*
 ** ============================================================
@@ -397,7 +401,25 @@ int main(int argc, char* argv[])
     {
         g_state.playLevel = (uint8_t)level;
 
-        /* Reset per-level per-thread state */
+        /* Mid-level checkpointing (Checkpoint.h): fresh interval window and
+        ** no pending pause/on-demand request at the start of every level.
+        */
+        g_state.checkpointIntervalStartTickMs = GetTickCount64();
+        g_state.checkpointPauseFlag           = false;
+        g_state.checkpointRequestedNow        = false;
+
+        /* Reset per-level per-thread state -- EXCEPT mwNextFileIdx when this
+        ** exact level is resuming from a validated mid-level checkpoint
+        ** (Checkpoint.h): InitSolver already restored it from the checkpoint's
+        ** own snapshot, and zeroing it here would make FileTicketNext hand
+        ** out ticket 0 again, colliding with (and silently overwriting) the
+        ** real writer files already sitting on disk from before the pause.
+        ** Every other per-level counter here is either purely a display
+        ** metric or a racy scan-start hint (both harmless to reset, per
+        ** their own existing "hint only" documentation) -- mwNextFileIdx is
+        ** the one genuinely correctness-critical field in this block.
+        */
+        bool resumingThisLevelFromCheckpoint = g_state.resumeFromCheckpoint && level == g_state.resumeLevel;
         for (int i = 0; i < g_state.numMergeWriters; i++)
         {
             g_state.mwBlackFileCount[i]     = 0;
@@ -406,8 +428,11 @@ int main(int argc, char* argv[])
             g_state.mwWhiteFilesConsumed[i] = 0;
             g_state.mwBlackConsolidatedUpTo[i] = 0;
             g_state.mwWhiteConsolidatedUpTo[i] = 0;
-            g_state.mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
-            g_state.mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
+            if (!resumingThisLevelFromCheckpoint)
+            {
+                g_state.mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
+                g_state.mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
+            }
             g_state.mwBlackPhysicalFileCount[i] = 0;
             g_state.mwWhitePhysicalFileCount[i] = 0;
             g_state.consolScanning[i][RSF_PLAYER_BLACK] = 0;
@@ -537,6 +562,11 @@ int main(int argc, char* argv[])
             SentinelNameComplete(sentComplete, sizeof(sentComplete),
                                  g_state.storeDirectory, (int)g_config.boardSize, level + 1);
             WriteSentinelStats(sentComplete, &g_state.levelStats[level]);
+
+            /* This level's own mid-level checkpoint (if any) is obsolete now
+            ** that the whole level -- solve AND merge -- is durably complete.
+            */
+            DeleteLevelCheckpoint(&ctx, level);
         }
         else
         {

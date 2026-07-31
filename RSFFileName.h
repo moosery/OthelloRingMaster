@@ -564,3 +564,15 @@ static inline void SentinelNameComplete(char* out, size_t outSize,
 {
     snprintf(out, outSize, "%s\\Level_%04d_%dx%d_complete", dir, level, boardSize, boardSize);
 }
+
+/*
+** Function: SentinelNameCheckpoint
+** @brief    Builds the mid-level checkpoint file path for a level. Distinct
+**           from the merging/complete sentinels -- a checkpoint can coexist
+**           with neither of those present (level legitimately mid-solve).
+*/
+static inline void SentinelNameCheckpoint(char* out, size_t outSize,
+                                           const char* dir, int boardSize, int level)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_checkpoint", dir, level, boardSize, boardSize);
+}

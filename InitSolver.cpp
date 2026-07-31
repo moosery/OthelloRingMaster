@@ -25,6 +25,7 @@
 #include "DriveLedger.h"
 #include "OthelloBasicsForCUDA.h"
 #include "RingNestedIndex.h"
+#include "Checkpoint.h"
 #include "Utility.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -557,23 +558,39 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
 **           itself is never purged -- it holds the permanent level output archive.
 ** @param    pState       - solver state (directories to purge, resumeLevel for logging)
 ** @param    pMachineInfo - refreshed in place after the purge frees space
+** @param    preserveWriterAndMergeDirs - true when a validated mid-level
+**           checkpoint exists for resumeLevel (Checkpoint.h) -- skips
+**           wiping mwDirectory/mergeDirectory so real, already-flushed
+**           writer/imerge files survive to be resumed from. storeMergeDirectory
+**           is always purged regardless -- irrelevant this early (real merge
+**           output staging only begins once the solve phase actually
+**           finishes), so there's nothing there worth preserving.
 */
-static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineInfo)
+static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineInfo,
+                          bool preserveWriterAndMergeDirs)
 {
     LoggerLog("Purging previous run data...\n");
 
-    for (int i = 0; i < pState->numMergeWriters; i++)
+    if (preserveWriterAndMergeDirs)
     {
-        if (GetFileAttributesA(pState->mwDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
-        LoggerLog("  Deleting merge-writer dir: %s\n", pState->mwDirectory[i]);
-        DeleteDirRecursive(pState->mwDirectory[i]);
+        LoggerLog("  Preserving merge-writer/merge dirs -- valid mid-level checkpoint found for level %d.\n",
+                  pState->resumeLevel);
     }
-
-    for (int i = 0; i < pState->numMergeDirs; i++)
+    else
     {
-        if (GetFileAttributesA(pState->mergeDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
-        LoggerLog("  Deleting merge dir: %s\n", pState->mergeDirectory[i]);
-        DeleteDirRecursive(pState->mergeDirectory[i]);
+        for (int i = 0; i < pState->numMergeWriters; i++)
+        {
+            if (GetFileAttributesA(pState->mwDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
+            LoggerLog("  Deleting merge-writer dir: %s\n", pState->mwDirectory[i]);
+            DeleteDirRecursive(pState->mwDirectory[i]);
+        }
+
+        for (int i = 0; i < pState->numMergeDirs; i++)
+        {
+            if (GetFileAttributesA(pState->mergeDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
+            LoggerLog("  Deleting merge dir: %s\n", pState->mergeDirectory[i]);
+            DeleteDirRecursive(pState->mergeDirectory[i]);
+        }
     }
 
     if (GetFileAttributesA(pState->storeMergeDirectory) != INVALID_FILE_ATTRIBUTES)
@@ -648,7 +665,34 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     */
     int firstMissingFile = ScanForResumeLevel(pState, (int)pConfig->boardSize);
     pState->resumeLevel  = (firstMissingFile > 0) ? firstMissingFile - 1 : 0;
-    cleanUpDrives(pState, pMachineInfo);
+
+    /* Mid-level checkpoint check (Checkpoint.h): if resumeLevel has a valid,
+    ** validated checkpoint, preserve the writer/merge dirs instead of the
+    ** usual wholesale wipe, and remember exactly where to resume the input
+    ** stream from -- consumed once by RunGpuFeederJob for this specific
+    ** level, then cleared. Any invalid/stale checkpoint is deleted outright
+    ** so a later attempt at this same level can never pick it up by mistake.
+    */
+    SolveContext tempCtx = { pConfig, pState, pMachineInfo };
+    CheckpointStats cp = {};
+    bool haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
+    if (haveValidCheckpoint)
+    {
+        pState->resumeFromCheckpoint    = true;
+        pState->resumeCheckpointSubPass = cp.activeSubPass;
+        pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
+        for (int wi = 0; wi < cp.numMergeWriters; wi++)
+        {
+            pState->mwNextFileIdx[wi][RSF_PLAYER_BLACK] = cp.mwNextFileIdx[wi][RSF_PLAYER_BLACK];
+            pState->mwNextFileIdx[wi][RSF_PLAYER_WHITE] = cp.mwNextFileIdx[wi][RSF_PLAYER_WHITE];
+        }
+    }
+    else
+    {
+        pState->resumeFromCheckpoint = false;
+        DeleteLevelCheckpoint(&tempCtx, pState->resumeLevel);
+    }
+    cleanUpDrives(pState, pMachineInfo, haveValidCheckpoint);
     createDirectories(pState);
 
     /* Initialize drive space ledgers after cleanup so we start from clean

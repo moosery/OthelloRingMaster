@@ -25,7 +25,7 @@
 #include <unordered_set>
 
 /* Macros and Defines */
-#define VERSION "0.33.6"
+#define VERSION "0.33.7"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -179,6 +179,50 @@ typedef struct __LevelStats
     int               numDriveSnapshot;
     uint64_t          storeFreeBytes;   /* free space on store drive at level completion */
 } LevelStats, * PLevelStats;
+
+/* Magic value embedded at the start of a mid-level checkpoint file, distinct
+** from RSF_SENTINEL_STATS_MAGIC (RSFFileName.h) so the two file kinds can
+** never be confused if one is accidentally opened as the other.
+*/
+#define CHECKPOINT_STATS_MAGIC 0x504B48435053544FULL   /* "OTSPCHKP" in ASCII byte order */
+
+/*
+** Type:    CheckpointStats
+** @brief   Mid-level checkpoint payload -- exactly enough to resume the GPU
+**          feeder from a specific point in a level's input stream instead of
+**          from record 0. Written only once the feeder is fully paused, its
+**          accumulator drained, and every merge-writer buffer force-flushed
+**          to real NVMe files, so every field here is guaranteed consistent
+**          with the writer-dir's actual on-disk state at write time.
+** @details activeSubPass + recordsConsumedInSubPass together describe
+**          exactly where RunGpuFeederJob's two sequential sub-passes
+**          (black-turn boards, then white-turn boards -- see
+**          LevelSolverThread.cpp) had gotten to. recordsConsumedInSubPass
+**          is always relative to activeSubPass's OWN stream, never a
+**          combined black+white count, since the two sub-passes run
+**          strictly one after the other, not interleaved. A checkpoint
+**          taken exactly between the two sub-passes (black already fully
+**          done, white not yet started) is naturally represented as
+**          activeSubPass=RSF_PLAYER_WHITE, recordsConsumedInSubPass=0 --
+**          no separate "between passes" state is needed.
+**          mwNextFileIdx is a snapshot of every (writer, color) ticket
+**          high-water mark at the moment of writing, used on restart to
+**          cross-check the writer-dir's independently-scanned state
+**          actually matches before trusting this checkpoint (see the
+**          restart-validation design) -- never trusted as the resume
+**          source for that state by itself, only as a consistency check
+**          against a fresh directory scan.
+*/
+typedef struct __CheckpointStats
+{
+    uint8_t  boardSize;                      /* sanity check against the running config */
+    uint8_t  level;                          /* which level this checkpoint belongs to */
+    uint8_t  activeSubPass;                  /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE */
+    uint8_t  numMergeWriters;                /* must match the running config; else mwNextFileIdx below is meaningless */
+    uint64_t recordsConsumedInSubPass;       /* position within activeSubPass's own input stream */
+    int      mwNextFileIdx[MAX_WRITERS][2];  /* snapshot at checkpoint time, indexed [writerIdx][player] */
+    char     timestamp[24];                  /* "YYYY-MM-DD HH:MM:SS", informational only */
+} CheckpointStats, * PCheckpointStats;
 
 /*
 ** Type:    LevelStatsPreConsolidation
@@ -379,6 +423,7 @@ typedef struct __OthelloRingMasterConfig
     uint8_t   compressMode;   /* COMPRESS_NONE / COMPRESS_STORE_ONLY / COMPRESS_ALL */
     char      lz4Drives[64];  /* drive letters that get LZ4 on top of varint (e.g. "DEF") */
     uint64_t  memoryLimitBytes; /* --memory-limit override (MM_SPECIFIED); 0 = use MM_RECOMMENDED against real free RAM */
+    double    checkpointIntervalHours; /* --checkpoint-interval-hours; <= 0 disables periodic checkpointing entirely */
 } OthelloRingMasterConfig, * POthelloRingMasterConfig;
 
 /*
@@ -429,6 +474,29 @@ typedef struct __OthelloRingMasterState
     uint64_t          cascadeGroupStartTickMs[2];   /* GetTickCount64() at the start of each cascade group */
     uint64_t          cascadeStartTickMs[2];        /* GetTickCount64() at the start of the whole cascade (group 1); used for the stats thread's ETA */
     uint64_t          currentLevelTotalBoards;      /* total boards in current level's input file(s); set by GPU feeder before reading starts */
+
+    /* Mid-level checkpointing (see Checkpoint.h). checkpointPauseFlag is
+    ** passed as RingNestedIndexStreamAll's pTerminate argument in place of
+    ** terminateThreads during normal solving -- a distinct flag so the
+    ** existing "drop the partial ping-pong slot" behavior tied to
+    ** terminateThreads (correct for a real shutdown, wrong for a checkpoint
+    ** pause) never fires here. Set by the GPU feeder itself (FeedBoardIntoBatch)
+    ** once checkpointRequestedNow is seen, or once checkpointIntervalStartTickMs
+    ** shows the configured interval has elapsed; cleared once the checkpoint
+    ** sequence completes and streaming is about to resume.
+    */
+    volatile bool  checkpointPauseFlag;
+    volatile bool  checkpointRequestedNow;      /* set by the CHECKPT stats-port command; cleared once handled */
+    uint64_t       checkpointIntervalStartTickMs; /* GetTickCount64() when the current interval window started; reset at level start and after each checkpoint */
+
+    /* Set once by InitSolver (via ReadValidCheckpoint) when resumeLevel has a
+    ** valid checkpoint file -- consumed exactly once by RunGpuFeederJob for
+    ** that specific level (level == resumeLevel), then cleared, so it never
+    ** applies to any later level in the same run.
+    */
+    bool     resumeFromCheckpoint;
+    int      resumeCheckpointSubPass;      /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE, valid only if resumeFromCheckpoint */
+    uint64_t resumeCheckpointRecords;      /* records already consumed in that sub-pass, valid only if resumeFromCheckpoint */
 
     /* Merge-writer threads: one per NVMe drive, stable thdIdx maps to buffer/dir */
     uint8_t  numMergeWriters;

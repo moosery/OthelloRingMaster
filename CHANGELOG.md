@@ -4,6 +4,89 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.7] - 2026-07-31
+
+### Added mid-level checkpoint/restart
+
+- **Motivation**: levels now run for many days each, and this project already hit one
+  real, unexplained crash (`STATUS_ACCESS_VIOLATION` in `ntdll.dll`, root cause never
+  confirmed -- see the solver-machine-hardware history). Today's resume model is strictly
+  level-granular: every restart wipes the writer directories wholesale and re-solves the
+  whole level from board 0, so a crash partway through a multi-day level loses all of it.
+  User proposed periodically pausing the GPU feeder, force-flushing, and recording exactly
+  where the input stream had gotten to, so a restart can resume mid-level instead.
+- **Design constraint, confirmed by reading the actual reader code**: writer-dir files use
+  delta+zigzag+varint encoding (a running value accumulated from the true start of the
+  file) and `RingNestedIndexBuilder` writes each tier as one continuous compression unit
+  for the whole level -- there is no cheap "skip whole groups" shortcut without changing
+  how the writer compresses (explicitly out of scope). Correct approach instead: pure
+  sequential stream-and-discard from record 0 up to the checkpoint's recorded position,
+  then resume real processing -- cheap in practice since decode-only (no GPU work, no
+  dedup, no flush) is far faster than the real-time solve rate that produced the
+  checkpoint in the first place.
+- New `CheckpointStats` (`OthelloTypes.h`): board size, level, which of
+  `RunGpuFeederJob`'s two sequential sub-passes (black-then-white, never interleaved) was
+  active, records consumed within that sub-pass, a full per-`(writer, color)`
+  `mwNextFileIdx` ticket snapshot, timestamp. New magic, new sentinel-style naming
+  `SentinelNameCheckpoint` (`Level_NNNN_WxH_checkpoint`, `RSFFileName.h`).
+- New `Checkpoint.h`/`.cpp`: `CheckpointDueNow` (interval elapsed, or an on-demand
+  request), `PerformMidLevelCheckpoint` (the pause-time sequence: wait for the
+  merge-writer pool to go idle, force-flush every writer thread's buffer to a real NVMe
+  file, cleanly abort and restart background consolidation, snapshot ticket state, write
+  the checkpoint file), `ReadValidCheckpoint` (full validation: board size/level/writer
+  count match, previous level's `_complete` sentinel present, this level has no
+  `_complete`/`_merging` sentinel of its own, and -- for every writer/color with a nonzero
+  recorded ticket -- the file at that ticket actually exists on disk), `DeleteLevelCheckpoint`.
+- `FeedBoardIntoBatch`/`FeedNestedIndexLevel` (`LevelSolverThread.cpp`): a new
+  `checkpointPauseFlag`, distinct from `terminateThreads`, is what's actually passed to
+  `RingNestedIndexStreamAll` as its cancellation flag now (with a real `terminateThreads`
+  still propagated into it, so Ctrl+C stays exactly as responsive as before). On a
+  checkpoint pause specifically (not a real shutdown), the partial ping-pong slot is
+  flushed for real -- unlike the terminate path, which deliberately drops it -- since
+  those records already counted toward `boardsReadFromStore` and silently dropping them
+  would be real data loss the moment this checkpoint is later resumed from. The same
+  function then loops: checkpoint, then re-stream from the true file start with
+  `skipRemaining` set to replay past everything already fed. One mechanism serves both an
+  immediate in-process resume and, via `ReadValidCheckpoint` at the next startup, real
+  crash recovery.
+- `--checkpoint-interval-hours H` (default 5, fractional allowed for testing) and an
+  on-demand `--checkpt` (`OthelloRingMasterStatus.exe`) triggering a new `CHECKPT`
+  stats-port command.
+- `InitSolver.cpp`: `cleanUpDrives` gained a `preserveWriterAndMergeDirs` flag -- skips the
+  usual wholesale writer/merge-dir wipe when `ReadValidCheckpoint` validates for the
+  resume level, restoring `mwNextFileIdx` directly from the checkpoint.
+- **Two bugs caught and fixed during this same implementation, before either ever ran for
+  real**: (1) the pause sequence initially reused `FlushAllMergeWriterBuffers`, which
+  (per its own doc comment) deliberately leaves real merge-writer pool-buffer segments
+  resident in memory for `DoEndOfLevelMerge` to consume directly -- wrong for a
+  checkpoint, which needs everything durably on disk; fixed with an explicit
+  `WaitForPoolIdle(pMergeWriterPool)` plus an unconditional per-thread
+  `FlushMergeWriterBuffer` call. (2) The existing per-level reset in the main level loop
+  unconditionally zeroed `mwNextFileIdx` for every level, including the resume level --
+  which would have silently discarded what `InitSolver` had just restored from the
+  checkpoint and made new tickets collide with real existing files; fixed with an
+  explicit resume-this-level-from-checkpoint guard.
+- `WaitForPoolIdle` moved from a local static in `OthelloRingMaster.cpp` into
+  `Utility/ThreadPool.h` as a shared function, since the new checkpoint code needed the
+  identical wait -- avoids the "fixed it in one place, not the other" pattern that caused
+  the v0.33.6 StoreStats follow-up bug.
+- **Implemented and confirmed compiling clean (two full rebuilds, zero errors) but NOT
+  YET VALIDATED against a real run** -- deliberately deferred until the live production
+  run's current level finishes naturally, rather than interrupt a multi-day solve to test
+  it. No checkpoint file has ever been read by a real restart yet.
+
+### Fixed DoCrossDriveIntermediateMerge's total-flush branch missing a physical-file-count decrement
+
+- Found live cross-referencing a real `dir` listing of the writer directory against the
+  STATUS panel's `OnDskB`/`OnDskW` columns -- a real discrepancy, but it turned out to be
+  fully explained by in-flight creates (a flush or consolidation merge's new output file
+  exists on disk well before the success path increments the counter), not a bug. The
+  total-flush branch (triggered only when the medium drive fills up completely -- never
+  yet observed in this project) genuinely was missing the same physical-file-count
+  decrement the normal path already has, though it turned out to be dormant on the run
+  that exposed the investigation. Fixed by adding the identical `filesPerWriter[ti]`-driven
+  decrement to that branch too.
+
 ## [0.33.6] - 2026-07-29
 
 ### Fixed OthelloRingMasterStoreStats silently blanking BoardsGenerated/DupsRemoved for every level

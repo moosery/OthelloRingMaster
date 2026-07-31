@@ -154,6 +154,9 @@ OthelloRingMaster.exe [options]
                     e.g. a 16GB-VRAM GPU with 2 fast drives needs >= ~25.6GB total to keep
                     both writers active (below that, the solver drops to a single writer
                     instead of Fataling). [default: unset, uses recommended-vs-free-RAM]
+  --checkpoint-interval-hours H
+                    Mid-level checkpoint interval in hours (fractional allowed, e.g.
+                    0.05 for testing). <= 0 disables periodic checkpointing. [default: 5]
   --help            Show this help
 ```
 
@@ -166,8 +169,24 @@ While the solver runs, query live status from another terminal:
 
 ```
 OthelloRingMasterStatus.exe
-OthelloRingMasterStatus.exe --consol   # per-file background-consolidation detail
+OthelloRingMasterStatus.exe --consol    # per-file background-consolidation detail
+OthelloRingMasterStatus.exe --checkpt   # request an immediate on-demand mid-level checkpoint
+OthelloRingMasterStatus.exe --stop      # graceful shutdown
 ```
+
+### Mid-level checkpointing
+
+Every level's solve is periodically checkpointed (`--checkpoint-interval-hours`, default 5)
+so a crash or restart mid-level resumes from the last checkpoint instead of re-solving the
+whole level from board 0. A checkpoint pauses the GPU feeder, force-flushes every merge-writer
+buffer to real NVMe files, cleanly aborts and restarts background consolidation, and writes a
+small `Level_NNNN_WxH_checkpoint` file recording exactly where the input stream had gotten to.
+On the next startup, if that level's checkpoint validates (previous level's `_complete`
+sentinel present, writer-dir contents matching what the checkpoint recorded), the writer
+directories are preserved instead of wiped and the input stream resumes from the checkpointed
+position; otherwise the solver falls back to today's behavior (full writer-dir wipe, level
+restarts from board 0) with no partial recovery attempted. `--checkpt` requests one immediately
+rather than waiting for the next scheduled interval.
 
 ### Retrograde calculator
 

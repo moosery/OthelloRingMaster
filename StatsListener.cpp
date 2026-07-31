@@ -719,6 +719,18 @@ static void HandleClient(SOCKET client, PSolveContext pCtx)
         LoggerLog("STOP command received via stats port -- requesting graceful shutdown...\n");
         pCtx->pState->terminateThreads = true;
     }
+    else if (_stricmp(cmd, "CHECKPT") == 0)
+    {
+        /* Just sets the request flag -- the GPU feeder (FeedBoardIntoBatch,
+        ** via CheckpointDueNow) notices it on the next board fed and runs
+        ** the actual pause/flush/write/resume sequence itself. This command
+        ** returns immediately; it doesn't wait for the checkpoint to finish.
+        */
+        const char* msg = "Checkpoint requested -- will take effect on the next board fed to the GPU.\n";
+        send(client, msg, (int)strlen(msg), 0);
+        LoggerLog("CHECKPT command received via stats port -- on-demand mid-level checkpoint requested...\n");
+        pCtx->pState->checkpointRequestedNow = true;
+    }
     else if (_stricmp(cmd, "CONSOL") == 0)
     {
         size_t bufSize = 256 * 1024;

@@ -158,6 +158,7 @@
     <ClCompile Include="MergeFiles.cpp" />
     <ClCompile Include="InitSolver.cpp" />
     <ClCompile Include="StatsListener.cpp" />
+    <ClCompile Include="Checkpoint.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="GpuInfo.cu" />
@@ -176,6 +177,7 @@
     <ClInclude Include="MergeFiles.h" />
     <ClInclude Include="InitSolver.h" />
     <ClInclude Include="StatsListener.h" />
+    <ClInclude Include="Checkpoint.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">
