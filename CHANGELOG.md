@@ -4,6 +4,24 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [0.33.9] - 2026-07-31
+
+### Added a UniqueOut column to the STATUS query's level history table
+
+- User noticed a level's `Written` figure in a STATUS query didn't match the next
+  level's `BoardsIn` and asked why. `Written` (`levelStats[lvl].boardsWrittenToDisk`) is
+  a gross running total across every flush this level -- each flush dedupes only
+  *within itself* (`MergePoolToWriter`), so a board written in one flush and again in a
+  later one is counted twice. Those cross-flush duplicates get removed afterward, partly
+  silently by background consolidation and partly by the mandatory end-of-level k-way
+  merge (`mrgDupsRemoved`). The true final unique-boards-stored count -- what actually
+  flows into the next level's `BoardsIn` -- is `boardsWrittenToDisk - mrgDupsRemoved`,
+  which the plain-text log file already computes and prints as `UniqueOut`
+  (`LogLevelSummary`, `OthelloRingMaster.cpp`), but the STATUS query's table never did.
+- `StatsListener.cpp`'s level history table (both completed-level rows and the current
+  in-progress row) now computes and prints the same `UniqueOut` value, right after
+  `Written`, matching the log file's column.
+
 ## [0.33.8] - 2026-07-31
 
 ### Added live visibility into how much real space consolidation is reclaiming

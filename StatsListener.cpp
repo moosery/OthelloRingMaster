@@ -537,9 +537,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     /* --- Level history table (completed levels + current in-progress row) --- */
     n += snprintf(buf + n, bufSize - n, "\n");
     n += snprintf(buf + n, bufSize - n,
-                  "Lvl        BoardsIn        Generated         GpuDups         MrgDups         Written       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
+                  "Lvl        BoardsIn        Generated         GpuDups         MrgDups         Written       UniqueOut       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
     n += snprintf(buf + n, bufSize - n,
-                  "---  --------------  ---------------  --------------  --------------  --------------  ----------  ----------  ------  ------  ----------\n");
+                  "---  --------------  ---------------  --------------  --------------  --------------  --------------  ----------  ----------  ------  ------  ----------\n");
     for (int lvl = 0; lvl < curLevel; lvl++)
     {
         if (n >= (int)bufSize - 512) break;   /* safety guard -- buffer nearly full */
@@ -548,14 +548,24 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         FormatDuration(ls->totalNanos, dur, sizeof(dur));
         uint64_t ns = (ls->boardsReadFromStore > 0)
                       ? (uint64_t)(ls->totalNanos / (int64_t)ls->boardsReadFromStore) : 0;
+        /* Written is a gross running total (every flush's own within-flush-
+        ** deduped count, summed across the whole level) -- it still double
+        ** counts any board that appears again in a later flush. UniqueOut
+        ** is the true final unique-boards-stored count (what the NEXT
+        ** level's BoardsIn actually reads back), matching the plain-text
+        ** log file's own UniqueOut column (see LogLevelSummary).
+        */
+        uint64_t uniqueOut = (ls->boardsWrittenToDisk >= ls->mrgDupsRemoved)
+                             ? ls->boardsWrittenToDisk - ls->mrgDupsRemoved : 0;
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
+                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
                       lvl,
                       (unsigned long long)ls->boardsReadFromStore,
                       (unsigned long long)ls->boardsGenerated,
                       (unsigned long long)ls->gpuDupsRemoved,
                       (unsigned long long)ls->mrgDupsRemoved,
                       (unsigned long long)ls->boardsWrittenToDisk,
+                      (unsigned long long)uniqueOut,
                       ls->mwBytes / (1024.0 * 1024.0 * 1024.0),
                       dur,
                       (unsigned long long)ls->consolidationFilesCreated,
@@ -587,14 +597,17 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             snprintf(phaseStr, sizeof(phaseStr), "[solve%8.3f%%]",
                      100.0 * (double)cur->boardsReadFromStore
                            / (double)pSt->currentLevelTotalBoards);
+        uint64_t curUniqueOut = (cur->boardsWrittenToDisk >= cur->mrgDupsRemoved)
+                               ? cur->boardsWrittenToDisk - cur->mrgDupsRemoved : 0;
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %s\n",
+                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %s\n",
                       curLevel,
                       (unsigned long long)cur->boardsReadFromStore,
                       (unsigned long long)cur->boardsGenerated,
                       (unsigned long long)cur->gpuDupsRemoved,
                       (unsigned long long)cur->mrgDupsRemoved,
                       (unsigned long long)cur->boardsWrittenToDisk,
+                      (unsigned long long)curUniqueOut,
                       cur->mwBytes / (1024.0 * 1024.0 * 1024.0),
                       curDur,
                       (unsigned long long)cur->consolidationFilesCreated,
