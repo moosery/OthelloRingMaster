@@ -39,12 +39,15 @@ Store drive (Y:)
     D2H to merge-writer thread's staging buffer (one per NVMe directory)
          │
     LZ4-compress staging → in-memory pool segment (no disk I/O)
-         │  [pool full: FlushMergeWriterBuffer k-way merges pool (black + white concurrently)
-         │              → writer_black/white_NNNN.rsfz on D:, E:, ...]
-         │  [background, separate idle-core thread pool: TryConsolidatePair opportunistically
-         │              merges small writer files together on D:/E: themselves, inputs capped at
-         │              CONSOLIDATION_SIZE_CAP_BYTES -- shrinks what DoEndOfLevelMerge has to process]
-         │  [NVMe low: DoCrossDriveIntermediateMerge → imerge files on F:]
+         │  [pool full: flusher pool k-way merges pool (black + white concurrently)
+         │              → writer_black/white_NNNN.rsfz on D:, E:, ..., registering each
+         │              real file in that drive's own file registry as it lands]
+         │  [event-driven consolidation master: wakes on any flush/consolidator/iMerge
+         │              completion, dispatches bounded merges of small registry-eligible
+         │              writer files onto a worker pool -- shrinks what DoEndOfLevelMerge
+         │              has to process]
+         │  [NVMe low (registry-derived DriveReserve failure): iMerge pool clears real
+         │              space pressure for that color → imerge files on F:]
          │
     DoEndOfLevelMerge (parallel: black thread + white thread)
       ├─ black: merge remaining pool segments + writer/imerge files, straight into
@@ -72,23 +75,25 @@ Store drive (Y:)
 - **Merge-writer threads** -- one per fast NVMe directory, same staging/pool/flush design as
   `OthelloLevelBlaster`'s own (see that project's README for the full mechanics) -- opaque
   16-byte board keys move through this whole stage without any ring-specific handling.
-- **Background small-file consolidation** -- a dedicated pool of persistent worker threads
-  (separate from the merge-writer pool, so it draws from otherwise-idle cores and never
-  competes with active flush-writing), flat-sized and independent of drive count. Each
-  worker loops for the whole level: sleep, sweep every (writer drive, color) pair merging
-  whatever's eligible, sleep again -- no per-pair concurrency cap, since ClaimRegistry
-  alone (a lock-free per-pair file-ticket allocator plus a small claim registry tracking
-  which file indices are currently spoken for) already mediates multiple workers reaching
-  the same pair in the same sweep. Files at or above `CONSOLIDATION_SIZE_CAP_BYTES`
-  (100GB, adjustable) are excluded as merge *inputs* -- not worth the merge cost once a
-  file is already that large -- but the cap never constrains how large a merge's *output*
-  can grow: two files each individually under the cap always merge freely, and the result
-  then naturally excludes itself from future consideration once it crosses the cap on its
-  own next examination. Shrinks both the fan-in and the total volume `DoEndOfLevelMerge`
-  has to process, on top of whatever `DoCrossDriveIntermediateMerge` itself later folds in
-  -- that mechanism checks the same claim registry before touching a file, so it can't
-  race a live consolidation pass.
-- **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_FANIN`)
+- **Writer-drive file registry** (`Registry.h`, v1.0.0) -- the single source of truth for
+  "does this file exist, and is it currently in use," one thread-safe list per writer
+  drive. Every housekeeping mechanism below (flush, background consolidation, cross-drive
+  iMerge) reserves and releases real file nodes directly instead of going through any
+  ticket-number or low-water-mark proxy for the same question -- see
+  [Writer-drive registry redesign](#writer-drive-registry-redesign-v100) below for why.
+- **Background small-file consolidation** -- a single event-driven master thread (not a
+  poller) sleeps until woken by a flush, a consolidator worker, or an iMerge completing,
+  then for each (writer drive, color) pair with a free consolidator-pool worker, scans the
+  registry for eligible files under the size cap and dispatches a bounded merge. Files at
+  or above `CONSOLIDATION_SIZE_CAP_GB` (`--max-file-size-gb`, 100GB default) are excluded
+  as merge *inputs* -- not worth the merge cost once a file is already that large -- but
+  the cap never constrains how large a merge's *output* can grow: two files each
+  individually under the cap always merge freely, and the result then naturally excludes
+  itself from future consideration once it crosses the cap on its own next examination.
+  Shrinks both the file count and the total volume `DoEndOfLevelMerge` has to process, on
+  top of whatever the iMerge pool itself later folds in -- both draw from the same
+  registry reservation state, so they can never race the same file.
+- **Intermediate merge / cascading merge** -- same fan-in-bounded (`MAX_MERGE_INPUT_FILES`)
   grouped-merge design as `OthelloLevelBlaster`. When a level's merge target is ring format
   (i.e. always, for the real per-level store), cascade's own intermediate group files become
   ring-format too, via a pull-style incremental ring reader (`RingNestedIndexPullReader`) that
@@ -105,6 +110,50 @@ Store drive (Y:)
   doubled the actual store I/O for zero benefit and was removed once found.
 - **Drive space ledger** -- same atomic per-drive ledger design as `OthelloLevelBlaster`,
   seeded from the OS after startup cleanup with a safety buffer subtracted.
+
+### Writer-drive registry redesign (v1.0.0)
+
+Before v1.0.0, whether real merge backlog existed was answered indirectly: a raw,
+ever-incrementing file-ticket counter compared against a separately-maintained low-water
+mark. Live production debugging at level 22 of a real multi-day 6x6 solve found a real
+bug in that scheme -- the two counters could drift apart under normal operation (ticket
+churn included every consolidation merge *and* every empty flush attempt, which has
+nothing to do with real file count), triggering a needless multi-hour cross-drive merge
+that plausibly explained a real ~41-hour GPU stall. It was also the second time this
+project hit the same bug *class* (two counters meant to stay in sync silently drifting
+apart) -- the first was an July-2026 issue in the predecessor design.
+
+v1.0.0 replaces every ticket/low-water-mark mechanism with one thread-safe **file
+registry** per writer drive (`Registry.h`) that tracks real file identity and reservation
+state directly -- "how many real files exist right now, and which are in use" is always
+answered by looking at the registry itself, never derived from a counter that could
+drift. Four dedicated thread pools replace the old ad-hoc thread spawning and 12-thread
+polling pool:
+
+- **Flusher pool** -- one job per color per GPU-buffer-full event; reserves a new
+  registry node before writing, retries via the iMerge pool on real space pressure.
+- **iMerge pool** -- one thread per color, triggered only by a real `DriveReserve`
+  failure (never by a ticket-gap heuristic); clears every real unreserved file for that
+  color to the medium drive.
+- **Consolidator worker pool** -- runs the actual bounded merges the master thread below
+  dispatches to it.
+- **Consolidation master thread** -- a single event-driven thread (not a poller) that
+  wakes on any flush/consolidator/iMerge completion, scans the registry for eligible
+  files, and dispatches bounded consolidation work onto the consolidator pool.
+
+Two background auditors (own dedicated threads, `--audit-interval-seconds` to tune) catch
+drift early rather than only at the next checkpoint: a **registry-vs-disk** auditor
+(WARNING-severity; size-mismatch and stuck-reservation checks, each requiring 2
+consecutive passes to fire) and a **drive-space reconciliation** auditor (recomputes real
+available bytes from the OS plus outstanding registry reservations every pass, correcting
+the drive ledger if it disagrees -- immediately if real space is lower than expected,
+after 2 passes if higher).
+
+Mid-level checkpoints now capture a full integrity manifest (`{filename, color, size}`
+per real file) at checkpoint time; on restart the registry is rebuilt from a real
+directory scan and cross-checked against that manifest with three independent hard-Fatal
+rules (missing file, untracked file, size mismatch) -- see
+[Mid-level checkpointing](#mid-level-checkpointing) below.
 
 ## Requirements
 
@@ -157,6 +206,20 @@ OthelloRingMaster.exe [options]
   --checkpoint-interval-hours H
                     Mid-level checkpoint interval in hours (fractional allowed, e.g.
                     0.05 for testing). <= 0 disables periodic checkpointing. [default: 5]
+  --drive-space-low-gb N
+                    Override the free-space threshold that triggers a cross-drive
+                    iMerge -- testing/validation only, to force real iMerge activity
+                    on a small real drive/level. [default: 20, DRIVE_SPACE_LOW_GB]
+  --max-file-size-gb N
+                    Override the consolidation-eligibility size cap -- testing/
+                    validation only. Must be a comfortable multiple (5-10x) of what an
+                    individual flushed file actually comes out to under whatever
+                    --memory-limit is set, or nothing will ever be eligible to merge.
+                    [default: 100, CONSOLIDATION_SIZE_CAP_GB]
+  --audit-interval-seconds N
+                    Override the interval for both background auditors (registry-vs-
+                    disk, drive-space reconciliation) -- testing/validation only, to
+                    observe them fire within a short run. [default: 120]
   --help            Show this help
 ```
 
@@ -178,15 +241,25 @@ OthelloRingMasterStatus.exe --stop      # graceful shutdown
 
 Every level's solve is periodically checkpointed (`--checkpoint-interval-hours`, default 5)
 so a crash or restart mid-level resumes from the last checkpoint instead of re-solving the
-whole level from board 0. A checkpoint pauses the GPU feeder, force-flushes every merge-writer
-buffer to real NVMe files, cleanly aborts and restarts background consolidation, and writes a
-small `Level_NNNN_WxH_checkpoint` file recording exactly where the input stream had gotten to.
+whole level from board 0. A checkpoint pauses the GPU feeder, then fully drains every
+writer-drive-touching pool in order (merge-writer/D2H pool, flusher pool, iMerge pool,
+then the consolidation master and its worker pool) so nothing is left mid-write -- at that
+point every real writer-drive file is finished and unreserved. It then captures, straight
+from the now-quiescent file registry, the per-drive naming counter plus a full integrity
+manifest (`{filename, color, size}` for every real file) and writes a small
+`Level_NNNN_WxH_checkpoint` file recording exactly where the input stream had gotten to,
+before restarting the consolidation master (the level isn't ending, only pausing).
+
 On the next startup, if that level's checkpoint validates (previous level's `_complete`
-sentinel present, writer-dir contents matching what the checkpoint recorded), the writer
-directories are preserved instead of wiped and the input stream resumes from the checkpointed
-position; otherwise the solver falls back to today's behavior (full writer-dir wipe, level
-restarts from board 0) with no partial recovery attempted. `--checkpt` requests one immediately
-rather than waiting for the next scheduled interval.
+sentinel present) the writer directories are preserved instead of wiped, the registry is
+rebuilt from a real directory scan, and that scan is cross-checked against the checkpoint's
+own manifest with three independent hard-Fatal rules: a manifest file missing on disk, a
+real file on disk the manifest never mentioned, or a size mismatch between the two. Any of
+these Fatals with a clear diagnostic rather than silently trusting stale state -- otherwise
+the input stream resumes from the checkpointed position. If the checkpoint doesn't validate,
+the solver falls back to today's behavior (full writer-dir wipe, level restarts from board 0)
+with no partial recovery attempted. `--checkpt` requests a checkpoint immediately rather than
+waiting for the next scheduled interval.
 
 ### Retrograde calculator
 
@@ -380,8 +453,16 @@ OthelloRingMaster/
                                   canonical form, two-stack accumulator
   GpuInfo.cu / .h                GPU device query
   LevelSolverThread.cpp / .h    Merge-writer job + GPU feeder thread (ping-pong reader → GPU)
-  MergeFiles.cpp / .h           FlushMergeWriterBuffer, DoCrossDriveIntermediateMerge,
+  MergeFiles.cpp / .h           KWayMergeFiles / MergePoolToWriter (merge mechanics),
                                   CascadingMerge / CascadeGroupsToRingIndex, DoEndOfLevelMerge
+  Registry.h                    Per-writer-drive file registry (v1.0.0) -- the single source
+                                  of truth for real file identity + reservation state
+  FlusherPool.cpp / .h          Flusher pool: GPU-buffer-full → real writer-drive file
+  IMergePool.cpp / .h           iMerge pool: real space-pressure relief, one thread per color
+  ConsolidationMaster.cpp / .h  Event-driven consolidation master + worker pool dispatch
+  RegistryAuditor.cpp / .h      Background registry-vs-disk drift auditor
+  DriveSpaceAuditor.cpp / .h    Background drive-space-ledger reconciliation auditor
+  Checkpoint.cpp / .h           Mid-level checkpoint capture/restore + integrity manifest
   RSFFileName.h                 RSF filename construction and pattern helpers (flat + ring)
   StatsListener.cpp / .h        TCP stats server (port 17532)
   CreateSeedFile.cpp / .h       Level-0 seed file generator (ring nested-index format directly)

@@ -7,6 +7,16 @@
 **   sequence that makes one durable.
 **
 ** Notes:
+**   v1.0.0 (2026-08-xx): reworked for the registry redesign. What's
+**   persisted is now a per-drive naming counter (nextFileIdx, naming only,
+**   never logic) plus a full {filename,color,size} integrity manifest for
+**   every real file per drive -- see OthelloTypes.h's CheckpointStats
+**   comment. Restart re-scans each writer drive (Registry.h's
+**   RegistryRebuildFromDisk, called from InitSolver.cpp) and this file
+**   Fatals on any disagreement with the manifest (missing file, untracked
+**   file, size mismatch) -- three independent hard-Fatal rules, since by
+**   the time a checkpoint is trusted enough to resume from, disagreement
+**   means real data loss or tampering, not something to silently paper over.
 **   See Checkpoint.h for the split of responsibility with LevelSolverThread.cpp
 **   (GPU accumulator draining and stream resumption stay there; this file
 **   owns everything from "the accumulator is drained" onward).
@@ -14,7 +24,9 @@
 
 /* Includes */
 #include "Checkpoint.h"
-#include "MergeFiles.h"
+#include "Registry.h"
+#include "FlusherPool.h"
+#include "ConsolidationMaster.h"
 #include "RSFFileName.h"
 #include "Logger.h"
 #include "Error.h"
@@ -56,41 +68,29 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     LoggerLog("Checkpoint: pausing level %d (%s sub-pass, %llu records consumed) to checkpoint...\n",
               level, RSFPlayerStr(activeSubPass), (unsigned long long)recordsConsumedInSubPass);
 
-    /* Drain the CPU-side merge-writer pool buffer to real NVMe files --
-    ** the same function used at the real solve->merge transition -- except
-    ** NOT FlushAllMergeWriterBuffers: that's a narrow safety net for
-    ** uncompressed staging data only, and deliberately leaves real pool-
-    ** buffer segments resident in memory for DoEndOfLevelMerge to consume
-    ** directly at the real end of the level (see its own doc comment). A
-    ** checkpoint has no such luxury -- everything must be durably on disk
-    ** before the writer-dir scan below can be trusted, so every writer
-    ** thread's buffer is force-flushed here unconditionally (FlushMergeWriterBuffer
-    ** already no-ops safely if a given thread has nothing accumulated).
-    **
-    ** WaitForPoolIdle first: FlushMergeWriterBuffer isn't safe to call
-    ** directly while a pool job could be concurrently flushing the same
-    ** thread's buffer, and this same pool is what DoCrossDriveIntermediateMerge
-    ** runs on too -- waiting for it covers both cases, exactly like the
-    ** real solve->merge transition's own first wait.
+    /* Drain every pool that could still be touching a writer-drive file:
+    ** the D2H/compress pool (pMergeWriterPool), whatever it hands off to
+    ** the flusher pool, and the iMerge pool -- then explicitly force-flush
+    ** any thread's leftover in-memory pool data (FlushMergeWriterBuffer
+    ** already no-ops safely if a thread has nothing accumulated), so
+    ** everything is durably on disk before the manifest below is captured.
+    ** Consolidation master + workers stop last (via ConsolidationMasterStop,
+    ** which itself waits for the pool to idle) -- it's the one thing
+    ** deliberately restarted afterward, since the level isn't ending, only
+    ** pausing.
     */
     WaitForPoolIdle(pSt->pMergeWriterPool);
     for (int ti = 0; ti < (int)pSt->numMergeWriters; ti++)
         FlushMergeWriterBuffer(ti, pCtx);
+    WaitForPoolIdle(pSt->pFlusherPool);
+    WaitForPoolIdle(pSt->pIMergePool);
+    ConsolidationMasterStop(pCtx);
+    WaitForPoolIdle(pSt->pConsolidatorPool);
 
-    /* Abort in-flight consolidation cleanly (identical mechanism to the
-    ** real solve->merge transition: partial merge output deleted, originals
-    ** untouched, every claim released). Workers get restarted below since
-    ** the level itself isn't ending -- only mwNextFileIdx/claimRegistry/etc
-    ** are left completely untouched by this, since those represent real,
-    ** ongoing progress within the level that a checkpoint pause must never
-    ** reset.
-    */
-    pSt->terminateConsolidation = true;
-    WaitForPoolIdle(pSt->pConsolidationPool);
-
-    /* Snapshot every (writer, color) ticket high-water mark now -- this is
-    ** the one point in the whole sequence guaranteed quiescent (nothing
-    ** claimed, nothing mid-merge, every real file already flushed to disk).
+    /* Every writer-drive file is now real, finished, and unreserved --
+    ** capture the naming counter and a full integrity manifest straight
+    ** from the registry (already reflects exactly this quiescent state,
+    ** no need for a separate directory scan here).
     */
     CheckpointStats cp = {};
     cp.boardSize                = pCfg->boardSize;
@@ -100,8 +100,28 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     cp.recordsConsumedInSubPass = recordsConsumedInSubPass;
     for (int wi = 0; wi < pSt->numMergeWriters; wi++)
     {
-        cp.mwNextFileIdx[wi][RSF_PLAYER_BLACK] = pSt->mwNextFileIdx[wi][RSF_PLAYER_BLACK];
-        cp.mwNextFileIdx[wi][RSF_PLAYER_WHITE] = pSt->mwNextFileIdx[wi][RSF_PLAYER_WHITE];
+        cp.nextFileIdx[wi] = pSt->nextFileIdx[wi];
+
+        int count = 0;
+        EnterCriticalSection(&pSt->driveRegistryCS[wi]);
+        for (auto& n : pSt->driveRegistry[wi])
+        {
+            if (count >= CHECKPOINT_MANIFEST_MAX_FILES)
+            {
+                LeaveCriticalSection(&pSt->driveRegistryCS[wi]);
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "PerformMidLevelCheckpoint: writer %d has more than %d real files -- "
+                      "checkpoint manifest capacity exceeded, cannot write a trustworthy checkpoint",
+                      wi, CHECKPOINT_MANIFEST_MAX_FILES);
+            }
+            CheckpointManifestEntry& e = cp.manifest[wi][count];
+            strncpy_s(e.filename, sizeof(e.filename), n.filename, _TRUNCATE);
+            e.color = n.color;
+            e.size  = n.physfilesize;
+            count++;
+        }
+        LeaveCriticalSection(&pSt->driveRegistryCS[wi]);
+        cp.manifestCount[wi] = count;
     }
     {
         time_t    now = time(NULL);
@@ -124,16 +144,15 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 
     LoggerLog("Checkpoint: wrote '%s'\n", path);
 
-    /* Resume consolidation workers for the rest of the level. Deliberately
-    ** NOT a full per-level reset (see OthelloRingMaster.cpp's own per-level
-    ** loop for comparison) -- only the worker threads themselves need
-    ** respawning here; every ticket/claim/consolidated-up-to counter is
-    ** left exactly as it was, since this is a pause, not a level boundary.
+    /* Resume for the rest of the level. Deliberately NOT a full per-level
+    ** reset (see OthelloRingMaster.cpp's own per-level loop for comparison)
+    ** -- only the consolidation master/workers need respawning here; the
+    ** registry and every naming counter are left exactly as they were,
+    ** since this is a pause, not a level boundary.
     */
     pSt->terminateConsolidation = false;
-    StartConsolidationWorkers(pCtx);
+    pSt->consolidationMasterThread = std::thread(ConsolidationMasterLoop, pCtx);
 
-    /* Ready for the caller to resume streaming. */
     pSt->checkpointRequestedNow        = false;
     pSt->checkpointIntervalStartTickMs = GetTickCount64();
     pSt->checkpointPauseFlag           = false;
@@ -218,29 +237,79 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
         }
     }
 
-    /* Cross-check the writer-dir's actual on-disk state against what the
-    ** checkpoint claims: for every (writer, color) with a nonzero recorded
-    ** ticket high-water mark, the file at (mark - 1) must genuinely exist.
-    ** Not a full reconstruction -- just confirms this checkpoint is
-    ** describing the writer-dir that's actually sitting there right now.
+    /* Integrity manifest cross-check: three independent hard-Fatal rules,
+    ** not a soft "ignore and fall back" like the checks above -- once a
+    ** checkpoint has passed every structural check, disagreement between
+    ** what it recorded and what's actually on disk means real data loss or
+    ** tampering, not something to silently paper over (see
+    ** project_writer_drive_registry_redesign memory).
     */
     for (int wi = 0; wi < pSt->numMergeWriters; wi++)
     {
-        for (int player = 0; player <= 1; player++)
-        {
-            int highTicket = cp.mwNextFileIdx[wi][player];
-            if (highTicket <= 0)
-                continue;
+        bool matched[CHECKPOINT_MANIFEST_MAX_FILES] = {};
 
-            char     candPath[MAX_FULL_PATH_NAME];
-            uint64_t candSize;
-            if (!FindConsolidationCandidate(candPath, sizeof(candPath), pCtx, wi, player, highTicket - 1, &candSize))
+        /* Rule 2 (untracked file) needs a real directory scan; do it once
+        ** per drive and check both directions (manifest vs. disk) against
+        ** the same scan results, matched by real file size not name-first,
+        ** since the point is confirming reality matches the record, not
+        ** just that a same-named file happens to exist.
+        */
+        for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+        {
+            char patterns[3][MAX_FULL_PATH_NAME];
+            RSFPatternWriterFiles(patterns[0], sizeof(patterns[0]), pSt->mwDirectory[wi], player);
+            RSFZPatternWriterFiles(patterns[1], sizeof(patterns[1]), pSt->mwDirectory[wi], player);
+            RSFZLPatternWriterFiles(patterns[2], sizeof(patterns[2]), pSt->mwDirectory[wi], player);
+
+            for (int p = 0; p < 3; p++)
             {
-                LoggerLog("Checkpoint: writer %d %s ticket %d (checkpoint's own recorded high-water mark) "
-                          "not found on disk -- ignoring checkpoint '%s'.\n",
-                          wi, RSFPlayerStr(player), highTicket - 1, path);
-                return false;
+                WIN32_FIND_DATAA fd;
+                HANDLE fh = FindFirstFileA(patterns[p], &fd);
+                if (fh == INVALID_HANDLE_VALUE) continue;
+                do
+                {
+                    char realPath[MAX_FULL_PATH_NAME];
+                    snprintf(realPath, sizeof(realPath), "%s\\%s", pSt->mwDirectory[wi], fd.cFileName);
+                    ULARGE_INTEGER sz; sz.LowPart = fd.nFileSizeLow; sz.HighPart = (DWORD)fd.nFileSizeHigh;
+
+                    int foundIdx = -1;
+                    for (int m = 0; m < cp.manifestCount[wi]; m++)
+                    {
+                        if (_stricmp(cp.manifest[wi][m].filename, realPath) == 0)
+                        {
+                            foundIdx = m;
+                            break;
+                        }
+                    }
+                    if (foundIdx < 0)
+                    {
+                        FindClose(fh);
+                        Fatal(FATAL_MERGE_LOGIC_ERROR,
+                              "Checkpoint: '%s' exists on disk but is not in checkpoint '%s' -- "
+                              "untracked file, refusing to resume without explicit investigation",
+                              realPath, path);
+                    }
+                    if ((int64_t)sz.QuadPart != cp.manifest[wi][foundIdx].size)
+                    {
+                        FindClose(fh);
+                        Fatal(FATAL_MERGE_LOGIC_ERROR,
+                              "Checkpoint: '%s' real size %lld != checkpoint '%s' recorded size %lld -- "
+                              "possible corruption/tampering, refusing to resume",
+                              realPath, path, (long long)sz.QuadPart, (long long)cp.manifest[wi][foundIdx].size);
+                    }
+                    matched[foundIdx] = true;
+                } while (FindNextFileA(fh, &fd));
+                FindClose(fh);
             }
+        }
+
+        for (int m = 0; m < cp.manifestCount[wi]; m++)
+        {
+            if (!matched[m])
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "Checkpoint: '%s' lists '%s' but it's missing on disk -- "
+                      "real potential data loss, refusing to resume",
+                      path, cp.manifest[wi][m].filename);
         }
     }
 

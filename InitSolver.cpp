@@ -23,6 +23,10 @@
 #include "InitSolver.h"
 #include "RSFFileName.h"
 #include "DriveLedger.h"
+#include "Registry.h"
+#include "ConsolidationMaster.h"
+#include "RegistryAuditor.h"
+#include "DriveSpaceAuditor.h"
 #include "OthelloBasicsForCUDA.h"
 #include "RingNestedIndex.h"
 #include "Checkpoint.h"
@@ -270,7 +274,12 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
     /* Merge-writer buffers: one per thread, sized to fill available RAM (see mwBufSize above). */
     pState->mwBufferSize = mwBufSize;
 
-    /* Segment tracking is implicitly zero-initialized via pState = {}; verify explicitly. */
+    /* Segment tracking is implicitly zero-initialized via pState = {}; verify explicitly.
+    ** Registry init (list + lock + naming counter) happens separately in
+    ** InitSolver itself, after this function returns -- RegistryInit needs
+    ** nothing from computeState beyond numMergeWriters being finalized,
+    ** which it already is by this point.
+    */
     for (int i = 0; i < (int)pState->numMergeWriters; i++)
     {
         pState->mwBlackSegCount[i]          = 0;
@@ -281,16 +290,6 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
         pState->mwWhiteCompBytesUsed[i]     = 0;
         pState->mwWhiteStagingCount[i]      = 0;
         pState->mwWhiteSegCountHighWater[i] = 0;
-        pState->mwBlackFileCount[i]     = 0;
-        pState->mwWhiteFileCount[i]     = 0;
-        pState->mwBlackFilesConsumed[i] = 0;
-        pState->mwWhiteFilesConsumed[i] = 0;
-        pState->mwBlackConsolidatedUpTo[i] = 0;
-        pState->mwWhiteConsolidatedUpTo[i] = 0;
-        pState->mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
-        pState->mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
-        pState->consolScanning[i][RSF_PLAYER_BLACK] = 0;
-        pState->consolScanning[i][RSF_PLAYER_WHITE] = 0;
     }
 
     double totalAllocGB = (pState->pingPongBufferSize
@@ -312,18 +311,6 @@ static void computeState(POthelloRingMasterConfig pConfig, POthelloRingMasterSta
                   "computeState: cannot allocate merge-writer buffer %d (%zu bytes)",
                   i, pState->mwBufferSize);
     }
-
-    /* Background-consolidation worker live-progress slots -- MemMalloc'd
-    ** (not a fixed array baked into the struct), one per worker thread, so
-    ** both consolidation workers and the stats thread reach the same
-    ** shared memory via pConsolSlotStats/ConsolSlot() (OthelloTypes.h).
-    */
-    size_t numConsolSlots = (size_t)CONSOLIDATION_POOL_THREADS;
-    pState->pConsolSlotStats = (ConsolidationSlotStats*)MemMalloc("consolSlotStats",
-                                   numConsolSlots * sizeof(ConsolidationSlotStats));
-    if (!pState->pConsolSlotStats)
-        Fatal(FATAL_ALLOCATION_FAILED,
-              "computeState: cannot allocate %zu consolidation stats slots", numConsolSlots);
 
     LoggerLog("Allocation complete.\n");
 }
@@ -646,7 +633,7 @@ static void createDirectories(POthelloRingMasterState pState)
 void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState,
                 PMachineInfo pMachineInfo)
 {
-    _setmaxstdio(4000);   /* k-way merge opens up to MAX_MERGE_FANIN files simultaneously */
+    _setmaxstdio(4000);   /* k-way merge opens up to MAX_MERGE_INPUT_FILES files simultaneously */
     SetBoardSizeForRun(pConfig->boardSize);
 
     for (const char* p = pConfig->useDrives; *p; p++)
@@ -681,11 +668,19 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         pState->resumeFromCheckpoint    = true;
         pState->resumeCheckpointSubPass = cp.activeSubPass;
         pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
+        /* Restore each drive's naming counter only -- naming, never logic
+        ** (see OthelloTypes.h's CheckpointStats comment). The registry
+        ** ITSELF is deliberately not restored from the checkpoint at all;
+        ** it gets rebuilt below from a fresh directory scan (RegistryInit +
+        ** a real enumeration of each writer dir), cross-checked against
+        ** cp.manifest by ReadValidCheckpoint's own three hard-Fatal rules
+        ** (already run, above, before this block executes) -- so by the
+        ** time we get here the manifest has already proven the scan and
+        ** the checkpoint agree, and rebuilding by scan is strictly safer
+        ** than trusting persisted state that could have gone stale.
+        */
         for (int wi = 0; wi < cp.numMergeWriters; wi++)
-        {
-            pState->mwNextFileIdx[wi][RSF_PLAYER_BLACK] = cp.mwNextFileIdx[wi][RSF_PLAYER_BLACK];
-            pState->mwNextFileIdx[wi][RSF_PLAYER_WHITE] = cp.mwNextFileIdx[wi][RSF_PLAYER_WHITE];
-        }
+            pState->nextFileIdx[wi] = cp.nextFileIdx[wi];
     }
     else
     {
@@ -695,16 +690,31 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     cleanUpDrives(pState, pMachineInfo, haveValidCheckpoint);
     createDirectories(pState);
 
+    /* Registry init: one per writer drive. On a fresh/non-checkpoint start
+    ** each drive's registry is simply empty (RegistryInit alone). Resuming
+    ** from a valid checkpoint is the one case where real files already sit
+    ** on disk (cleanUpDrives preserved them above) -- rebuild each drive's
+    ** registry from a real scan of what's actually there rather than
+    ** trusting anything persisted; ReadValidCheckpoint already Fatal'd above
+    ** if that scan disagreed with the checkpoint's own integrity manifest,
+    ** so by this point scanning is known-safe, not just convenient.
+    */
+    for (int i = 0; i < pState->numMergeWriters; i++)
+    {
+        RegistryInit(pState, i);
+        if (haveValidCheckpoint)
+            RegistryRebuildFromDisk(pState, i, pState->mwDirectory[i]);
+    }
+
     /* Initialize drive space ledgers after cleanup so we start from clean
     ** free space. Each ledger is seeded with (OS free bytes - safety buffer).
     */
     for (int i = 0; i < pState->numMergeWriters; i++)
-        DriveInitLedger(pState, pState->mwDirectory[i][0]);
+        DriveInitLedger(pState, pState->mwDirectory[i][0], pConfig->driveSpaceLowGBOverride);
     for (int i = 0; i < pState->numMergeDirs; i++)
         DriveInitLedger(pState, pState->mergeDirectory[i][0]);
     DriveInitLedger(pState, pConfig->storeDrive);
 
-    int numMWThreads        = pState->numMergeWriters;
     int numStatsThreads     = 1;
 
     /* Exactly one feeder thread: GpuAccumulatorCreate makes one accumulator
@@ -717,12 +727,18 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     */
     int numGPUFeederThreads = 1;
 
-    InitializeCriticalSection(&pState->imergeCS);
-    for (int wi = 0; wi < MAX_WRITERS; wi++)
-        for (int p = 0; p < 2; p++)
-            InitializeCriticalSection(&pState->claimRegistry[wi][p].cs);
-
-    pState->pMergeWriterPool = new ThreadPool(numMWThreads, "MergeWriterPool");
+    /* Six dedicated pools. pMergeWriterPool keeps its original, narrower
+    ** role (routine D2H-copy-then-compress-into-pool for every GPU flush
+    ** handoff, sized one thread per writer drive, unchanged from before
+    ** this redesign) -- see OthelloTypes.h's field comment. The other five
+    ** are new/renamed so housekeeping (flush's real disk write, iMerge,
+    ** consolidation) can never starve the GPU feeder's own dependency the
+    ** way the old single shared pool (which used to ALSO run consolidation/
+    ** iMerge inline) could -- see project_writer_drive_registry_redesign
+    ** memory for the incident this replaces. Fixed thread counts for flush/
+    ** iMerge/consolidator (OthelloTypes.h), not yet exposed as CLI overrides.
+    */
+    pState->pMergeWriterPool = new ThreadPool(pState->numMergeWriters, "MergeWriterPool");
     if (!pState->pMergeWriterPool)
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create merge-writer thread pool");
 
@@ -734,30 +750,35 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     if (!pState->pStatsThreadPool)
         Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create stats thread pool");
 
-    /* Background small-file consolidator: ONE shared pool, CONSOLIDATION_POOL_THREADS
-    ** persistent worker threads -- deliberately flat-sized (not scaled by
-    ** numMWThreads/drive count) so adding more NVMe drives never grows
-    ** total thread count. Each worker runs ConsolidationWorkerLoop for the
-    ** whole level (queued fresh at level start, see OthelloRingMaster.cpp):
-    ** sleep, sweep every (writer, color) pair merging whatever's eligible,
-    ** sleep again -- no per-pair concurrency cap, ClaimRegistry alone
-    ** mediates multiple workers reaching the same pair. A SEPARATE pool
-    ** from pMergeWriterPool so it draws from otherwise-idle cores and never
-    ** competes with active flush-writing. See TryConsolidatePair
-    ** (MergeFiles.cpp) and project_background_nvme_consolidation_design memory.
+    pState->pFlusherPool = new ThreadPool(FLUSHER_POOL_THREADS, "FlusherPool");
+    if (!pState->pFlusherPool)
+        Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create flusher thread pool");
+
+    pState->pIMergePool = new ThreadPool(IMERGE_POOL_THREADS, "IMergePool");
+    if (!pState->pIMergePool)
+        Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create iMerge thread pool");
+
+    pState->pConsolidatorPool = new ThreadPool(CONSOLIDATOR_POOL_THREADS, "ConsolidatorPool");
+    if (!pState->pConsolidatorPool)
+        Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create consolidator thread pool");
+    /* Master's own free-worker count -- zero-initialized via pState = {},
+    ** must start at the real pool size or the master would never dispatch
+    ** anything. Also reset per-level (OthelloRingMaster.cpp) since a lost
+    ** InterlockedIncrement is impossible but this is cheap insurance
+    ** against drift across a very long run.
     */
-    pState->pConsolidationPool = new ThreadPool(CONSOLIDATION_POOL_THREADS, "ConsolidationPool");
-    if (!pState->pConsolidationPool)
-        Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot create consolidation thread pool");
+    pState->consolidatorFreeCount = CONSOLIDATOR_POOL_THREADS;
 
     AcquireInstanceLock(pState->storeDirectory);
 
     pState->pMergeWriterPool->Start();
     pState->pGPUFeederThreadPool->Start();
     pState->pStatsThreadPool->Start();
-    pState->pConsolidationPool->Start();
+    pState->pFlusherPool->Start();
+    pState->pIMergePool->Start();
+    pState->pConsolidatorPool->Start();
 
-    /* Block until every worker thread in all four pools is genuinely
+    /* Block until every worker thread in all six pools is genuinely
     ** running (not just constructed) before the solve loop starts
     ** dispatching jobs -- otherwise the very first level's timing would
     ** silently include an unpredictable amount of thread-spin-up noise.
@@ -765,16 +786,39 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     pState->pMergeWriterPool->WaitUntilReady();
     pState->pGPUFeederThreadPool->WaitUntilReady();
     pState->pStatsThreadPool->WaitUntilReady();
-    pState->pConsolidationPool->WaitUntilReady();
+    pState->pFlusherPool->WaitUntilReady();
+    pState->pIMergePool->WaitUntilReady();
+    pState->pConsolidatorPool->WaitUntilReady();
+
+    /* The single event-driven consolidation master thread and the two
+    ** background auditors are NOT started here -- each needs a stable,
+    ** long-lived PSolveContext (ConsolidationMasterLoop/RegistryAuditorLoop/
+    ** DriveSpaceAuditorLoop all run for the rest of the process), and the
+    ** only such SolveContext lives in OthelloRingMaster.cpp's main(),
+    ** constructed right after this function returns -- constructing one
+    ** here would either dangle (a local) or leak (a lone heap allocation
+    ** with no owner). Same reason SubmitStatsListenerJob is called from
+    ** main(), not from in here -- see OthelloRingMaster.cpp, right after
+    ** `SolveContext ctx = { &g_config, &g_state, &g_machineInfo };`.
+    */
 
     int lastLevel = (int)pConfig->boardSize * (int)pConfig->boardSize - 4;
     LoggerLog("\nSolver configuration:\n");
     LoggerLog("  Board size         : %dx%d  (levels 0..%d)\n",
               pConfig->boardSize, pConfig->boardSize, lastLevel);
-    LoggerLog("  MW threads         : %d\n", numMWThreads);
-    LoggerLog("  Consolidation thrds: %d shared  (poll every %dms, size cap %llu GB)\n",
-              CONSOLIDATION_POOL_THREADS, CONSOLIDATION_POLL_INTERVAL_MS,
-              (unsigned long long)CONSOLIDATION_SIZE_CAP_GB);
+    LoggerLog("  MW (writer) drives : %d\n", pState->numMergeWriters);
+    LoggerLog("  Flusher threads    : %d\n", FLUSHER_POOL_THREADS);
+    LoggerLog("  iMerge threads     : %d  (drive-space-low %llu GB)\n",
+              IMERGE_POOL_THREADS,
+              pConfig->driveSpaceLowGBOverride ? (unsigned long long)pConfig->driveSpaceLowGBOverride
+                                                : (unsigned long long)DRIVE_SPACE_LOW_GB);
+    LoggerLog("  Consolidator thrds : %d  (master: event-driven, size cap %llu GB)\n",
+              CONSOLIDATOR_POOL_THREADS,
+              pConfig->maxFileSizeGBOverride ? (unsigned long long)pConfig->maxFileSizeGBOverride
+                                              : (unsigned long long)CONSOLIDATION_SIZE_CAP_GB);
+    LoggerLog("  Audit interval     : %u sec\n",
+              pConfig->auditIntervalSecondsOverride ? pConfig->auditIntervalSecondsOverride
+                                                      : (unsigned)AUDIT_INTERVAL_SECONDS_DEFAULT);
     LoggerLog("  GPU threads        : %d\n", numGPUFeederThreads);
     LoggerLog("  Stats port         : %d\n", (int)pConfig->statsPort);
     LoggerLog("  Store format       : %s\n",
@@ -806,8 +850,10 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
 
 /*
 ** Function: CleanupSolver
-** @brief    Releases the instance lock, stops and frees all four thread
-**           pools, frees every large buffer, and destroys the imerge critical section.
+** @brief    Releases the instance lock, stops and frees all six thread
+**           pools, stops and joins the consolidation master thread and both
+**           background auditor threads, frees every large buffer, and tears
+**           down every writer drive's registry lock.
 ** @param    pState - the solver state to tear down
 */
 void CleanupSolver(POthelloRingMasterState pState)
@@ -815,8 +861,29 @@ void CleanupSolver(POthelloRingMasterState pState)
     ReleaseInstanceLock();
     pState->terminateThreads       = true;
     pState->terminateConsolidation = true;
-    pState->pConsolidationPool->Stop();
-    delete pState->pConsolidationPool;
+
+    /* Wake the consolidation master explicitly -- it's blocked on a
+    ** condition variable, not just polling a flag, so setting
+    ** terminateThreads/terminateConsolidation alone would never wake it.
+    ** RegistryAuditorLoop/DriveSpaceAuditorLoop are plain sleep-loops and
+    ** notice terminateThreads within one sleep interval on their own, no
+    ** explicit wake needed.
+    */
+    {
+        std::lock_guard<std::mutex> lock(pState->consolidationMasterMutex);
+        pState->consolidationMasterWake = true;
+    }
+    pState->consolidationMasterCV.notify_all();
+    pState->consolidationMasterThread.join();
+    pState->registryAuditorThread.join();
+    pState->driveSpaceAuditorThread.join();
+
+    pState->pConsolidatorPool->Stop();
+    delete pState->pConsolidatorPool;
+    pState->pIMergePool->Stop();
+    delete pState->pIMergePool;
+    pState->pFlusherPool->Stop();
+    delete pState->pFlusherPool;
     pState->pMergeWriterPool->Stop();
     delete pState->pMergeWriterPool;
     pState->pGPUFeederThreadPool->Stop();
@@ -828,9 +895,6 @@ void CleanupSolver(POthelloRingMasterState pState)
     for (int i = 0; i < pState->numMergeWriters; i++)
         MemFree(pState->pMWBuffer[i]);
     MemFree(pState->pPingPongBuffer);
-    MemFree(pState->pConsolSlotStats);
-    DeleteCriticalSection(&pState->imergeCS);
-    for (int wi = 0; wi < MAX_WRITERS; wi++)
-        for (int p = 0; p < 2; p++)
-            DeleteCriticalSection(&pState->claimRegistry[wi][p].cs);
+    for (int i = 0; i < pState->numMergeWriters; i++)
+        RegistryTeardown(pState, i);
 }

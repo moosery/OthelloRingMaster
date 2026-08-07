@@ -2,17 +2,21 @@
 ** Filename:  MergeFiles.cpp
 **
 ** Purpose:
-**   Implements the k-way merge / cross-drive consolidation machinery
-**   declared in MergeFiles.h: FlushMergeWriterBuffer (in-memory merge of one
-**   merge-writer thread's accumulated GPU flush segments to an RSF file),
-**   DoCrossDriveIntermediateMerge (consolidates NVMe writer files onto a
-**   medium drive, or performs a total flush to the store drive if the
-**   medium drive is full), and DoEndOfLevelMerge (the end-of-level
-**   consolidation of every remaining writer/intermediate file, merged
-**   directly into the level's ring nested-index files -- see
-**   KWayMergeFilesToRingIndex and CascadingMerge's pRingBuilder parameter).
+**   Implements the merge MECHANICS declared in MergeFiles.h: KWayMergeFiles/
+**   MergePoolToWriter (generic sorted-dedup merge primitives, exported for
+**   FlusherPool.cpp/IMergePool.cpp/ConsolidationMaster.cpp to reuse) and
+**   DoEndOfLevelMerge (the end-of-level consolidation of every remaining
+**   writer/intermediate file, merged directly into the level's ring
+**   nested-index files -- see KWayMergeFilesToRingIndex and CascadingMerge's
+**   pRingBuilder parameter).
 **
 ** Notes:
+**   v1.0.0 (2026-08-06): the old FlushMergeWriterBuffer/DoBackgroundConsolidation/
+**   TryConsolidatePair/DoCrossDriveIntermediateMerge/StartConsolidationWorkers
+**   functions that used to live in this file are retired -- see
+**   FlusherPool.h/.cpp, ConsolidationMaster.h/.cpp, IMergePool.h/.cpp for
+**   their replacements. This file now holds only the merge mechanics those
+**   three use, plus DoEndOfLevelMerge (untouched by this redesign).
 **   Adapted from an earlier solver implementation, renamed onto this
 **   solution's own types (BOARD_KEY_DISK -> UINT64_PAIR,
 **   .ullCellsInUse/.ullCellColors -> .hi/.lo, the old record-file prefix
@@ -36,15 +40,15 @@
 **   as the nested-index format; that doubled the actual store I/O for no
 **   benefit, since the flat file was never kept). Cascade's own grouped/
 **   intermediate temp files (used only when a color's input file count
-**   exceeds MAX_MERGE_FANIN) are unaffected -- still flat.
+**   exceeds MAX_MERGE_INPUT_FILES) are unaffected -- still flat.
 */
 
 /* Includes */
 #include "MergeFiles.h"
 #include "RSFFileName.h"
 #include "DriveLedger.h"
-#include "FileTicket.h"
-#include "ClaimRegistry.h"
+#include "Registry.h"
+#include "FlusherPool.h"
 #include "OthelloBasics.h"
 #include "RingNestedIndex.h"
 #include "Logger.h"
@@ -206,7 +210,7 @@ static int CountByPattern(const char* fullPattern)
 ** @param    extraReaders   - already-open readers to merge in alongside inputPaths
 ** @return   Unique record count written.
 */
-static uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath,
+uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath,
                                 volatile int64_t* pProgressBytes, bool compressed = false,
                                 const volatile bool* pTerminate = nullptr,
                                 const std::vector<RSFReader*>& extraReaders = {})
@@ -508,7 +512,7 @@ static uint64_t MergeRingGroupsIntoBuilder(RingNestedIndexPullReader* pReaders, 
 ** @param    pSt               - solve state (driveLedger), or nullptr (recursive/no-pCtx call -- no drive accounting)
 ** @param    player             - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE (logging only)
 ** @param    groupNumber1Based - this group's 1-based index (logging only)
-** @param    fileSzCache       - scratch buffer, at least MAX_MERGE_FANIN entries
+** @param    fileSzCache       - scratch buffer, at least MAX_MERGE_INPUT_FILES entries
 ** @param    pOutChosenDir     - out: the chosen directory
 ** @param    pOutGroupSize     - out: how many files this group contains
 ** @param    pOutGroupBytes    - out: total input bytes reserved for this group
@@ -519,7 +523,7 @@ static void ChooseNextCascadeGroup(char** inputPaths, int numRemaining,
                                     std::vector<int64_t>& fileSzCache,
                                     const char** pOutChosenDir, int* pOutGroupSize, int64_t* pOutGroupBytes)
 {
-    int windowSize = (std::min)(MAX_MERGE_FANIN, numRemaining);
+    int windowSize = (std::min)(MAX_MERGE_INPUT_FILES, numRemaining);
 
     std::fill(fileSzCache.begin(), fileSzCache.begin() + windowSize, 0);
     for (int k = 0; k < windowSize; k++)
@@ -587,7 +591,7 @@ struct RingCascadeGroupPaths
 /*
 ** Function: CascadeGroupsToRingIndex
 ** @brief    Ring-format counterpart to CascadingMerge's grouped/cascading
-**           path, used when numInputs alone exceeds MAX_MERGE_FANIN and the
+**           path, used when numInputs alone exceeds MAX_MERGE_INPUT_FILES and the
 **           final output is ring-format (CascadingMerge's pRingBuilder is
 **           set). Groups inputPaths exactly like CascadingMerge's own loop
 **           (via the same ChooseNextCascadeGroup helper), but each group's
@@ -596,14 +600,14 @@ struct RingCascadeGroupPaths
 **           space on these transient temp files too, the same reasoning as
 **           the level's own final store.
 ** @details  Deliberately single-round: if the groups this round produces
-**           (at most MAX_MERGE_FANIN of them) still exceed MAX_MERGE_FANIN,
+**           (at most MAX_MERGE_INPUT_FILES of them) still exceed MAX_MERGE_INPUT_FILES,
 **           Fatals rather than recursing into a second cascade round --
 **           that would need well over 12 million real input files for one
 **           level/color (the largest real run on record needed ~42,000),
 **           a scale never exercised or tested in this project. The
 **           realistic case (one round of ring-format groups, merged
 **           directly into pRingBuilder) is what this implements.
-** @param    inputPaths     - files to merge (caller already knows numInputs > MAX_MERGE_FANIN)
+** @param    inputPaths     - files to merge (caller already knows numInputs > MAX_MERGE_INPUT_FILES)
 ** @param    numInputs      - number of files in inputPaths
 ** @param    tempDirs       - candidate directories for group temp files, ordered fastest-first
 ** @param    numTempDirs    - number of entries in tempDirs
@@ -638,7 +642,7 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 
     if (pSt)
     {
-        pSt->cascadeNumGroups[player]          = (numInputs + MAX_MERGE_FANIN - 1) / MAX_MERGE_FANIN;
+        pSt->cascadeNumGroups[player]          = (numInputs + MAX_MERGE_INPUT_FILES - 1) / MAX_MERGE_INPUT_FILES;
         pSt->cascadeGroupsDone[player]         = 0;
         pSt->cascadeGroupProgressBytes[player] = 0;
         pSt->cascadeStartTickMs[player]        = GetTickCount64();
@@ -647,7 +651,7 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 
     int numGroups = 0;
     int start     = 0;
-    std::vector<int64_t> fileSzCache(MAX_MERGE_FANIN, 0);
+    std::vector<int64_t> fileSzCache(MAX_MERGE_INPUT_FILES, 0);
     while (start < numInputs)
     {
         if (pTerm && *pTerm) break;
@@ -659,12 +663,12 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
                                 pSt, player, numGroups + 1, fileSzCache,
                                 &chosenDir, &groupSize, &groupBytes);
 
-        if (numGroups + 1 > MAX_MERGE_FANIN)
+        if (numGroups + 1 > MAX_MERGE_INPUT_FILES)
             Fatal(FATAL_MERGE_LOGIC_ERROR,
                   "CascadeGroupsToRingIndex: %s needs a second cascade round (>%d ring-format groups) -- "
                   "not supported (would need well over 12 million real input files for one level/color, "
                   "never seen at this project's scale)",
-                  RSFPlayerStr(player), MAX_MERGE_FANIN);
+                  RSFPlayerStr(player), MAX_MERGE_INPUT_FILES);
 
         if (pSt && numTempDirs > 0 && numGroups + 1 > pSt->cascadeNumGroups[player])
             pSt->cascadeNumGroups[player] = numGroups + 1;
@@ -720,7 +724,7 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 
     if (pSt) pSt->cascadeActive[player] = false;
 
-    /* Single round only (see @details) -- merge the (at most MAX_MERGE_FANIN)
+    /* Single round only (see @details) -- merge the (at most MAX_MERGE_INPUT_FILES)
     ** ring-format groups directly into the final builder.
     */
     std::vector<RingNestedIndexPullReader> readers(numGroups);
@@ -758,7 +762,7 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 ** Function: CascadingMerge
 ** @brief    Merges numInputs files into finalOutPath, recursing through
 **           intermediate grouped passes when numInputs exceeds
-**           MAX_MERGE_FANIN (bounded simultaneously-open file handles).
+**           MAX_MERGE_INPUT_FILES (bounded simultaneously-open file handles).
 ** @details  pCtx is non-null only on the outer call; nullptr is passed for
 **           the recursive final-pass call so cascade tracking is not
 **           re-entered. tempDirs is an ordered list of candidate directories
@@ -774,7 +778,7 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 **
 **           extraReaders: leftover in-memory pool data (see KWayMergeFiles)
 **           to merge in alongside the on-disk inputs. Only handled in the
-**           single-pass fast path (numInputs <= MAX_MERGE_FANIN) -- grouped/
+**           single-pass fast path (numInputs <= MAX_MERGE_INPUT_FILES) -- grouped/
 **           cascading mode bounds the number of simultaneously-open OS file
 **           handles, a constraint that doesn't apply to memory readers, so
 **           callers are expected to materialize any leftover pool to disk
@@ -798,8 +802,8 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
 ** @param    pRingBuilder           - if non-null, feeds deduped records directly into this
 **                                    already-Init()'d builder instead of writing finalOutPath
 **                                    (finalOutPath/compressFinal are ignored in that case).
-**                                    numInputs <= MAX_MERGE_FANIN goes straight through
-**                                    KWayMergeFilesToRingIndex; numInputs > MAX_MERGE_FANIN
+**                                    numInputs <= MAX_MERGE_INPUT_FILES goes straight through
+**                                    KWayMergeFilesToRingIndex; numInputs > MAX_MERGE_INPUT_FILES
 **                                    dispatches to CascadeGroupsToRingIndex instead of this
 **                                    function's own flat grouped/recursive path below -- in ring
 **                                    mode, cascade's own intermediate group temp files become
@@ -819,7 +823,7 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
 {
     const volatile bool* pTerm = pCtx ? &pCtx->pState->terminateThreads : pTerminate;
 
-    if (numInputs <= MAX_MERGE_FANIN)
+    if (numInputs <= MAX_MERGE_INPUT_FILES)
     {
         if (pRingBuilder)
             return KWayMergeFilesToRingIndex(inputPaths, numInputs, pRingBuilder, pProgressBytes, pTerm, extraReaders);
@@ -830,7 +834,7 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     if (!extraReaders.empty())
         Fatal(FATAL_MERGE_LOGIC_ERROR,
               "CascadingMerge: %s has %zu in-memory pool readers but numInputs=%d "
-              "> MAX_MERGE_FANIN requires grouped mode, which only accepts files -- "
+              "> MAX_MERGE_INPUT_FILES requires grouped mode, which only accepts files -- "
               "caller must flush the pool to disk first",
               RSFPlayerStr(player), extraReaders.size(), numInputs);
 
@@ -859,7 +863,7 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     /* Seed the status display with a minimum-group estimate; updated if we create more. */
     if (pSt)
     {
-        pSt->cascadeNumGroups[player]          = (numInputs + MAX_MERGE_FANIN - 1) / MAX_MERGE_FANIN;
+        pSt->cascadeNumGroups[player]          = (numInputs + MAX_MERGE_INPUT_FILES - 1) / MAX_MERGE_INPUT_FILES;
         pSt->cascadeGroupsDone[player]         = 0;
         pSt->cascadeGroupProgressBytes[player] = 0;
         pSt->cascadeStartTickMs[player]        = GetTickCount64();
@@ -868,8 +872,8 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
 
     int numTemps = 0;
     int start    = 0;
-    /* Heap-allocated once; reused each iteration. Stack would be 28 KB (MAX_MERGE_FANIN*8). */
-    std::vector<int64_t> fileSzCache(MAX_MERGE_FANIN, 0);
+    /* Heap-allocated once; reused each iteration. Stack would be 28 KB (MAX_MERGE_INPUT_FILES*8). */
+    std::vector<int64_t> fileSzCache(MAX_MERGE_INPUT_FILES, 0);
     while (start < numInputs)
     {
         if (pTerm && *pTerm) break;
@@ -960,16 +964,16 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     return unique;
 }
 
-/* Forward declaration (defined after FlushMergeWriterBuffer) */
-static void DoCrossDriveIntermediateMerge(PSolveContext pCtx);
-
 /*
 ** ============================================================
-** FlushMergeWriterBuffer
+** MergePoolToWriter
 **
-** Merges all in-memory data for thread ti (compressed pool segments via
-** RSFReaderOpenZMem + uncompressed staging via raw pointer) into per-player
-** NVMe files. Resets all pool and staging counters on return.
+** Merges all in-memory data for one merge-writer thread's pool (compressed
+** segments via RSFReaderOpenZMem + any live uncompressed staging via raw
+** pointer) into a single open RSFWriter. Exported (MergeFiles.h) for
+** FlusherPool.cpp to call -- see that file for what now decides WHEN to
+** flush and where the output file comes from (the registry), which used to
+** live in this file as FlushMergeWriterBuffer before the v1.0.0 redesign.
 ** ============================================================
 */
 
@@ -1018,7 +1022,7 @@ struct PoolMergeHeadGreater
 ** @param    pProgressBytes - out (optional): atomically incremented (in 16 MB batches) as
 **                            records are popped, so the stats thread can show live flush progress
 */
-static void MergePoolToWriter(
+void MergePoolToWriter(
     RSFWriter* pw,
     uint8_t* mwBuf,
     int segCount, const size_t* segOffsets, const size_t* segSizes, const int* segBoardCounts,
@@ -1082,1133 +1086,6 @@ static void MergePoolToWriter(
         InterlockedAdd64(pProgressBytes, progressAccum);
 
     for (RSFReader* r : readers) RSFClose(&r);
-}
-
-/*
-** Function: FlushMergeWriterBuffer
-** @brief    In-memory k-way merge of accumulated GPU flush segments for
-**           merge-writer thread ti. Streams the sorted+deduped result
-**           directly to an RSF file on that thread's NVMe directory, then
-**           resets the segment tracking.
-** @param    ti   - the merge-writer thread whose buffer to flush
-** @param    pCtx - solve context
-*/
-void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
-{
-    POthelloRingMasterState pSt   = pCtx->pState;
-    int                     level = (int)pSt->playLevel;
-
-    bool hasBlack = pSt->mwBlackSegCount[ti] > 0 || pSt->mwBlackStagingCount[ti] > 0;
-    bool hasWhite = pSt->mwWhiteSegCount[ti] > 0 || pSt->mwWhiteStagingCount[ti] > 0;
-    if (!hasBlack && !hasWhite) return;
-
-    bool  compressMW = (pCtx->pConfig->compressMode == COMPRESS_ALL);
-    char  mwDL       = pSt->mwDirectory[ti][0];
-    bool  lz4MW      = compressMW && pCtx->pConfig->lz4Drives[0]
-                    && (strchr(pCtx->pConfig->lz4Drives, mwDL) != nullptr);
-
-    uint8_t* mwBuf = (uint8_t*)pSt->pMWBuffer[ti];
-    const UINT64_PAIR* blackStaging = (const UINT64_PAIR*)mwBuf;
-    const UINT64_PAIR* whiteStaging =
-        (const UINT64_PAIR*)(mwBuf + pSt->mwBufferSize - pSt->mwStagingSize);
-
-    uint64_t blackCount = 0, whiteCount = 0;
-    int      blackFilesCreated = 0, whiteFilesCreated = 0;
-    uint64_t blackFileBytes    = 0, whiteFileBytes    = 0;
-
-    /* Publish total input boards (black + white) before starting so the
-    ** stats thread can show live progress for this writer's buffer-full
-    ** NVMe spill.
-    */
-    {
-        uint64_t totalInputBoards = (uint64_t)pSt->mwBlackStagingCount[ti]
-                                   + (uint64_t)pSt->mwWhiteStagingCount[ti];
-        for (int s = 0; s < pSt->mwBlackSegCount[ti]; s++)
-            totalInputBoards += (uint64_t)pSt->mwBlackSegBoardCount[ti][s];
-        for (int s = 0; s < pSt->mwWhiteSegCount[ti]; s++)
-            totalInputBoards += (uint64_t)pSt->mwWhiteSegBoardCount[ti][s];
-
-        pSt->mwFlushTotalBytes[ti]   = (int64_t)(totalInputBoards * sizeof(UINT64_PAIR));
-        pSt->mwFlushDoneBytes[ti]    = 0;
-        pSt->mwFlushStartTickMs[ti]  = GetTickCount64();
-        pSt->mwFlushActive[ti]       = 1;
-    }
-
-    /* Black and white streams are fully independent -- separate segments,
-    ** separate staging regions, separate output files -- so merge them
-    ** concurrently instead of one after another. mwFlushDoneBytes[ti] is
-    ** updated via InterlockedAdd64 inside MergePoolToWriter, so it's safe
-    ** to share between both threads.
-    */
-    auto flushBlack = [&]()
-    {
-        if (!hasBlack) return;
-        /* FileTicketNext + ClaimSingle replace the old fileIndexCS-protected
-        ** read-before-write of mwBlackFileCount[ti] -- lock-free, so this
-        ** flush can never be blocked by a concurrent TryConsolidatePair
-        ** merge on the same (ti, black) pair, however long that merge takes.
-        ** See FileTicket.h/ClaimRegistry.h and OthelloTypes.h's mwNextFileIdx
-        ** comment for the corruption bug this design fixes.
-        */
-        int blackFileIdx = FileTicketNext(pSt, ti, RSF_PLAYER_BLACK);
-        ClaimSingle(pSt, ti, RSF_PLAYER_BLACK, blackFileIdx);
-        char blackPath[MAX_FULL_PATH_NAME];
-        if (lz4MW)
-            RSFZLNameWriterFile(blackPath, sizeof(blackPath), pSt->mwDirectory[ti],
-                                RSF_PLAYER_BLACK, blackFileIdx);
-        else if (compressMW)
-            RSFZNameWriterFile(blackPath, sizeof(blackPath), pSt->mwDirectory[ti],
-                               RSF_PLAYER_BLACK, blackFileIdx);
-        else
-            RSFNameWriterFile(blackPath, sizeof(blackPath), pSt->mwDirectory[ti],
-                              RSF_PLAYER_BLACK, blackFileIdx);
-        RSFWriter* pw = compressMW ? RSFWriterOpenZ(blackPath) : RSFWriterOpen(blackPath);
-
-        MergePoolToWriter(pw, mwBuf,
-                          pSt->mwBlackSegCount[ti],
-                          pSt->mwBlackSegOffset[ti],
-                          pSt->mwBlackSegSize[ti],
-                          pSt->mwBlackSegBoardCount[ti],
-                          blackStaging, pSt->mwBlackStagingCount[ti],
-                          &pSt->terminateThreads, &pSt->mwFlushDoneBytes[ti]);
-        blackCount = RSFWriterClose(pw, &blackFileBytes);
-        if (blackCount == 0) { DeleteFileA(blackPath); blackFileBytes = 0; }
-        else { InterlockedIncrement((volatile LONG*)&pSt->mwBlackFileCount[ti]); blackFilesCreated = 1;
-               InterlockedIncrement((volatile LONG*)&pSt->mwBlackPhysicalFileCount[ti]); }
-        ClaimReleaseOne(pSt, ti, RSF_PLAYER_BLACK, blackFileIdx);
-    };
-
-    auto flushWhite = [&]()
-    {
-        if (!hasWhite) return;
-        int whiteFileIdx = FileTicketNext(pSt, ti, RSF_PLAYER_WHITE);
-        ClaimSingle(pSt, ti, RSF_PLAYER_WHITE, whiteFileIdx);
-        char whitePath[MAX_FULL_PATH_NAME];
-        if (lz4MW)
-            RSFZLNameWriterFile(whitePath, sizeof(whitePath), pSt->mwDirectory[ti],
-                                RSF_PLAYER_WHITE, whiteFileIdx);
-        else if (compressMW)
-            RSFZNameWriterFile(whitePath, sizeof(whitePath), pSt->mwDirectory[ti],
-                               RSF_PLAYER_WHITE, whiteFileIdx);
-        else
-            RSFNameWriterFile(whitePath, sizeof(whitePath), pSt->mwDirectory[ti],
-                              RSF_PLAYER_WHITE, whiteFileIdx);
-        RSFWriter* pw = compressMW ? RSFWriterOpenZ(whitePath) : RSFWriterOpen(whitePath);
-
-        MergePoolToWriter(pw, mwBuf,
-                          pSt->mwWhiteSegCount[ti],
-                          pSt->mwWhiteSegOffset[ti],
-                          pSt->mwWhiteSegSize[ti],
-                          pSt->mwWhiteSegBoardCount[ti],
-                          whiteStaging, pSt->mwWhiteStagingCount[ti],
-                          &pSt->terminateThreads, &pSt->mwFlushDoneBytes[ti]);
-        whiteCount = RSFWriterClose(pw, &whiteFileBytes);
-        if (whiteCount == 0) { DeleteFileA(whitePath); whiteFileBytes = 0; }
-        else { InterlockedIncrement((volatile LONG*)&pSt->mwWhiteFileCount[ti]); whiteFilesCreated = 1;
-               InterlockedIncrement((volatile LONG*)&pSt->mwWhitePhysicalFileCount[ti]); }
-        ClaimReleaseOne(pSt, ti, RSF_PLAYER_WHITE, whiteFileIdx);
-    };
-
-    std::thread blackThread(flushBlack);
-    std::thread whiteThread(flushWhite);
-    blackThread.join();
-    whiteThread.join();
-
-    int      filesCreated = blackFilesCreated + whiteFilesCreated;
-    uint64_t fileBytes    = blackFileBytes + whiteFileBytes;
-
-    pSt->mwFlushActive[ti] = 0;
-
-    /* Reset all pool and staging state for this thread */
-    pSt->mwBlackSegCount[ti]      = 0;
-    pSt->mwBlackCompBytesUsed[ti] = 0;
-    pSt->mwBlackStagingCount[ti]  = 0;
-    pSt->mwWhiteSegCount[ti]      = 0;
-    pSt->mwWhiteCompBytesUsed[ti] = 0;
-    pSt->mwWhiteStagingCount[ti]  = 0;
-
-    uint64_t unique = blackCount + whiteCount;
-    uint64_t uncompressedBytes = unique * sizeof(UINT64_PAIR)
-                               + (uint64_t)filesCreated * sizeof(RSFTrailer);
-
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].boardsWrittenToDisk, (LONG64)unique);
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].mwFilesCreated,      (LONG64)filesCreated);
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].mwBytes,             (LONG64)fileBytes);
-
-    /* Debit the NVMe ledger for bytes just written, then check merge triggers.
-    ** writerDriveStats[ti] is this thread's own drive -- writerDriveStats[i]
-    ** is built 1:1 with mwDirectory[i] (see InitSolver.cpp), so no
-    ** search-by-drive-letter is needed here.
-    */
-    char driveLetter = pSt->mwDirectory[ti][0];
-    DriveDebit(pSt, driveLetter, (int64_t)fileBytes);
-
-    pSt->writerDriveStats[ti].levelFilesWritten      += filesCreated;
-    pSt->writerDriveStats[ti].levelBytesWritten      += fileBytes;
-    pSt->writerDriveStats[ti].levelBytesUncompressed += uncompressedBytes;
-    bool needsMerge = DriveAvailable(pSt, driveLetter) < (int64_t)pSt->writerDriveStats[ti].threshold;
-    if (!needsMerge)
-    {
-        /* File-count trigger: merge when total unconsumed files per color >= MAX_MERGE_FANIN. */
-        int totalBlack = 0, totalWhite = 0;
-        for (int i = 0; i < pSt->numMergeWriters; i++)
-        {
-            totalBlack += pSt->mwBlackFileCount[i] - pSt->mwBlackFilesConsumed[i];
-            totalWhite += pSt->mwWhiteFileCount[i] - pSt->mwWhiteFilesConsumed[i];
-        }
-        if (totalBlack >= MAX_MERGE_FANIN || totalWhite >= MAX_MERGE_FANIN)
-            needsMerge = true;
-    }
-    if (needsMerge)
-        DoCrossDriveIntermediateMerge(pCtx);
-
-    /* Background consolidation is no longer triggered from here -- the
-    ** consolidation worker pool polls every (writer, color) pair on its own
-    ** schedule (ConsolidationWorkerLoop, below) rather than being woken by
-    ** each flush.
-    */
-}
-
-/*
-** ============================================================
-** DoCrossDriveIntermediateMerge
-**
-** Triggered when total unconsumed writer files across ALL NVMe drives (per
-** color) reaches MAX_MERGE_FANIN, or when a single drive's free space drops
-** below its threshold.
-**
-** Merges all unconsumed writer files from every MW directory for each
-** player (black then white) into a single imerge file on the fastest medium
-** drive. If that drive cannot hold the output, performs a TOTAL FLUSH: also
-** pulls in all existing imerge files on medium drives for this level and
-** player, merging the combined set to the store drive -- clearing both the
-** NVMe drives and the medium drives in one shot so all fast drives are free again.
-**
-** Blocks until any in-progress merge by the other MW thread completes, then
-** re-checks space/file-count under the lock. EnterCriticalSection (not Try)
-** is used so that a thread with a nearly-full drive cannot skip the wait and
-** keep writing until the drive exhausts itself.
-**
-** File-index range is snapshotted from each pair's FileTicketNext counter
-** (mwNextFileIdx, OthelloTypes.h) under the lock, but that snapshot alone no
-** longer guarantees a candidate file is safe to touch -- a ticketed index
-** can belong to a file still being written, or one currently claimed as
-** input to a live TryConsolidatePair merge. The gather loop below
-** claims each candidate via ClaimTryRange (ClaimRegistry.h) before trusting
-** it; losing that race stops the scan for that writer right there (a
-** deliberate simplicity trade-off -- consumedArr[ti] is a single scalar
-** low-water mark, not a set, so it can only advance past a run it's
-** confirmed the fate of, not skip over an undecided gap). This function is
-** rare (a space-pressure/file-count fallback, essentially never fires at
-** real production scale) so the small resulting inefficiency -- leaving a
-** claimed file's writer un-scanned past that point until next time -- costs
-** little in practice.
-** ============================================================
-*/
-
-/*
-** Function: DoCrossDriveIntermediateMerge
-** @brief    See file section comment above.
-** @param    pCtx - solve context
-*/
-static void DoCrossDriveIntermediateMerge(PSolveContext pCtx)
-{
-    POthelloRingMasterState  pSt      = pCtx->pState;
-    POthelloRingMasterConfig pCfg     = pCtx->pConfig;
-    int                      level    = (int)pSt->playLevel;
-    bool                     compress = (pCfg->compressMode == COMPRESS_ALL);
-    const char*              lz4Drv   = pCfg->lz4Drives;
-
-    EnterCriticalSection(&pSt->imergeCS);
-
-    /* Re-check under the lock: counts may have dropped since the caller checked.
-    ** Uses each pair's ticket count (mwNextFileIdx), not mwBlack/WhiteFileCount
-    ** -- the latter is now a pure "files created" display counter that no
-    ** longer tracks 1:1 with the ticket-index space once consolidation starts
-    ** replacing many small files with one larger one (net fewer creation
-    ** events than tickets consumed).
-    */
-    {
-        int bk = 0, wh = 0;
-        for (int i = 0; i < pSt->numMergeWriters; i++)
-        {
-            int blackTicket = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[i][RSF_PLAYER_BLACK], 0, 0);
-            int whiteTicket = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[i][RSF_PLAYER_WHITE], 0, 0);
-            bk += blackTicket - pSt->mwBlackFilesConsumed[i];
-            wh += whiteTicket - pSt->mwWhiteFilesConsumed[i];
-        }
-        /* writerDriveStats[i] is writer i's own drive (built 1:1 with
-        ** mwDirectory[i] -- see InitSolver.cpp), so no search needed.
-        */
-        bool spaceOk = true;
-        for (int i = 0; i < pSt->numMergeWriters && spaceOk; i++)
-        {
-            char dl = pSt->mwDirectory[i][0];
-            if (DriveAvailable(pSt, dl) < (int64_t)pSt->writerDriveStats[i].threshold)
-                spaceOk = false;
-        }
-        if (bk < MAX_MERGE_FANIN && wh < MAX_MERGE_FANIN && spaceOk)
-        {
-            LeaveCriticalSection(&pSt->imergeCS);
-            return;
-        }
-    }
-
-    /* Snapshot each pair's ticket count as the scan's upper bound. This is
-    ** NOT by itself a "safe to touch" guarantee anymore -- the gather loop
-    ** below claims each candidate via ClaimTryRange before trusting it (see
-    ** the file section comment above).
-    */
-    int snapBlack[MAX_WRITERS] = {}, snapWhite[MAX_WRITERS] = {};
-    for (int i = 0; i < pSt->numMergeWriters; i++)
-    {
-        snapBlack[i] = (int)InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[i][RSF_PLAYER_BLACK], 0, 0);
-        snapWhite[i] = (int)InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[i][RSF_PLAYER_WHITE], 0, 0);
-    }
-
-    /* Upper bound: MAX_MERGE_FANIN * numWriters writer files + imerge files on the medium drive. */
-    const int kMaxFiles = MAX_MERGE_FANIN * MAX_WRITERS + 1024;
-
-    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
-    {
-        pSt->imergeActive[player]          = 1;
-        pSt->imergeTotalInputBytes[player] = 0;
-        pSt->imergeDoneInputBytes[player]  = 0;
-        pSt->imergeStartTickMs[player]     = GetTickCount64();
-        pSt->imergeFileCount[player]       = 0;
-        if (pSt->terminateThreads) break;
-
-        int* snapArr     = (player == RSF_PLAYER_BLACK) ? snapBlack               : snapWhite;
-        int* consumedArr = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackFilesConsumed
-                                                        : pSt->mwWhiteFilesConsumed;
-
-        /* Gather unconsumed writer files [consumed..snap) from each MW
-        ** directory. Each candidate is claimed (ClaimTryRange, ClaimRegistry.h)
-        ** before being trusted -- see the file section comment above for why
-        ** a ticket snapshot alone isn't a safety guarantee anymore, and why
-        ** losing a claim race stops that writer's scan right there rather
-        ** than skipping past the undecided index.
-        */
-        char**   paths       = (char**)MemMalloc("xdimPaths", (size_t)kMaxFiles * sizeof(char*));
-        int64_t* sizes       = (int64_t*)MemMalloc("xdimSizes", (size_t)kMaxFiles * sizeof(int64_t));
-        int*     claimIdx    = (int*)MemMalloc("xdimClaimIdx", (size_t)kMaxFiles * sizeof(int));
-        int*     claimWriter = (int*)MemMalloc("xdimClaimWriter", (size_t)kMaxFiles * sizeof(int));
-        if (!paths || !sizes || !claimIdx || !claimWriter)
-            Fatal(FATAL_ALLOCATION_FAILED, "DoCrossDriveIntermediateMerge: alloc");
-
-        int     numFiles         = 0;
-        int64_t totalBytes       = 0;
-        int64_t totalUncompBytes = 0;
-        int     filesPerWriter[MAX_WRITERS] = {};   /* how many of this player's gathered files came from each writer -- for the physical-file-count decrement below */
-
-        for (int ti = 0; ti < pSt->numMergeWriters && numFiles < kMaxFiles; ti++)
-        {
-            const char* writerDir = pSt->mwDirectory[ti];
-            char        writerDL  = writerDir[0];
-            bool        writerLZ4 = compress && lz4Drv[0]
-                                 && (strchr(lz4Drv, writerDL) != nullptr);
-
-            int idx = consumedArr[ti];
-            for (; idx < snapArr[ti] && numFiles < kMaxFiles; idx++)
-            {
-                if (!ClaimTryRange(pSt, ti, player, &idx, 1))
-                    break;   /* undecided (in-flight write, or a live consolidation input) -- stop here, don't skip past it */
-
-                char path[MAX_FULL_PATH_NAME];
-                WIN32_FILE_ATTRIBUTE_DATA fad = {};
-                bool found = false;
-
-                /* Try expected format first, then fall back for mixed-mode / transition runs. */
-                if (writerLZ4 && !found) {
-                    RSFZLNameWriterFile(path, sizeof(path), writerDir, player, idx);
-                    found = GetFileAttributesExA(path, GetFileExInfoStandard, &fad) != 0;
-                }
-                if (compress && !found) {
-                    RSFZNameWriterFile(path, sizeof(path), writerDir, player, idx);
-                    found = GetFileAttributesExA(path, GetFileExInfoStandard, &fad) != 0;
-                }
-                if (!found) {
-                    RSFNameWriterFile(path, sizeof(path), writerDir, player, idx);
-                    found = GetFileAttributesExA(path, GetFileExInfoStandard, &fad) != 0;
-                }
-                if (!found)
-                {
-                    /* Permanently gone -- FileTicketNext never reuses an
-                    ** index, so it's safe to release and skip forever.
-                    */
-                    ClaimReleaseOne(pSt, ti, player, idx);
-                    continue;
-                }
-
-                int64_t sz = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
-                paths[numFiles] = (char*)MemMalloc("xdimPath", strlen(path) + 1);
-                if (!paths[numFiles])
-                    Fatal(FATAL_ALLOCATION_FAILED, "DoCrossDriveIntermediateMerge: path alloc");
-                strcpy(paths[numFiles], path);
-                sizes[numFiles]       = sz;
-                claimIdx[numFiles]    = idx;
-                claimWriter[numFiles] = ti;
-                filesPerWriter[ti]++;
-                totalBytes     += sz;
-                totalUncompBytes += PeekRecordCount(path) * (int64_t)sizeof(UINT64_PAIR);
-                numFiles++;
-            }
-            consumedArr[ti] = idx;   /* always safe: below idx is either gathered-and-claimed-by-us (about to be deleted), or confirmed permanently gone */
-        }
-
-        /* Everything from here on that's still in paths[]/sizes[] up to
-        ** numGatheredWriterFiles came from the claim loop above and needs its
-        ** claim released later; the total-flush branch below may append more
-        ** entries (medium-drive imerge files) past this point that were
-        ** never claimed and must not be released.
-        */
-        int numGatheredWriterFiles = numFiles;
-
-        /* This loop's count is bounded by the sum of snapArr[ti]-consumedArr[ti]
-        ** across every writer -- hitting the capacity here means real
-        ** unconsumed writer files were silently left off this merge. Fail
-        ** loudly rather than continue with a partial file set.
-        */
-        if (numFiles >= kMaxFiles)
-            Fatal(FATAL_MERGE_LOGIC_ERROR,
-                  "DoCrossDriveIntermediateMerge: %s writer-file count hit the capacity (%d) -- "
-                  "real unconsumed writer files would be silently dropped from this merge",
-                  RSFPlayerStr(player), kMaxFiles);
-
-        if (numFiles == 0)
-        {
-            /* consumedArr[ti] was already advanced correctly per-writer
-            ** inline during the gather loop above (to snapArr[ti], or short
-            ** of it if a claim was lost) -- nothing further to do here.
-            */
-            MemFree(paths);
-            MemFree(sizes);
-            MemFree(claimIdx);
-            MemFree(claimWriter);
-            continue;
-        }
-
-        pSt->imergeTotalInputBytes[player] += totalUncompBytes;
-
-        /* Try to reserve space on the first merge drive (fastest medium drive). */
-        int  destDirIdx    = -1;
-        bool useTotalFlush = false;
-
-        for (int d = 0; d < pSt->numMergeDirs; d++)
-        {
-            if (DriveReserve(pSt, pSt->mergeDirectory[d][0], totalBytes))
-            {
-                destDirIdx = d;
-                break;
-            }
-        }
-        if (destDirIdx < 0)
-            useTotalFlush = true;
-
-        if (useTotalFlush)
-        {
-            /* The medium drive is full. Pull in all existing medium-drive
-            ** imerge files for this level+player so the combined merge
-            ** catches every possible cross-drive duplicate, then flush
-            ** everything to the store drive to clear all fast drives at once.
-            */
-            LoggerLog("DoCrossDriveIntermediateMerge: %s medium drive full -- total flush to %c:\n",
-                      RSFPlayerStr(player), pCtx->pConfig->storeDrive);
-
-            for (int d = 0; d < pSt->numMergeDirs && numFiles < kMaxFiles; d++)
-            {
-                char        pat[MAX_FULL_PATH_NAME];
-                uint64_t    iBytes = 0;
-                char**      tmp    = (char**)MemMalloc("xdimTmp",
-                                        (size_t)(kMaxFiles - numFiles) * sizeof(char*));
-                uint64_t*   tmpSz  = (uint64_t*)MemMalloc("xdimTmpSz",
-                                        (size_t)(kMaxFiles - numFiles) * sizeof(uint64_t));
-                if (!tmp || !tmpSz)
-                    Fatal(FATAL_ALLOCATION_FAILED, "DoCrossDriveIntermediateMerge: imerge enum");
-
-                char mDL   = pSt->mergeDirectory[d][0];
-                bool mLZ4  = compress && lz4Drv[0] && (strchr(lz4Drv, mDL) != nullptr);
-                int  extra = 0;
-                int  room  = kMaxFiles - numFiles;
-
-                if (mLZ4 && extra < room) {
-                    uint64_t ib = 0;
-                    RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[d], level, player);
-                    extra += EnumerateByPattern(pat, tmp + extra, room - extra, &ib, tmpSz + extra);
-                    iBytes += ib;
-                }
-                if (compress && extra < room) {
-                    uint64_t ib = 0;
-                    RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[d], level, player);
-                    extra += EnumerateByPattern(pat, tmp + extra, room - extra, &ib, tmpSz + extra);
-                    iBytes += ib;
-                }
-                if (extra < room) {
-                    uint64_t ib = 0;
-                    RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[d], level, player);
-                    extra += EnumerateByPattern(pat, tmp + extra, room - extra, &ib, tmpSz + extra);
-                    iBytes += ib;
-                }
-
-                for (int k = 0; k < extra && numFiles < kMaxFiles; k++)
-                {
-                    paths[numFiles] = tmp[k];               /* transfer ownership */
-                    sizes[numFiles] = (int64_t)tmpSz[k];
-                    totalBytes     += (int64_t)tmpSz[k];
-                    pSt->imergeTotalInputBytes[0] += PeekRecordCount(tmp[k]) * (int64_t)sizeof(UINT64_PAIR);
-                    numFiles++;
-                }
-                MemFree(tmp);    /* free array; elements now owned by paths[] */
-                MemFree(tmpSz);
-            }
-
-            /* Hitting the capacity here means real existing medium-drive
-            ** imerge files were silently left out of this total flush --
-            ** exactly the kind of cross-drive duplicate this path exists to
-            ** catch. Fail loudly rather than flush an incomplete file set.
-            */
-            if (numFiles >= kMaxFiles)
-                Fatal(FATAL_MERGE_LOGIC_ERROR,
-                      "DoCrossDriveIntermediateMerge: %s total-flush file count hit the capacity (%d) -- "
-                      "real imerge files would be silently dropped from this flush",
-                      RSFPlayerStr(player), kMaxFiles);
-
-            /* Reserve store-drive worst-case (pre-dedup) */
-            if (!DriveReserve(pSt, pCtx->pConfig->storeDrive, totalBytes))
-                Fatal(FATAL_DRIVE_SPACE,
-                      "DoCrossDriveIntermediateMerge: total flush %s needs %.2f GB on %c:",
-                      RSFPlayerStr(player),
-                      totalBytes / (1024.0 * 1024.0 * 1024.0),
-                      pCtx->pConfig->storeDrive);
-
-            volatile LONG* pCount = (player == RSF_PLAYER_BLACK)
-                ? (volatile LONG*)&pSt->storeMergeBlackFileCount
-                : (volatile LONG*)&pSt->storeMergeWhiteFileCount;
-            int fileIdx = (int)InterlockedExchangeAdd(pCount, 1);
-
-            char outPath[MAX_FULL_PATH_NAME];
-            {
-                char   sDL  = pSt->storeMergeDirectory[0];
-                bool   sLZ4 = compress && lz4Drv[0] && (strchr(lz4Drv, sDL) != nullptr);
-                if (sLZ4)
-                    RSFZLNameImergeFile(outPath, sizeof(outPath), pSt->storeMergeDirectory,
-                                        level, player, fileIdx);
-                else if (compress)
-                    RSFZNameImergeFile(outPath, sizeof(outPath), pSt->storeMergeDirectory,
-                                       level, player, fileIdx);
-                else
-                    RSFNameImergeFile(outPath, sizeof(outPath), pSt->storeMergeDirectory,
-                                      level, player, fileIdx);
-            }
-
-            LoggerLog("DoCrossDriveIntermediateMerge: total flush %s -> '%s' (%d files, %.2f GB)\n",
-                      RSFPlayerStr(player), outPath, numFiles,
-                      totalBytes / (1024.0 * 1024.0 * 1024.0));
-
-            pSt->imergeFileCount[player] = numFiles;
-            uint64_t unique = KWayMergeFiles(paths, numFiles, outPath,
-                                              &pSt->imergeDoneInputBytes[player], compress, &pSt->terminateThreads);
-
-            /* Reclaim store-drive overestimate */
-            int64_t actual = 0;
-            if (compress)
-            {
-                WIN32_FILE_ATTRIBUTE_DATA fad = {};
-                if (GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad))
-                    actual = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
-            }
-            else
-            {
-                actual = (int64_t)(unique * sizeof(UINT64_PAIR) + sizeof(RSFTrailer));
-            }
-            DriveReclaim(pSt, pCtx->pConfig->storeDrive, totalBytes - actual);
-
-            {
-                int64_t uncompStore = (int64_t)(unique * sizeof(UINT64_PAIR)
-                                  + (unique > 0 ? sizeof(RSFTrailer) : 0));
-                InterlockedAdd64((volatile LONG64*)&pSt->storeMergeBytesWritten, actual);
-                InterlockedAdd64((volatile LONG64*)&pSt->storeMergeBytesUncompressed, uncompStore);
-            }
-
-            /* Delete all inputs and reclaim their drive space. Only the first
-            ** numGatheredWriterFiles entries came from a real writer-file
-            ** claim above (the rest, appended just above, are medium-drive
-            ** imerge files with no claim to release).
-            */
-            for (int fi = 0; fi < numFiles; fi++)
-            {
-                DriveReclaim(pSt, paths[fi][0], sizes[fi]);
-                DeleteFileA(paths[fi]);
-                if (fi < numGatheredWriterFiles)
-                    ClaimReleaseOne(pSt, claimWriter[fi], player, claimIdx[fi]);
-                MemFree(paths[fi]);
-            }
-
-            /* Real physical file count drops by exactly what was just
-            ** deleted, per writer -- same accounting as the normal path
-            ** below; this branch used to skip it entirely (found via a
-            ** live OnDskB/OnDskW-vs-real-dir-listing cross-check, though it
-            ** turned out inactive on the run that exposed the discrepancy --
-            ** F: never actually filled up, so this branch had never run).
-            */
-            for (int ti = 0; ti < pSt->numMergeWriters; ti++)
-            {
-                if (filesPerWriter[ti] == 0) continue;
-                volatile int* pPhys = (player == RSF_PLAYER_BLACK)
-                    ? &pSt->mwBlackPhysicalFileCount[ti] : &pSt->mwWhitePhysicalFileCount[ti];
-                InterlockedExchangeAdd((volatile LONG*)pPhys, -filesPerWriter[ti]);
-            }
-
-            /* Clear medium-drive imerge counters for this player -- all those files were consumed */
-            for (int d = 0; d < pSt->numMergeDirs; d++)
-            {
-                if (player == RSF_PLAYER_BLACK) {
-                    pSt->mergeFileBlackCount[d]  = 0;
-                    pSt->mergeFileBytesBlack[d]  = 0;
-                    pSt->mergeFileUncompBlack[d] = 0;
-                } else {
-                    pSt->mergeFileWhiteCount[d]  = 0;
-                    pSt->mergeFileBytesWhite[d]  = 0;
-                    pSt->mergeFileUncompWhite[d] = 0;
-                }
-            }
-
-            LoggerLog("DoCrossDriveIntermediateMerge: total flush %s done (%llu unique)\n",
-                      RSFPlayerStr(player), unique);
-        }
-        else
-        {
-            /* Normal path: merge writer files from the fast NVMe drives -> single imerge on the medium drive. */
-            volatile LONG* pCount = (player == RSF_PLAYER_BLACK)
-                ? (volatile LONG*)&pSt->mergeFileBlackCount[destDirIdx]
-                : (volatile LONG*)&pSt->mergeFileWhiteCount[destDirIdx];
-            int fileIdx = (int)InterlockedExchangeAdd(pCount, 1);
-
-            char outPath[MAX_FULL_PATH_NAME];
-            {
-                char   iDL  = pSt->mergeDirectory[destDirIdx][0];
-                bool   iLZ4 = compress && lz4Drv[0] && (strchr(lz4Drv, iDL) != nullptr);
-                if (iLZ4)
-                    RSFZLNameImergeFile(outPath, sizeof(outPath), pSt->mergeDirectory[destDirIdx],
-                                        level, player, fileIdx);
-                else if (compress)
-                    RSFZNameImergeFile(outPath, sizeof(outPath), pSt->mergeDirectory[destDirIdx],
-                                       level, player, fileIdx);
-                else
-                    RSFNameImergeFile(outPath, sizeof(outPath), pSt->mergeDirectory[destDirIdx],
-                                      level, player, fileIdx);
-            }
-
-            LoggerLog("DoCrossDriveIntermediateMerge: %s -> '%s' (%d files, %.2f GB)\n",
-                      RSFPlayerStr(player), outPath, numFiles,
-                      totalBytes / (1024.0 * 1024.0 * 1024.0));
-
-            pSt->imergeFileCount[player] = numFiles;
-            uint64_t unique = KWayMergeFiles(paths, numFiles, outPath,
-                                              &pSt->imergeDoneInputBytes[player], compress, &pSt->terminateThreads);
-
-            int64_t actual = 0;
-            if (compress)
-            {
-                WIN32_FILE_ATTRIBUTE_DATA fad = {};
-                if (GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad))
-                    actual = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
-            }
-            else
-            {
-                actual = (int64_t)(unique * sizeof(UINT64_PAIR) + sizeof(RSFTrailer));
-            }
-            DriveReclaim(pSt, pSt->mergeDirectory[destDirIdx][0], totalBytes - actual);
-
-            {
-                int64_t uncompMedium = (int64_t)(unique * sizeof(UINT64_PAIR)
-                                  + (unique > 0 ? sizeof(RSFTrailer) : 0));
-                if (player == RSF_PLAYER_BLACK) {
-                    InterlockedAdd64((volatile LONG64*)&pSt->mergeFileBytesBlack[destDirIdx], actual);
-                    InterlockedAdd64((volatile LONG64*)&pSt->mergeFileUncompBlack[destDirIdx], uncompMedium);
-                } else {
-                    InterlockedAdd64((volatile LONG64*)&pSt->mergeFileBytesWhite[destDirIdx], actual);
-                    InterlockedAdd64((volatile LONG64*)&pSt->mergeFileUncompWhite[destDirIdx], uncompMedium);
-                }
-            }
-
-            /* Every entry here came from the writer-file gather (this branch
-            ** never appends medium-drive imerge files -- only the total-flush
-            ** branch does), so every one has a claim to release.
-            */
-            for (int fi = 0; fi < numFiles; fi++)
-            {
-                DriveReclaim(pSt, paths[fi][0], sizes[fi]);
-                DeleteFileA(paths[fi]);
-                if (fi < numGatheredWriterFiles)
-                    ClaimReleaseOne(pSt, claimWriter[fi], player, claimIdx[fi]);
-                MemFree(paths[fi]);
-            }
-
-            /* Real physical file count drops by exactly what was just
-            ** deleted, per writer -- these files may include ones a
-            ** background consolidation pass created (see
-            ** TryConsolidatePair), which is fine; this loop doesn't
-            ** care how a file came to exist, only that it's gone now.
-            */
-            for (int ti = 0; ti < pSt->numMergeWriters; ti++)
-            {
-                if (filesPerWriter[ti] == 0) continue;
-                volatile int* pPhys = (player == RSF_PLAYER_BLACK)
-                    ? &pSt->mwBlackPhysicalFileCount[ti] : &pSt->mwWhitePhysicalFileCount[ti];
-                InterlockedExchangeAdd((volatile LONG*)pPhys, -filesPerWriter[ti]);
-            }
-
-            LoggerLog("DoCrossDriveIntermediateMerge: %s done (%llu unique)\n",
-                      RSFPlayerStr(player), unique);
-        }
-
-        /* consumedArr[ti] was already advanced correctly per-writer inline
-        ** during the gather loop above -- nothing further to do here.
-        */
-        MemFree(paths);
-        MemFree(sizes);
-        MemFree(claimIdx);
-        MemFree(claimWriter);
-    }
-
-    for (int p = RSF_PLAYER_WHITE; p <= RSF_PLAYER_BLACK; p++)
-    {
-        pSt->imergeActive[p]          = 0;
-        pSt->imergeTotalInputBytes[p] = 0;
-    }
-
-    LeaveCriticalSection(&pSt->imergeCS);
-}
-
-/*
-** ============================================================
-** TryConsolidatePair / ConsolidationWorkerLoop
-**
-** Proactively merges small D:/E: writer files together on a single, shared
-** thread pool (pConsolidationPool, CONSOLIDATION_POOL_THREADS persistent
-** worker threads) so real dedup work happens on otherwise-idle cores during
-** solve, shrinking the fan-in/volume the final end-of-level merge into Y:
-** has to process. Complements DoCrossDriveIntermediateMerge above (reactive,
-** file-count/space triggered, runs on pMergeWriterPool instead) rather than
-** replacing it.
-**
-** Design (replaces an earlier event-driven, self-chaining-job version --
-** see project_background_nvme_consolidation_design memory for that
-** history): each worker thread runs ConsolidationWorkerLoop for the whole
-** level -- sleep CONSOLIDATION_POLL_INTERVAL_MS, sweep every (writer drive,
-** color) pair via TryConsolidatePair, sleep again -- queued fresh at each
-** level's start by StartConsolidationWorkers (called from
-** OthelloRingMaster.cpp right where terminateConsolidation is reset to
-** false). No per-pair concurrency cap exists: if multiple workers reach the
-** same pair in the same sweep, ClaimRegistry alone decides who actually
-** merges (one wins the claim, the rest find nothing left to do and move
-** on) -- simpler than the old consolSlotOwner slot-ownership array, which
-** existed only to enforce a cap this design no longer needs.
-**
-** Coordination is entirely through ClaimRegistry (ClaimRegistry.h,
-** OthelloTypes.h), not a lock spanning the whole operation: FileTicketNext
-** hands out a unique output index instantly (lock-free), ClaimTryRange
-** claims a batch of existing input files all-or-nothing, and
-** DoCrossDriveIntermediateMerge checks ClaimIsHeld per candidate before
-** touching a file, so it can't race a live consolidation pass. Nothing here
-** holds a lock across the actual merge I/O.
-**
-** Uses its own independent low-water-mark HINT (mwBlack/WhiteConsolidatedUpTo,
-** OthelloTypes.h) purely as a scan-start optimization -- real correctness
-** comes from ClaimRegistry + real file-existence checks per candidate, not
-** from this hint being accurate.
-** ============================================================
-*/
-
-/* MAX_CONSOLIDATION_BATCH (hard cap on files merged in one consolidation
-** pass) now lives in OthelloTypes.h, shared with ConsolidationSlotStats'
-** batchIndices sizing -- since the batch-build loop no longer bounds a
-** batch's combined size (see the comment at its "no combined-size check"
-** point below -- only each individual input file's own size is checked
-** against CONSOLIDATION_SIZE_CAP_BYTES), this count is the only thing
-** standing between a long run of small eligible files and an unbounded
-** single merge.
-*/
-
-/*
-** Function: FindConsolidationCandidate
-** @brief    Locates writer file (writerIdx, player, idx), trying LZ4, then
-**           plain-compressed, then uncompressed naming -- same fallback
-**           order DoCrossDriveIntermediateMerge's own gather loop uses, so
-**           this behaves correctly even across a mixed-mode/transition run.
-** @param    outPath  - out: full path, if found
-** @param    outSize  - capacity of outPath
-** @param    pCtx     - solve context
-** @param    writerIdx - which writer drive/thread
-** @param    player   - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    idx      - file index to look up
-** @param    pFileSize - out: real on-disk byte size, if found
-** @return   true if the file exists.
-*/
-bool FindConsolidationCandidate(char* outPath, size_t outSize, PSolveContext pCtx,
-                                 int writerIdx, int player, int idx, uint64_t* pFileSize)
-{
-    POthelloRingMasterState  pSt  = pCtx->pState;
-    POthelloRingMasterConfig pCfg = pCtx->pConfig;
-    const char* writerDir = pSt->mwDirectory[writerIdx];
-    char        writerDL  = writerDir[0];
-    bool        compress  = (pCfg->compressMode == COMPRESS_ALL);
-    bool        writerLZ4 = compress && pCfg->lz4Drives[0]
-                          && (strchr(pCfg->lz4Drives, writerDL) != nullptr);
-
-    WIN32_FILE_ATTRIBUTE_DATA fad = {};
-    bool found = false;
-
-    if (writerLZ4 && !found) {
-        RSFZLNameWriterFile(outPath, outSize, writerDir, player, idx);
-        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
-    }
-    if (compress && !found) {
-        RSFZNameWriterFile(outPath, outSize, writerDir, player, idx);
-        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
-    }
-    if (!found) {
-        RSFNameWriterFile(outPath, outSize, writerDir, player, idx);
-        found = GetFileAttributesExA(outPath, GetFileExInfoStandard, &fad) != 0;
-    }
-    if (!found)
-        return false;
-
-    *pFileSize = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
-    return true;
-}
-
-/*
-** Function: ConsolidationFindScanStart
-** @brief    Finds the first index >= from that's either currently claimed by
-**           someone else or a genuinely eligible (real, unclaimed, under-cap)
-**           candidate -- skipping past anything confirmed permanently gone
-**           (missing) or oversized along the way.
-** @details  Used both to pick a batch's starting point AND, after a
-**           successful merge, to recompute the low-water mark -- reusing the
-**           exact same logic guarantees pConsolUp only ever advances past
-**           indices that are provably safe to never examine again, never
-**           past one that's merely claimed by someone else right now and
-**           could still become a valid future candidate once released. See
-**           the CHANGELOG entry for the real bug this fixes: the batch-build
-**           loop SKIPS (not stops at) a claimed index to keep gathering
-**           further candidates, so its own raw terminal scan position isn't
-**           safe to use for advancing pConsolUp directly.
-** @param    pCtx       - solve context
-** @param    writerIdx  - which writer drive
-** @param    player     - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    from       - index to start scanning from
-** @param    ticketSnap - upper bound (exclusive) to scan up to
-** @return   the first claimed-or-eligible index found, or ticketSnap if
-**           nothing qualifies below it.
-*/
-static int ConsolidationFindScanStart(PSolveContext pCtx, int writerIdx, int player, int from, int ticketSnap)
-{
-    POthelloRingMasterState pSt = pCtx->pState;
-    int      start = from;
-    char     path[MAX_FULL_PATH_NAME];
-    uint64_t sz;
-    while (start < ticketSnap)
-    {
-        if (ClaimIsHeld(pSt, writerIdx, player, start)) break;
-        if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, start, &sz)) { start++; continue; }
-        if (sz >= CONSOLIDATION_SIZE_CAP_BYTES) { start++; continue; }
-        break;
-    }
-    return start;
-}
-
-/*
-** Function: TryConsolidatePair
-** @brief    One consolidation sweep for one (writer drive, player) pair:
-**           scans for a batch of small, unclaimed files under the size cap
-**           (skipping over anything claimed or already graduated), and if
-**           2+ qualify and there's room on the drive, merges them into one
-**           new file. A no-op if there's nothing to do or it loses a claim
-**           race -- neither is an error; the caller (ConsolidationWorkerLoop)
-**           will look again next sweep.
-** @param    pCtx      - solve context
-** @param    writerIdx - which writer drive (0..numMergeWriters-1)
-** @param    player    - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    workerIdx - calling worker's stable ConsolSlot() stats index
-*/
-static void TryConsolidatePair(PSolveContext pCtx, int writerIdx, int player, uint32_t workerIdx)
-{
-    POthelloRingMasterState  pSt   = pCtx->pState;
-    POthelloRingMasterConfig pCfg  = pCtx->pConfig;
-    int                      level = (int)pSt->playLevel;
-
-    if (pSt->terminateConsolidation)
-        return;
-
-    /* Skip this pair entirely (rather than block) if another worker is
-    ** already between building a candidate batch and resolving its own
-    ** ClaimTryRange attempt here -- avoids every worker redundantly
-    ** re-scanning/re-statting the exact same files when several converge
-    ** on one pair in the same sweep. Released well before any real merge
-    ** I/O starts (see release points below), so it never limits how many
-    ** merges can run concurrently on this pair, only how many workers can
-    ** be deciding what to merge on it at the same instant.
-    */
-    volatile LONG* pScanning = &pSt->consolScanning[writerIdx][player];
-    if (InterlockedCompareExchange(pScanning, 1, 0) != 0)
-        return;
-
-    int  ticketSnap = InterlockedCompareExchange((volatile LONG*)&pSt->mwNextFileIdx[writerIdx][player], 0, 0);
-    volatile int* pConsolUp = (player == RSF_PLAYER_BLACK) ? pSt->mwBlackConsolidatedUpTo : pSt->mwWhiteConsolidatedUpTo;
-
-    /* Advance the low-water HINT past any prefix that's either already
-    ** graduated (>= cap) or permanently gone, stopping at the first claimed
-    ** or genuinely-eligible index -- purely a scan-start optimization now
-    ** (ClaimIsHeld + real file-existence checks are what keep this correct),
-    ** so a racy/imprecise advance here only costs some harmless re-scanning.
-    */
-    int start = ConsolidationFindScanStart(pCtx, writerIdx, player, pConsolUp[writerIdx], ticketSnap);
-    if (start > pConsolUp[writerIdx])
-        pConsolUp[writerIdx] = start;
-
-    /* Build a candidate batch scanning forward from 'start', SKIPPING (not
-    ** stopping at) any claimed or graduated index -- no longer required to
-    ** be a contiguous run, since ClaimRegistry (not a linear boundary) is
-    ** what keeps this correct.
-    */
-    char*    batchPaths[MAX_CONSOLIDATION_BATCH];
-    int      batchIndices[MAX_CONSOLIDATION_BATCH];
-    int      batchCount   = 0;
-    uint64_t runningSize  = 0;
-    int      idx          = start;
-    char     path[MAX_FULL_PATH_NAME];
-    uint64_t sz;
-    while (idx < ticketSnap && batchCount < MAX_CONSOLIDATION_BATCH)
-    {
-        if (ClaimIsHeld(pSt, writerIdx, player, idx)) { idx++; continue; }
-        if (!FindConsolidationCandidate(path, sizeof(path), pCtx, writerIdx, player, idx, &sz)) { idx++; continue; }
-        if (sz >= CONSOLIDATION_SIZE_CAP_BYTES) { idx++; continue; }
-        /* Deliberately no combined-size check here: the cap gates which
-        ** individual files are worth considering as inputs (the check just
-        ** above), not how big the merge OUTPUT is allowed to be. A file
-        ** already close to the cap (e.g. 90GB) is still a perfectly good
-        ** input -- excluding it here once used to mean it could never pair
-        ** with anything, permanently blocking every smaller file behind it
-        ** in ticket order (found live, 2026-07-24: a 90GB file sat at the
-        ** front of D:white's queue and stalled all consolidation behind it
-        ** for the rest of the level). Once a merge's output does reach the
-        ** cap, it naturally graduates out of future consideration via the
-        ** same per-file check on its next examination -- no separate
-        ** combined-size gate is needed to achieve that.
-        */
-
-        batchPaths[batchCount] = (char*)MemMalloc("consolidatePath", strlen(path) + 1);
-        if (!batchPaths[batchCount])
-            Fatal(FATAL_ALLOCATION_FAILED, "TryConsolidatePair: path alloc");
-        strcpy(batchPaths[batchCount], path);
-        batchIndices[batchCount] = idx;
-        runningSize += sz;
-        batchCount++;
-        idx++;
-    }
-
-    if (batchCount < 2)
-    {
-        InterlockedExchange(pScanning, 0);
-        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        return;   /* nothing worth merging right now -- next sweep looks again */
-    }
-
-    bool gotClaim = ClaimTryRange(pSt, writerIdx, player, batchIndices, batchCount);
-    InterlockedExchange(pScanning, 0);   /* claim attempt resolved either way -- release before any merge I/O */
-    if (!gotClaim)
-    {
-        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        return;   /* lost the race -- normal (e.g. DoCrossDriveIntermediateMerge got there first); nothing claimed, nothing to release */
-    }
-
-    /* Merge the batch into one new file, appended at a brand-new ticketed
-    ** index -- always higher than anything existing, so it's naturally
-    ** still "pending" for whoever merges next (cross-drive merge or the
-    ** final end-of-level merge).
-    */
-    bool compress = (pCfg->compressMode == COMPRESS_ALL);
-    int  outIdx   = FileTicketNext(pSt, writerIdx, player);
-    ClaimSingle(pSt, writerIdx, player, outIdx);
-
-    char driveLetter = pSt->mwDirectory[writerIdx][0];
-    if (!DriveReserve(pSt, driveLetter, (int64_t)runningSize))
-    {
-        ClaimReleaseOne(pSt, writerIdx, player, outIdx);
-        ClaimReleaseRange(pSt, writerIdx, player, batchIndices, batchCount);
-        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        return;   /* no room right now -- no retry loop; DoCrossDriveIntermediateMerge's own space-pressure trigger covers real low-space situations */
-    }
-
-    char outPath[MAX_FULL_PATH_NAME];
-    bool lz4MW    = compress && pCfg->lz4Drives[0]
-                 && (strchr(pCfg->lz4Drives, driveLetter) != nullptr);
-    if (lz4MW)
-        RSFZLNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
-    else if (compress)
-        RSFZNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
-    else
-        RSFNameWriterFile(outPath, sizeof(outPath), pSt->mwDirectory[writerIdx], player, outIdx);
-
-    /* Live progress setup -- same uncompressed-equivalent (recordCount * 16
-    ** bytes) convention every other progress line uses. Non-active fields
-    ** are set before the active flag so a concurrent stats read never sees
-    ** a half-initialized in-progress state.
-    */
-    PConsolidationSlotStats pSlot = ConsolSlot(pSt, workerIdx);
-    int64_t totalProgressBytes = 0;
-    for (int i = 0; i < batchCount; i++)
-        totalProgressBytes += PeekRecordCount(batchPaths[i]) * (int64_t)sizeof(UINT64_PAIR);
-    pSlot->writerIdx   = writerIdx;
-    pSlot->player      = player;
-    pSlot->fileCount   = batchCount;
-    for (int i = 0; i < batchCount; i++)
-        pSlot->batchIndices[i] = batchIndices[i];
-    pSlot->outIdx      = outIdx;
-    pSlot->totalBytes  = totalProgressBytes;
-    pSlot->doneBytes   = 0;
-    pSlot->startTickMs = GetTickCount64();
-    pSlot->active      = 1;
-
-    KWayMergeFiles(batchPaths, batchCount, outPath, &pSlot->doneBytes,
-                   compress, &pSt->terminateConsolidation);
-
-    pSlot->active = 0;
-
-    if (pSt->terminateConsolidation)
-    {
-        /* Level finished (or Ctrl+C) mid-merge -- abandon cleanly. The output
-        ** file KWayMergeFiles just closed still has a valid trailer (it
-        ** always finalizes on the way out) but only holds a PARTIAL result,
-        ** so it must be deleted, not left looking complete. Originals are
-        ** untouched -- neither deleted nor marked consolidated -- so nothing
-        ** real is lost; they're just picked up again by whatever runs next
-        ** (a future level's fresh consolidation pass never sees them, since
-        ** every restart wipes the writer dirs wholesale, but a same-level
-        ** DoCrossDriveIntermediateMerge or the final merge will).
-        */
-        DeleteFileA(outPath);
-        ClaimReleaseOne(pSt, writerIdx, player, outIdx);
-        ClaimReleaseRange(pSt, writerIdx, player, batchIndices, batchCount);
-        DriveReclaim(pSt, driveLetter, (int64_t)runningSize);
-        for (int i = 0; i < batchCount; i++) MemFree(batchPaths[i]);
-        return;
-    }
-
-    /* Success: the new file is real and complete. Delete the originals it
-    ** replaced. TWO separate reclaims are needed here, not either/or:
-    ** (1) correct the reservation overestimate for the NEW file (reserved
-    **     runningSize worst-case, actual size is outBytes <= runningSize),
-    ** (2) reclaim the FULL runningSize for the deleted ORIGINALS -- their
-    **     space was debited long ago when each was first created (by flush's
-    **     own DriveDebit, or by a still-earlier consolidation's own reserve+
-    **     reclaim), and deleting them now frees that space for real. Omitting
-    **     (2) would silently under-report free space by the full input total
-    **     on every successful merge, compounding over a level and eventually
-    **     causing spurious "drive full" failures on a drive with plenty of
-    **     real room -- verified against DoCrossDriveIntermediateMerge's own
-    **     working pattern (MergeFiles.cpp, its delete loop does exactly this:
-    **     a reservation-correction reclaim, plus a separate per-input reclaim).
-    */
-    for (int i = 0; i < batchCount; i++)
-    {
-        DeleteFileA(batchPaths[i]);
-        MemFree(batchPaths[i]);
-    }
-
-    WIN32_FILE_ATTRIBUTE_DATA outFad = {};
-    uint64_t outBytes = GetFileAttributesExA(outPath, GetFileExInfoStandard, &outFad)
-        ? (((uint64_t)outFad.nFileSizeHigh << 32) | (uint64_t)outFad.nFileSizeLow) : 0;
-    DriveReclaim(pSt, driveLetter, (int64_t)runningSize - (int64_t)outBytes);   /* (1) new-file reservation overestimate */
-    DriveReclaim(pSt, driveLetter, (int64_t)runningSize);                      /* (2) deleted originals' freed space */
-
-    ClaimReleaseOne(pSt, writerIdx, player, outIdx);
-    ClaimReleaseRange(pSt, writerIdx, player, batchIndices, batchCount);
-
-    InterlockedIncrement((volatile LONG*)(player == RSF_PLAYER_BLACK
-        ? &pSt->mwBlackFileCount[writerIdx] : &pSt->mwWhiteFileCount[writerIdx]));
-
-    /* Net physical file count change: +1 for the new merged file, -batchCount
-    ** for the originals it replaced -- one atomic op, no transient in-between
-    ** value another thread's read could observe.
-    */
-    volatile int* pPhys = (player == RSF_PLAYER_BLACK)
-        ? &pSt->mwBlackPhysicalFileCount[writerIdx] : &pSt->mwWhitePhysicalFileCount[writerIdx];
-    InterlockedExchangeAdd((volatile LONG*)pPhys, 1 - batchCount);
-
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesCreated, 1);
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationFilesRemoved, (LONG64)batchCount);
-    InterlockedAdd64((volatile LONG64*)&pSt->levelStats[level].consolidationBytesWritten, (LONG64)outBytes);
-    InterlockedAdd64((volatile LONG64*)&pSt->consolidationBytesInput, (LONG64)runningSize);
-
-    /* Recompute the low-water mark with the SAME safe-stopping scan used to
-    ** find 'start' above -- NOT the batch-build loop's raw terminal 'idx'.
-    ** The batch-build loop skips past indices claimed by someone else (most
-    ** commonly: flush's own in-progress output ticket) to keep gathering
-    ** further candidates, so 'idx' can end up past a ticket that was only
-    ** ever transiently unavailable at scan time. Advancing pConsolUp to
-    ** 'idx' directly would permanently orphan that ticket the moment its
-    ** claim released, since no future scan ever starts below pConsolUp --
-    ** this was a real, confirmed bug (found live via --consol showing a
-    ** genuinely eligible file sitting past pConsolUp). Re-running from
-    ** 'start' now that our own batch's files are deleted correctly stops at
-    ** the first still-claimed-by-someone-else index, or the first newly-
-    ** eligible one, exactly like the original scan-start computation.
-    */
-    int newUp = ConsolidationFindScanStart(pCtx, writerIdx, player, start, ticketSnap);
-    if (newUp > pConsolUp[writerIdx])
-        pConsolUp[writerIdx] = newUp;   /* best-effort hint advance (racy write, harmless if lost) */
-}
-
-/*
-** Function: ConsolidationWorkerLoop
-** @brief    Body run by each of the CONSOLIDATION_POOL_THREADS consolidation
-**           workers for the whole level: sleep, sweep every (writer drive,
-**           color) pair via TryConsolidatePair, sleep again, until
-**           terminateConsolidation is set. Checks the flag between every
-**           pair (not just once per sweep) so shutdown is noticed promptly
-**           -- at most one TryConsolidatePair call's worth of extra work
-**           per worker, a tighter bound than the old self-chaining design
-**           could give (see project_background_nvme_consolidation_design
-**           memory for the v0.32.6 fix this improves on).
-** @param    pCtx      - solve context
-** @param    workerIdx - this worker's stable ThreadPool index, used to
-**                       address its own ConsolSlot() stats entry
-*/
-static void ConsolidationWorkerLoop(PSolveContext pCtx, uint32_t workerIdx)
-{
-    POthelloRingMasterState pSt = pCtx->pState;
-    while (!pSt->terminateConsolidation)
-    {
-        for (int writerIdx = 0; writerIdx < pSt->numMergeWriters && !pSt->terminateConsolidation; writerIdx++)
-        {
-            TryConsolidatePair(pCtx, writerIdx, RSF_PLAYER_BLACK, workerIdx);
-            if (pSt->terminateConsolidation) break;
-            TryConsolidatePair(pCtx, writerIdx, RSF_PLAYER_WHITE, workerIdx);
-        }
-        if (pSt->terminateConsolidation) break;
-        Sleep(CONSOLIDATION_POLL_INTERVAL_MS);
-    }
-}
-
-/*
-** Function: StartConsolidationWorkers
-** @brief    Queues CONSOLIDATION_POOL_THREADS long-running
-**           ConsolidationWorkerLoop jobs onto pConsolidationPool -- one per
-**           worker thread, each running until terminateConsolidation is
-**           set. Call once per level, right after terminateConsolidation is
-**           reset to false (OthelloRingMaster.cpp).
-** @param    pCtx - solve context
-*/
-void StartConsolidationWorkers(PSolveContext pCtx)
-{
-    for (uint32_t i = 0; i < CONSOLIDATION_POOL_THREADS; i++)
-    {
-        pCtx->pState->pConsolidationPool->QueueJob(
-            [pCtx](uint32_t workerIdx) { ConsolidationWorkerLoop(pCtx, workerIdx); });
-    }
 }
 
 /*
@@ -2440,7 +1317,7 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     ** files below (see CollectPoolReadersForPlayer) -- no NVMe round-trip
     ** needed. The one exception: CascadingMerge's grouped/temp-file mode
     ** (needed only when a color's on-disk file count exceeds
-    ** MAX_MERGE_FANIN) bounds the number of simultaneously-open OS file
+    ** MAX_MERGE_INPUT_FILES) bounds the number of simultaneously-open OS file
     ** handles, a constraint that doesn't apply to in-memory readers, so it
     ** can't accept pool data directly. That's a scale this project hasn't
     ** reached yet (imerge/Option C keep file counts low), but as a
@@ -2455,19 +1332,23 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         int totalBlackFiles = 0, totalWhiteFiles = 0;
         for (int i = 0; i < pSt->numMergeWriters; i++)
         {
-            totalBlackFiles += pSt->mwBlackFileCount[i];
-            totalWhiteFiles += pSt->mwWhiteFileCount[i];
+            totalBlackFiles += RegistryCount(pSt, i, RSF_PLAYER_BLACK);
+            totalWhiteFiles += RegistryCount(pSt, i, RSF_PLAYER_WHITE);
         }
-        if (totalBlackFiles > MAX_MERGE_FANIN || totalWhiteFiles > MAX_MERGE_FANIN)
+        if (totalBlackFiles > MAX_MERGE_INPUT_FILES || totalWhiteFiles > MAX_MERGE_INPUT_FILES)
         {
-            std::vector<std::thread> flushThreads;
+            /* FlushMergeWriterBuffer (FlusherPool.h) already dispatches both
+            ** colors to the flusher pool and waits internally -- no need for
+            ** an outer std::thread-per-writer fan-out here too, just call it
+            ** per writer sequentially (each call's own internal wait is
+            ** short relative to this being a rare, end-of-level-only path).
+            */
             for (int i = 0; i < pSt->numMergeWriters; i++)
             {
                 if (pSt->mwBlackSegCount[i] > 0 || pSt->mwBlackStagingCount[i] > 0 ||
                     pSt->mwWhiteSegCount[i] > 0 || pSt->mwWhiteStagingCount[i] > 0)
-                    flushThreads.emplace_back([i, pCtx] { FlushMergeWriterBuffer(i, pCtx); });
+                    FlushMergeWriterBuffer(i, pCtx);
             }
-            for (std::thread& t : flushThreads) t.join();
         }
     }
 
@@ -2484,7 +1365,7 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         ** no thread can still be creating writer/imerge files by this point,
         ** see CountEndOfLevelInputFiles's own header comment), then allocate
         ** just enough for that count plus a small fixed pad for defense in
-        ** depth. Replaces a fixed MAX_MERGE_FANIN*MAX_MERGE_FANIN guess
+        ** depth. Replaces a fixed MAX_MERGE_INPUT_FILES*MAX_MERGE_INPUT_FILES guess
         ** (12.25M entries, ~392MB) that was never actually checked against
         ** real production numbers -- the largest real run on record needed
         ** only about 42,000 files for one color, ~291x less than the guess.
@@ -2796,7 +1677,7 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         /* Unified merge: on-disk files (0, 1, or many) plus any leftover
         ** in-memory pool data, all merged in a single pass -- see
         ** CascadingMerge/KWayMergeFilesToRingIndex. Cascade temps (grouped
-        ** mode, only when pd.numFiles alone exceeds MAX_MERGE_FANIN) are
+        ** mode, only when pd.numFiles alone exceeds MAX_MERGE_INPUT_FILES) are
         ** still flat, placed greedily per-group (fastest drive first, store
         ** drive if needed); compressed when compressOutput is on.
         ** compressFinal is passed false -- irrelevant here, since the ring

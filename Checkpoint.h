@@ -3,10 +3,12 @@
 **
 ** Purpose:
 **   Declares the mid-level checkpoint API: deciding when a checkpoint is
-**   due, performing the pause-time NVMe-side sequence (force-flush merge-
-**   writer buffers, abort in-flight consolidation, snapshot writer-dir
-**   ticket state, write the checkpoint file, restart consolidation
-**   workers), and validating/reading a checkpoint back at resume time.
+**   due, performing the pause-time NVMe-side sequence (drain the merge-
+**   writer/flusher/iMerge pools and the consolidation master, capture the
+**   registry's naming counter + a full file integrity manifest, write the
+**   checkpoint file, restart the consolidation master), and validating/
+**   reading a checkpoint back at resume time (v1.0.0: registry-based --
+**   see Registry.h).
 **
 ** Notes:
 **   Deliberately does not know about the GPU accumulator or ping-pong
@@ -38,15 +40,18 @@ bool CheckpointDueNow(PSolveContext pCtx);
 
 /*
 ** Function: PerformMidLevelCheckpoint
-** @brief    Runs the full pause-time checkpoint sequence: force-flushes
-**           every merge-writer buffer to real NVMe files, aborts any
-**           in-flight background consolidation (same terminateConsolidation
-**           + WaitForPoolIdle mechanism used at the real solve->merge
-**           transition), snapshots every (writer, color) ticket high-water
-**           mark, writes the checkpoint file, then restarts consolidation
-**           workers for the remainder of the level. Clears
-**           checkpointPauseFlag/checkpointRequestedNow and resets the
-**           interval timer before returning.
+** @brief    Runs the full pause-time checkpoint sequence: drains the merge-
+**           writer/D2H pool, force-flushes every writer's leftover pool
+**           data, drains the flusher pool and the iMerge pool, stops the
+**           consolidation master (waits for its worker pool to idle too) --
+**           at that point every real writer-drive file is finished and
+**           unreserved -- captures the registry's per-drive naming counter
+**           and a full integrity manifest directly from that now-quiescent
+**           state, writes the checkpoint file, then restarts the
+**           consolidation master for the remainder of the level (the level
+**           isn't ending, only pausing). Clears checkpointPauseFlag/
+**           checkpointRequestedNow and resets the interval timer before
+**           returning.
 ** @details Caller must have already flushed the GPU accumulator
 **          (FlushAccumulator) before calling this -- by the time this
 **          function starts, boardsReadFromStore must already equal exactly
@@ -67,10 +72,12 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 **               genuinely still be in progress, never both a checkpoint and a
 **               finished/mid-merge level at once)
 **             - for level > 0, the PREVIOUS level's _complete sentinel exists
-**             - for every (writerIdx, color) with a nonzero recorded mwNextFileIdx,
-**               a real file actually exists at ticket (mwNextFileIdx - 1) --
-**               confirms the writer-dir's on-disk state still matches what the
-**               checkpoint claims, rather than trusting a possibly-stale file
+**             - a real directory scan of every writer drive, cross-checked against the
+**               checkpoint's own integrity manifest, agrees on all three counts: no
+**               manifest file missing on disk, no real file on disk the manifest never
+**               mentioned, and no size mismatch between the two -- any disagreement here
+**               is a hard Fatal (not a false return), since it means the on-disk state no
+**               longer matches what the checkpoint claims closely enough to trust it
 **           A false return means "treat this exactly like no checkpoint exists" --
 **           the caller falls back to today's behavior (full writer-dir wipe,
 **           fresh level start) with no partial/best-effort recovery attempted.

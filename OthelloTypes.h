@@ -4,9 +4,9 @@
 ** Purpose:
 **   Declares the core config/state/stats structures for the live solver:
 **   OthelloRingMasterConfig (fixed run configuration), OthelloRingMasterState
-**   (all live/mutable solver state -- merge-writer buffers, drive ledgers,
-**   per-level stats, thread pools), WriterDriveStats and LevelStats (the
-**   per-drive and per-level bookkeeping records each hold).
+**   (all live/mutable solver state -- merge-writer buffers, the per-drive
+**   file registry, per-level stats, thread pools), WriterDriveStats and
+**   LevelStats (the per-drive and per-level bookkeeping records each hold).
 **
 ** Notes:
 **   Adapted from an earlier solver implementation, renamed onto this
@@ -15,6 +15,15 @@
 **   Field shapes are otherwise kept as-is -- the multi-drive/multi-writer
 **   machinery is real functionality this project intends to keep, not
 **   architectural cruft to trim.
+**
+**   v1.0.0 (2026-08-xx): replaced every ticket-number-based mechanism
+**   (mwNextFileIdx-as-logic, ClaimRegistry, pConsolUp/mwXxxConsolidatedUpTo,
+**   mwXxxPhysicalFileCount, the 12-thread polling consolidation pool,
+**   MAX_MERGE_FANIN as a trigger) with a single per-drive file registry
+**   (RegistryFileNode / driveRegistry) that tracks real file identity and
+**   reservation state directly -- see Registry.h for the operations, and
+**   project memory project_writer_drive_registry_redesign.md for the full
+**   design rationale this header only summarizes.
 */
 
 #pragma once
@@ -22,10 +31,13 @@
 /* Includes */
 #include "Utility.h"
 #include "RSFFileName.h"
-#include <unordered_set>
+#include <list>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 /* Macros and Defines */
-#define VERSION "0.33.9"
+#define VERSION "1.0.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -43,71 +55,80 @@
 ** byte-space check in RunMergeWriterJob. Sized with headroom for many
 ** segments per level; cost is trivial (roughly 40 bytes/segment/color x
 ** MAX_WRITERS).
-**
-** Doubled 512->1024 alongside the 2026-07-21 RAM upgrade (26.9GB -> 55.4GB
-** per MW thread): segment count scales with buffer byte capacity for a
-** given average segment size, and live level-22 data showed segment count
-** already at ~244/512 after only 6 minutes with zero flushes yet -- the
-** old bound was on track to become the real flush trigger instead of the
-** byte-space check, capping the benefit the bigger buffers were added for.
 */
 #define MAX_MW_SEGS 1024
 
 /*
-** Maximum number of files opened simultaneously for a single-color k-way
-** merge. The cross-drive intermediate merge fires when total unconsumed
-** writer files across all NVMe drives (per color) reaches this limit; the
-** drive-space threshold (DRIVE_SPACE_LOW_BYTES) acts as a safety net when
-** individual files are larger than expected. _setmaxstdio must be greater
-** than MAX_MERGE_FANIN plus overhead; see InitSolver.cpp.
-*/
-#define MAX_MERGE_FANIN 3500
-
-/*
-** Drive space threshold -- when free bytes on a drive drops below
-** DRIVE_SPACE_LOW_BYTES, trigger a merge-to-store flush.
+** Drive space threshold -- when free bytes on a drive drops below this,
+** flush/iMerge treat that drive as needing relief. Default; overridable per
+** run via --drive-space-low-gb (OthelloRingMasterConfig.driveSpaceLowGBOverride,
+** 0 = use this default) specifically so a short validation run can force real
+** iMerge activity on tiny real data volume -- see Registry.h/the iMerge pool
+** for how this is consumed.
 */
 #define DRIVE_SPACE_LOW_GB    20ULL
 #define DRIVE_SPACE_LOW_BYTES (DRIVE_SPACE_LOW_GB * 1024ULL * 1024ULL * 1024ULL)
 
 /*
-** Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp):
-** a file at or above this size is left alone -- not worth the merge cost for
-** the marginal dedup reward once it's already this big; the final end-of-level
-** merge will handle it. Adjustable constant, not derived from anything else.
+** Background consolidation eligibility cap ("MAX_FILE_SIZE"): a file at or
+** above this size is left alone by the consolidation master -- not worth the
+** merge cost for the marginal dedup reward once it's already this big; the
+** cross-drive iMerge or the final end-of-level merge will handle it
+** eventually. Default; overridable via --max-file-size-gb
+** (OthelloRingMasterConfig.maxFileSizeGBOverride, 0 = use this default) --
+** for a short validation run this must be picked as a comfortable multiple
+** (5-10x) of whatever an individual flushed file actually comes out to under
+** the chosen --memory-limit, never an arbitrary small number, or every
+** freshly-flushed file is "too large to consolidate" from birth and no real
+** consolidation ever happens.
 */
 #define CONSOLIDATION_SIZE_CAP_GB    100ULL
 #define CONSOLIDATION_SIZE_CAP_BYTES (CONSOLIDATION_SIZE_CAP_GB * 1024ULL * 1024ULL * 1024ULL)
 
 /*
-** Total worker threads in the single, shared background-consolidation pool
-** (pConsolidationPool). Deliberately a FLAT constant, independent of
-** numMergeWriters/drive count -- adding more NVMe drives should not require
-** more OS threads than this. Each thread runs ConsolidationWorkerLoop
-** (MergeFiles.cpp) for the whole level: sleep, sweep every (writer drive,
-** color) pair merging whatever's eligible, sleep again. No per-pair
-** concurrency cap exists -- ClaimRegistry alone mediates multiple workers
-** reaching the same pair in the same sweep, one wins the claim and merges,
-** the rest move on to the next pair.
+** Maximum number of files opened simultaneously for a single grouped k-way
+** merge pass (DoEndOfLevelMerge/CascadingMerge, MergeFiles.cpp) -- a real OS
+** file-handle bound (_setmaxstdio must exceed this plus overhead; see
+** InitSolver.cpp), NOT a trigger threshold. This is the direct replacement
+** for the old MAX_MERGE_FANIN constant's file-handle-bounding role; its
+** OTHER role (a fanin-based trigger for background consolidation/iMerge) is
+** retired entirely, not renamed -- see the top-of-file v1.0.0 note.
 */
-#define CONSOLIDATION_POOL_THREADS 12
+#define MAX_MERGE_INPUT_FILES 3500
 
 /*
-** Cap on how many input files one TryConsolidatePair batch can gather in a
-** single merge. Shared with ConsolidationSlotStats' batchIndices sizing
-** (OthelloTypes.h) so the --consol diagnostic display can address the exact
-** same array TryConsolidatePair (MergeFiles.cpp) fills in.
+** How many worker threads each dedicated pool gets. Fixed-but-tunable
+** constants (not yet exposed as CLI overrides), deliberately bounded by real
+** logical core count rather than scaled with drive count -- same "flat,
+** independent of drive count" stance this project already took once for the
+** old consolidation pool. Flusher/iMerge are sized "2 per color" (one black,
+** one white) so both colors always have dedicated capacity and never fight
+** each other for a thread; consolidator is a larger shared worker pool
+** dispatched by the single consolidation master thread (ConsolidationMaster.h).
+*/
+#define FLUSHER_POOL_THREADS      4
+#define IMERGE_POOL_THREADS       4
+#define CONSOLIDATOR_POOL_THREADS 8
+
+/*
+** Cap on how many unreserved candidate files the consolidation master
+** collects from a single registry scan of one (drive, color) pair before
+** deciding whether to dispatch a merge. Real per-pair unreserved counts
+** stay far below this in practice (confirmed repeatedly against live
+** production data) -- generous headroom, not a tuned throughput limit.
 */
 #define MAX_CONSOLIDATION_BATCH 64
 
 /*
-** How long each consolidation worker sleeps between sweeps. A worker only
-** notices terminateConsolidation (or picks up newly-eligible files) at this
-** granularity, so this directly bounds how much extra latency the
-** solve->merge transition's WaitForPoolIdle(pConsolidationPool) can incur
-** beyond whatever in-flight KWayMergeFiles call is already unwinding.
+** Default interval for both new background auditors (RegistryAuditor.h,
+** DriveSpaceAuditor.h). Chosen short (not the old FANIN-style "rare safety
+** net" cadence) because both audits are cheap -- real file counts per drive
+** stay small regardless of level size, confirmed repeatedly against the live
+** production run this redesign was built from. Overridable via
+** --audit-interval-seconds for short validation runs, same reasoning as
+** --checkpoint-interval-hours already gets for its own validation runs.
 */
-#define CONSOLIDATION_POLL_INTERVAL_MS 2000
+#define AUDIT_INTERVAL_SECONDS_DEFAULT 120
 
 /* Structures and Types */
 
@@ -148,7 +169,7 @@ typedef struct __LevelStats
     uint64_t mwFilesCreated;
     uint64_t mwBytes;
 
-    /* Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp) */
+    /* Background small-file consolidator (ConsolidationMaster.h/.cpp) */
     uint64_t consolidationFilesCreated;   /* merged-output files the consolidator produced this level */
     uint64_t consolidationFilesRemoved;   /* original files it absorbed/deleted (folded into those outputs) */
     uint64_t consolidationBytesWritten;   /* real on-disk bytes of consolidator-created files */
@@ -187,13 +208,41 @@ typedef struct __LevelStats
 #define CHECKPOINT_STATS_MAGIC 0x504B48435053544FULL   /* "OTSPCHKP" in ASCII byte order */
 
 /*
+** Bound on how many real files one drive's checkpoint integrity manifest can
+** record. Real per-drive file counts never approach this in practice (2-20
+** confirmed repeatedly against live production data) -- generous headroom,
+** same bounded-array style already used elsewhere in this project (e.g.
+** the old ConsolidationSlotStats.batchIndices).
+*/
+#define CHECKPOINT_MANIFEST_MAX_FILES 256
+
+/*
+** Type:    CheckpointManifestEntry
+** @brief   One real file's identity+size, as recorded at checkpoint time,
+**          for the restart-time integrity cross-check (see
+**          Checkpoint.h/.cpp's three hard-Fatal rules: missing on disk,
+**          untracked on disk, size mismatch).
+*/
+typedef struct __CheckpointManifestEntry
+{
+    char     filename[MAX_FULL_PATH_NAME];
+    uint8_t  color;       /* RSF_PLAYER_BLACK / RSF_PLAYER_WHITE */
+    int64_t  size;         /* real on-disk size at checkpoint time -- every file is
+                            ** finished by the time the manifest is captured (full
+                            ** drain happens first), so this is never a partial size */
+} CheckpointManifestEntry, * PCheckpointManifestEntry;
+
+/*
 ** Type:    CheckpointStats
 ** @brief   Mid-level checkpoint payload -- exactly enough to resume the GPU
 **          feeder from a specific point in a level's input stream instead of
-**          from record 0. Written only once the feeder is fully paused, its
-**          accumulator drained, and every merge-writer buffer force-flushed
-**          to real NVMe files, so every field here is guaranteed consistent
-**          with the writer-dir's actual on-disk state at write time.
+**          from record 0, plus a full integrity manifest of every real
+**          writer-drive file at checkpoint time. Written only once the
+**          feeder is fully paused, its accumulator drained, and every flush/
+**          iMerge in flight has completed and consolidation has stopped, so
+**          every field here is guaranteed consistent with the writer-dirs'
+**          actual on-disk state at write time -- no file is mid-write when
+**          the manifest is captured.
 ** @details activeSubPass + recordsConsumedInSubPass together describe
 **          exactly where RunGpuFeederJob's two sequential sub-passes
 **          (black-turn boards, then white-turn boards -- see
@@ -205,22 +254,25 @@ typedef struct __LevelStats
 **          done, white not yet started) is naturally represented as
 **          activeSubPass=RSF_PLAYER_WHITE, recordsConsumedInSubPass=0 --
 **          no separate "between passes" state is needed.
-**          mwNextFileIdx is a snapshot of every (writer, color) ticket
-**          high-water mark at the moment of writing, used on restart to
-**          cross-check the writer-dir's independently-scanned state
-**          actually matches before trusting this checkpoint (see the
-**          restart-validation design) -- never trusted as the resume
-**          source for that state by itself, only as a consistency check
-**          against a fresh directory scan.
+**          nextFileIdx is a snapshot of every drive's naming counter at
+**          checkpoint time -- restored on resume purely so new files never
+**          collide with real files already on disk; it is NEVER consulted
+**          for any backlog/trigger decision (the registry, rebuilt from a
+**          fresh directory scan on restart, is the sole source of truth for
+**          that). manifest/manifestCount is the real cross-check: restart
+**          re-scans every writer drive and Fatals on any disagreement with
+**          what's recorded here (see Checkpoint.h).
 */
 typedef struct __CheckpointStats
 {
     uint8_t  boardSize;                      /* sanity check against the running config */
     uint8_t  level;                          /* which level this checkpoint belongs to */
     uint8_t  activeSubPass;                  /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE */
-    uint8_t  numMergeWriters;                /* must match the running config; else mwNextFileIdx below is meaningless */
+    uint8_t  numMergeWriters;                /* must match the running config; else nextFileIdx/manifest below are meaningless */
     uint64_t recordsConsumedInSubPass;       /* position within activeSubPass's own input stream */
-    int      mwNextFileIdx[MAX_WRITERS][2];  /* snapshot at checkpoint time, indexed [writerIdx][player] */
+    int      nextFileIdx[MAX_WRITERS];       /* per-drive naming-counter snapshot -- naming only, never logic */
+    int      manifestCount[MAX_WRITERS];     /* how many of manifest[wi][*] are valid */
+    CheckpointManifestEntry manifest[MAX_WRITERS][CHECKPOINT_MANIFEST_MAX_FILES];
     char     timestamp[24];                  /* "YYYY-MM-DD HH:MM:SS", informational only */
 } CheckpointStats, * PCheckpointStats;
 
@@ -359,53 +411,76 @@ static inline bool ReadSentinelLevelStats(const char* path, LevelStats* out)
 }
 
 /*
-** Type:    ClaimRegistry
-** @brief   Per-(writer drive, color) set of writer-file indices currently
-**          "spoken for" -- either a brand-new index still being written (by
-**          a flush or a background-consolidation output), or an existing
-**          file claimed as input to a live consolidation/cross-drive merge.
-** @details See ClaimRegistry.h for the operations (ClaimSingle/ClaimTryRange/
-**          ClaimReleaseOne/ClaimReleaseRange/ClaimIsHeld). `cs` guards
-**          `claimed` only -- it must never be held across any file I/O or
-**          across another lock (imergeCS, another ClaimRegistry instance).
-**          Flush and consolidation both write directly to a file's final
-**          path from the moment it's opened (no temp-name-then-rename), so a
-**          directory scan must check ClaimIsHeld before trusting anything it
-**          finds there -- a partial file is otherwise indistinguishable from
-**          a complete one by size/attributes alone.
+** reservedBy values for RegistryFileNode.reservedBy below -- which of the
+** four roles currently holds a file reserved. RSF_PLAYER_BLACK/WHITE-style
+** small enum, not a bitmask (a file is reserved by exactly one role at a
+** time; see project_writer_drive_registry_redesign memory for why "no
+** consolidation pause during iMerge" is still safe -- disjoint files, not
+** disjoint roles).
 */
-typedef struct __ClaimRegistry
-{
-    CRITICAL_SECTION        cs;
-    std::unordered_set<int> claimed;
-} ClaimRegistry, * PClaimRegistry;
+#define REGISTRY_RESERVED_NONE         0
+#define REGISTRY_RESERVED_FLUSH        1
+#define REGISTRY_RESERVED_CONSOL       2
+#define REGISTRY_RESERVED_IMERGE       3
+#define REGISTRY_RESERVED_FINAL_MERGE  4
 
 /*
-** Type:    ConsolidationSlotStats
-** @brief   Live progress for one consolidation worker thread. One instance
-**          per worker (indexed by its stable ThreadPool worker index, 0..
-**          CONSOLIDATION_POOL_THREADS-1), MemMalloc'd as pConsolSlotStats
-**          (InitSolver.cpp) so the stats thread and every consolidation
-**          worker reach the same shared memory. writerIdx/player identify
-**          which pair this worker is currently merging (only meaningful
-**          while active is set) -- needed now that a slot's array position
-**          no longer implies a pair, unlike the old per-pair scheme. Read/
-**          written without a lock, same convention as the rest of this
-**          project's live-display fields (torn/stale reads are acceptable
-**          for a status display; see e.g. cascadeActive below).
+** Type:    RegistryFileNode
+** @brief   One real writer-drive file's identity and reservation state --
+**          the sole source of truth this project uses for "does this file
+**          exist, and is it currently in use," replacing every ticket-
+**          number-derived proxy for the same question (mwNextFileIdx-as-
+**          logic, ClaimRegistry, mwXxxFilesConsumed, pConsolUp/
+**          mwXxxConsolidatedUpTo, mwXxxPhysicalFileCount all retired -- see
+**          this file's top-of-file note and Registry.h).
+** @details Created when a file is first reserved for writing (flush/
+**          consolidation/iMerge claims a new output slot), removed when the
+**          file is deleted (consolidation/iMerge absorbing an input, or the
+**          final merge consuming everything). physfilesize is 0 while
+**          isReserved is true and reservedBy names a write-in-progress role
+**          -- that is expected, not drift (see RegistryAuditor.h's
+**          size-mismatch check, which explicitly skips reserved nodes for
+**          this reason). reservedBytes is the worst-case byte reservation
+**          claimed via DriveReserve (DriveLedger.h) at reservation time --
+**          needed by DriveSpaceAuditor.h to recompute real drive usage from
+**          scratch (finished-file real sizes + in-progress reservedBytes),
+**          since DriveReserve itself only takes this as a transient call
+**          argument and otherwise forgets it.
 */
-typedef struct __ConsolidationSlotStats
+typedef struct __RegistryFileNode
 {
-    volatile int      active;
-    int               writerIdx;   /* valid only while active */
-    int               player;      /* valid only while active */
-    int               fileCount;   /* valid only while active -- number of input files this merge is combining */
-    int               batchIndices[MAX_CONSOLIDATION_BATCH];  /* valid only while active -- ticket indices of this merge's input files (first fileCount entries) */
-    int               outIdx;      /* valid only while active -- ticket index of this merge's new output file */
-    volatile int64_t  totalBytes;
-    volatile int64_t  doneBytes;
-    uint64_t          startTickMs;
-} ConsolidationSlotStats, * PConsolidationSlotStats;
+    uint8_t   color;             /* RSF_PLAYER_BLACK / RSF_PLAYER_WHITE */
+    char      filename[MAX_FULL_PATH_NAME];   /* full path */
+    int64_t   physfilesize;      /* 0 until the writer finishes and reports the real size */
+    bool      isReserved;
+    uint8_t   reservedBy;        /* REGISTRY_RESERVED_* -- valid only while isReserved */
+    int64_t   reservedBytes;     /* worst-case bytes claimed at reservation time -- valid only while isReserved */
+    uint64_t  reservedSinceTickMs; /* GetTickCount64() when reserved -- used by RegistryAuditor.h's stuck-reservation check */
+} RegistryFileNode, * PRegistryFileNode;
+
+/*
+** Type:    ImergeColorSession
+** @brief   Per-color "is a cross-drive iMerge session currently running"
+**          coordination -- lets a flush thread that needs relief wait on an
+**          *already-running* session for that color instead of starting a
+**          redundant one, and lets any number of waiters (multiple drives'
+**          flushes can genuinely need relief close together -- see
+**          project_writer_drive_registry_redesign memory's "today's GPU
+**          feeder/buffer architecture" section for why this is a real case,
+**          not a rare corner) be released together when it completes.
+**          std::mutex/std::condition_variable deliberately, to match
+**          ThreadPool's own existing synchronization style (the only other
+**          place in this project's C++ layer that needs wait/notify
+**          semantics, as opposed to plain mutual exclusion, which stays
+**          CRITICAL_SECTION elsewhere in this struct for consistency with
+**          the rest of the solver's Win32-primitive style).
+*/
+typedef struct __ImergeColorSession
+{
+    bool                     active;
+    std::mutex                m;
+    std::condition_variable   cv;
+} ImergeColorSession;
 
 /*
 ** Type:    OthelloRingMasterConfig
@@ -424,13 +499,23 @@ typedef struct __OthelloRingMasterConfig
     char      lz4Drives[64];  /* drive letters that get LZ4 on top of varint (e.g. "DEF") */
     uint64_t  memoryLimitBytes; /* --memory-limit override (MM_SPECIFIED); 0 = use MM_RECOMMENDED against real free RAM */
     double    checkpointIntervalHours; /* --checkpoint-interval-hours; <= 0 disables periodic checkpointing entirely */
+
+    /* Test-only overrides (v1.0.0 registry redesign) -- let a short,
+    ** disposable validation run genuinely exercise the iMerge/consolidation/
+    ** auditor machinery without waiting through a real week-plus level. 0 =
+    ** use the real production default in every case.
+    */
+    uint64_t  driveSpaceLowGBOverride;    /* --drive-space-low-gb; overrides DRIVE_SPACE_LOW_GB */
+    uint64_t  maxFileSizeGBOverride;      /* --max-file-size-gb; overrides CONSOLIDATION_SIZE_CAP_GB */
+    uint32_t  auditIntervalSecondsOverride; /* --audit-interval-seconds; overrides AUDIT_INTERVAL_SECONDS_DEFAULT */
 } OthelloRingMasterConfig, * POthelloRingMasterConfig;
 
 /*
 ** Type:    OthelloRingMasterState
 ** @brief   All live, mutable solver state: current level/phase, per-color
-**          merge/cascade progress, merge-writer buffer bookkeeping, drive
-**          ledgers, per-level stats history, and thread pools.
+**          merge/cascade progress, merge-writer buffer bookkeeping, the
+**          per-drive file registry, per-level stats history, and thread
+**          pools.
 */
 typedef struct __OthelloRingMasterState
 {
@@ -441,10 +526,11 @@ typedef struct __OthelloRingMasterState
 
     /* Set (in addition to terminateThreads) on Ctrl+C/shutdown, AND set alone
     ** (terminateThreads left untouched) at each level's normal solve->merge
-    ** transition, so any in-flight background consolidation
-    ** (TryConsolidatePair, MergeFiles.cpp) wraps up promptly rather
-    ** than running arbitrarily long into the transition window. Reset to
-    ** false at the start of each new level.
+    ** transition, so any in-flight background consolidation wraps up
+    ** promptly rather than running arbitrarily long into the transition
+    ** window. Also the signal the consolidation master thread's own wait
+    ** loop checks to know when to stop looping for good. Reset to false at
+    ** the start of each new level.
     */
     volatile bool        terminateConsolidation;
     const char* volatile currentPhase;             /* points to a string literal; set by main thread at each phase transition */
@@ -503,84 +589,55 @@ typedef struct __OthelloRingMasterState
     char     mwDirectory[MAX_WRITERS][MAX_FULL_PATH_NAME];
     size_t   mwBufferSize;                  /* bytes per merge-writer buffer */
     void*    pMWBuffer[MAX_WRITERS];        /* one large buffer per thread */
-    /* Pure "files created this level" display counters (StatsListener.cpp's
-    ** liveBlack/liveWhite) -- InterlockedIncrement on every real create event
-    ** (a flush close, or a background-consolidation merge success). No longer
-    ** read-before-write to pick a new file's index -- that's FileTicketNext's
-    ** job (FileTicket.h) via mwNextFileIdx below, which is what lets flush and
-    ** consolidation allocate a name without ever contending for the same lock.
-    */
-    volatile int  mwBlackFileCount[MAX_WRITERS];
-    volatile int  mwWhiteFileCount[MAX_WRITERS];
 
-    /* Live-only (deliberately NOT part of LevelStats -- see that struct's own
-    ** backward-compat history, OthelloTypes.h's LevelStatsPreConsolidation
-    ** comment, and the sentinel-stats-regression memory; this is a pure
-    ** current-level diagnostic, not something that needs persisting across a
-    ** restart) running total of every successful TryConsolidatePair merge's
-    ** real on-disk INPUT bytes this level, summed across all writers/colors.
-    ** Compare against the already-persisted levelStats[playLevel].consolidationBytesWritten
-    ** (the OUTPUT total) to see how much real space consolidation is
-    ** reclaiming -- KWayMergeFiles genuinely dedupes on the board key, not
-    ** just merge-sorts, so a real gap here reflects real removed duplicates
-    ** (plus any compression-ratio change from re-encoding a bigger file).
+    /*
+    ** The per-drive file registry -- sole source of truth for "which real
+    ** writer files exist right now, and are they reserved." driveRegistryCS
+    ** covers both colors on that drive (a file's own `color` field is what
+    ** distinguishes them, not separate lists); held only for list mutation/
+    ** scan, never across real file I/O -- same discipline the old
+    ** ClaimRegistry used. See Registry.h for the create/remove/reserve/
+    ** unreserve/scan operations; RegistryFileNode above for the node shape.
     */
-    volatile int64_t consolidationBytesInput;
+    std::list<RegistryFileNode>  driveRegistry[MAX_WRITERS];
+    CRITICAL_SECTION             driveRegistryCS[MAX_WRITERS];
 
-    /* Low-water-mark HINT for DoCrossDriveIntermediateMerge's gather-loop scan
-    ** start -- NOT a correctness invariant (that's now ClaimRegistry's job:
-    ** the gather loop checks ClaimIsHeld per candidate directly, so it can
-    ** never race a file a live consolidation merge is holding, regardless of
-    ** where this hint says to start). Only ever advanced under imergeCS.
+    /*
+    ** Per-drive file-naming counter -- used EXCLUSIVELY to generate a
+    ** unique filename for a newly-reserved file (Registry.h's
+    ** RegistryReserveNew). Never consulted for any backlog/trigger/logic
+    ** decision -- that is the one property that keeps this from
+    ** reintroducing the ticket-position-as-logic bug class this whole
+    ** redesign exists to eliminate. One counter per drive (not per
+    ** drive-per-color, since a filename already encodes color as a prefix
+    ** and both colors on a drive share one naming sequence).
     */
-    int      mwBlackFilesConsumed[MAX_WRITERS];
-    int      mwWhiteFilesConsumed[MAX_WRITERS];
+    volatile LONG  nextFileIdx[MAX_WRITERS];
 
-    /* Lock-free per-(writer, color) ticket counters (FileTicket.h) -- the
-    ** sole source of new writer-file indices for both flush
-    ** (FlushMergeWriterBuffer) and background consolidation
-    ** (TryConsolidatePair). InterlockedIncrement only; never reused
-    ** within a level, so an index that's ever been handed out never comes
-    ** back around, and a gathering loop can always treat "not found on disk"
-    ** as permanent, not "not written yet."
+    /*
+    ** Per-color cross-drive iMerge session coordination (see
+    ** ImergeColorSession above and the iMerge pool, IMergePool.h).
+    ** Indexed by RSF_PLAYER_WHITE(0)/RSF_PLAYER_BLACK(1) -- iMerge is a
+    ** per-color operation now (each color's session independently gathers
+    ** across *all* NVMe drives), not a per-writer one, so this replaces the
+    ** old imergeCS single lock spanning both colors.
     */
-    volatile LONG  mwNextFileIdx[MAX_WRITERS][2];
+    ImergeColorSession  imergeSession[2];
 
-    /* Per-(writer, color) claim registry (ClaimRegistry.h) -- which writer-
-    ** file indices are currently spoken for (mid-write, or claimed as input
-    ** to a live consolidation/cross-drive merge). See ClaimRegistry's own
-    ** type comment above for the full rationale.
+    /*
+    ** Per-color live intermediate-merge progress (written by the iMerge pool,
+    ** read by the stats thread). Indexed by RSF_PLAYER_WHITE(0)/
+    ** RSF_PLAYER_BLACK(1) -- per-color now, not per-writer, matching
+    ** imergeSession above (a single iMerge session for a color spans every
+    ** NVMe drive at once). imergeActive[p] is set to 1 before the merge and
+    ** 0 after; the other fields are populated before imergeActive is set so
+    ** the stats reader always sees consistent data.
     */
-    ClaimRegistry  claimRegistry[MAX_WRITERS][2];
-
-    /* Background small-file consolidator (TryConsolidatePair, MergeFiles.cpp):
-    ** an independent low-water-mark HINT, separate from mwBlackFilesConsumed/
-    ** mwWhiteFilesConsumed above -- "everything below this index has already
-    ** been looked at by the consolidator, either merged away and replaced by
-    ** a file appended at a higher index, or left alone because it was already
-    ** >= CONSOLIDATION_SIZE_CAP." Purely a scan-start optimization (real
-    ** correctness comes from ClaimRegistry + real file-existence checks per
-    ** candidate) -- touched by every consolidation worker thread that visits
-    ** this pair, without a lock; a lost update just causes some harmless
-    ** re-scanning next time, never incorrectness, hence the plain racy
-    ** "advance if greater" writes used against it.
-    */
-    volatile int  mwBlackConsolidatedUpTo[MAX_WRITERS];
-    volatile int  mwWhiteConsolidatedUpTo[MAX_WRITERS];
-
-    /* Lock-free per-(writer, color) "someone's already examining this pair"
-    ** flag -- 0 = free, 1 = a worker is currently between building a
-    ** candidate batch and resolving its ClaimTryRange attempt for this
-    ** pair. A worker that finds this already 1 skips the pair for this
-    ** sweep entirely (moves on to the next pair) rather than blocking, so
-    ** multiple workers never redundantly re-scan the exact same files at
-    ** once. Deliberately narrow-scoped: released the instant the claim
-    ** attempt resolves (success or failure), well before the actual merge
-    ** I/O starts, so it never limits how many merges can run concurrently
-    ** on one pair -- only how many workers can be *deciding* what to merge
-    ** on it at the same instant.
-    */
-    volatile LONG  consolScanning[MAX_WRITERS][2];
+    volatile int      imergeActive[2];
+    volatile int64_t  imergeTotalInputBytes[2];
+    volatile int64_t  imergeDoneInputBytes[2];
+    uint64_t          imergeStartTickMs[2];   /* GetTickCount64() when the imerge starts */
+    int               imergeFileCount[2];     /* valid only while imergeActive -- number of input files this cross-drive merge is combining */
 
     size_t   gpuAccumCapacity;   /* GPU accumulator board capacity (shared black+white) */
     size_t   mwStagingSize;      /* bytes per staging area = gpuAccumCapacity * sizeof(UINT64_PAIR) */
@@ -628,63 +685,30 @@ typedef struct __OthelloRingMasterState
     ** from the OS after cleanup; updated atomically on every write and
     ** delete. A safety buffer (DRIVE_SPACE_LOW_BYTES) is subtracted at init
     ** so reservations never reach the last bytes on a drive. Replaces all
-    ** ad-hoc GetDiskFreeSpaceExA calls at decision points -- see DriveLedger.h.
+    ** ad-hoc GetDiskFreeSpaceExA calls at decision points -- see
+    ** DriveLedger.h. Cross-checked (not replaced) from scratch every
+    ** AUDIT_INTERVAL_SECONDS_DEFAULT by DriveSpaceAuditor.h, using the
+    ** registry's own reservedBytes bookkeeping -- see that file.
     */
     volatile int64_t driveLedger[26];
 
-    /* Serializes DoCrossDriveIntermediateMerge so only one thread runs it at a time. */
-    CRITICAL_SECTION imergeCS;
-
     /*
-    ** Per-writer intermediate merge progress (written by MW threads, read by
-    ** stats thread). imergeActive[i] is set to 1 before the merge and 0
-    ** after; the other fields are populated before imergeActive is set so
-    ** the stats reader always sees consistent data.
+    ** Per-writer buffer-full flush progress (the flusher pool -> real NVMe
+    ** file write). Indexed [writerIdx][player] now, not just [writerIdx] --
+    ** black and white write concurrently as two separate dispatched jobs
+    ** (FlusherPool.h), so each half needs its own live-progress slot.
+    ** mwFlushActive[i][p] set to 1 before the flush and 0 after; other
+    ** fields populated before mwFlushActive is set so the stats reader
+    ** always sees consistent data.
     */
-    volatile int      imergeActive[MAX_WRITERS];
-    volatile int64_t  imergeTotalInputBytes[MAX_WRITERS];
-    volatile int64_t  imergeDoneInputBytes[MAX_WRITERS];
-    uint64_t          imergeStartTickMs[MAX_WRITERS];   /* GetTickCount64() when the imerge starts */
-    int               imergeFileCount[MAX_WRITERS];     /* valid only while imergeActive -- number of input files this cross-drive merge is combining */
-
-    /*
-    ** Per-writer buffer-full flush progress (RunMergeWriterJob ->
-    ** FlushMergeWriterBuffer, the in-memory-pool-to-NVMe spill). Same
-    ** active-flag convention as imerge above.
-    */
-    volatile int      mwFlushActive[MAX_WRITERS];
-    volatile int64_t  mwFlushTotalBytes[MAX_WRITERS];
-    volatile int64_t  mwFlushDoneBytes[MAX_WRITERS];
-    uint64_t          mwFlushStartTickMs[MAX_WRITERS];  /* GetTickCount64() when the flush starts */
-
-    /*
-    ** Live progress for every consolidation worker thread, MemMalloc'd
-    ** (InitSolver.cpp) as CONSOLIDATION_POOL_THREADS ConsolidationSlotStats
-    ** entries -- one per worker, indexed by its own stable ThreadPool
-    ** worker index. See that type's comment above. Addressed via the
-    ** ConsolSlot() helper (below, after this struct, since it dereferences
-    ** POthelloRingMasterState).
-    */
-    ConsolidationSlotStats* pConsolSlotStats;
-
-    /*
-    ** Real-time physical file count per writer/color -- unlike
-    ** mwBlack/WhiteFileCount (monotonically increasing, never decremented),
-    ** this tracks what's actually sitting on disk right now: incremented on
-    ** any file creation (a genuine GPU flush or a consolidation merge
-    ** output), decremented on any deletion (consolidation absorbing
-    ** originals, or DoCrossDriveIntermediateMerge consuming files).
-    ** Needed because consolidation creates gaps in the file-index range
-    ** (deletes some originals, replaces them with one file at a higher
-    ** index), so file count alone can no longer answer "how many files
-    ** really exist right now."
-    */
-    volatile int      mwBlackPhysicalFileCount[MAX_WRITERS];
-    volatile int      mwWhitePhysicalFileCount[MAX_WRITERS];
+    volatile int      mwFlushActive[MAX_WRITERS][2];
+    volatile int64_t  mwFlushTotalBytes[MAX_WRITERS][2];
+    volatile int64_t  mwFlushDoneBytes[MAX_WRITERS][2];
+    uint64_t          mwFlushStartTickMs[MAX_WRITERS][2];  /* GetTickCount64() when the flush starts */
 
     /*
     ** Fallback intermediate merge destination on the store drive (used when
-    ** no medium drive has enough space for even one MAX_MERGE_FANIN batch).
+    ** no medium drive has enough space for even one gathered iMerge batch).
     */
     char      storeMergeDirectory[MAX_FULL_PATH_NAME];
     int       storeMergeBlackFileCount;      /* access via InterlockedExchangeAdd */
@@ -707,29 +731,55 @@ typedef struct __OthelloRingMasterState
     /* Per-level stats history */
     LevelStats levelStats[MAX_LEVELS];
 
+    /* Dedicated pools. pMergeWriterPool keeps its original, narrower role
+    ** unchanged from before this redesign: one thread per writer drive,
+    ** handling the routine D2H-copy-then-try-compress-into-pool step for
+    ** EVERY GPU flush handoff (RunMergeWriterJob) -- frequent, in-memory
+    ** only, nothing to do with tickets/files/registry. When that in-memory
+    ** pool fills, RunMergeWriterJob dispatches the real disk-write work as
+    ** two jobs (one per color) onto the NEW pFlusherPool and *waits* for
+    ** both to finish before returning to accept its next GPU batch -- the
+    ** wait is required (the per-writer segment buffers are shared memory,
+    ** unsafe to let new GPU data land there while a dispatched flush job is
+    ** still reading out of them), and is no different in effect from
+    ** today's already-blocking-until-flush-completes behavior; what
+    ** changes is that the actual write happens on a pool iMerge/
+    ** consolidation can never contend with, not the waiting itself. See
+    ** the top-of-file note and Registry.h/FlusherPool.h/IMergePool.h/
+    ** ConsolidationMaster.h/RegistryAuditor.h/DriveSpaceAuditor.h. Each of
+    ** the other four is an independent role with its own fixed thread
+    ** count (FLUSHER_POOL_THREADS/IMERGE_POOL_THREADS/
+    ** CONSOLIDATOR_POOL_THREADS above) so housekeeping can never starve the
+    ** GPU feeder's own flush dependency the way the old single shared
+    ** pMergeWriterPool (which used to ALSO do consolidation/iMerge inline)
+    ** could.
+    */
     ThreadPool* pMergeWriterPool;
     ThreadPool* pGPUFeederThreadPool;
     ThreadPool* pStatsThreadPool;
-    /* Background small-file consolidator (ConsolidationWorkerLoop,
-    ** TryConsolidatePair, MergeFiles.cpp) -- CONSOLIDATION_POOL_THREADS
-    ** persistent worker threads, each looping sleep/sweep-every-pair/sleep
-    ** for the whole level, queued fresh at each level's start (see
-    ** OthelloRingMaster.cpp). Deliberately flat-sized (not scaled by
-    ** numMergeWriters) so adding more NVMe drives never grows thread count.
-    ** Separate from pMergeWriterPool so it draws from otherwise-idle cores.
-    */
-    ThreadPool* pConsolidationPool;
-} OthelloRingMasterState, * POthelloRingMasterState;
+    ThreadPool* pFlusherPool;
+    ThreadPool* pIMergePool;
+    ThreadPool* pConsolidatorPool;
 
-/*
-** Function: ConsolSlot
-** @brief    Computes the address of one consolidation worker's stats entry
-**           inside the MemMalloc'd pConsolSlotStats block (InitSolver.cpp).
-** @param    pSt       - solver state
-** @param    workerIdx - the worker's stable ThreadPool index (0..CONSOLIDATION_POOL_THREADS-1)
-** @return   Pointer to that worker's live-progress stats.
-*/
-static inline PConsolidationSlotStats ConsolSlot(POthelloRingMasterState pSt, int workerIdx)
-{
-    return &pSt->pConsolSlotStats[workerIdx];
-}
+    /*
+    ** Single event-driven consolidation master thread (ConsolidationMaster.h)
+    ** -- not part of any ThreadPool, since it is exactly one thread for the
+    ** whole run, woken by a condition variable rather than pulling from a
+    ** job queue. Dispatches work onto pConsolidatorPool.
+    */
+    std::thread              consolidationMasterThread;
+    std::mutex                consolidationMasterMutex;
+    std::condition_variable   consolidationMasterCV;
+    volatile bool             consolidationMasterWake;   /* predicate for the CV wait -- set by any of the three trigger events, cleared once the master wakes and processes it */
+    volatile int              consolidatorFreeCount;     /* free worker count in pConsolidatorPool -- checked by the master before reserving, so it never locks files behind a job nothing can start yet */
+
+    /*
+    ** The two new background auditors (RegistryAuditor.h,
+    ** DriveSpaceAuditor.h) -- each its own dedicated thread, stoppable at
+    ** final merge, read-only with respect to everything else (holds no
+    ** resource anyone else needs, so no "wait for it" is required the way
+    ** the other pools need on the final-merge stop sequence).
+    */
+    std::thread  registryAuditorThread;
+    std::thread  driveSpaceAuditorThread;
+} OthelloRingMasterState, * POthelloRingMasterState;

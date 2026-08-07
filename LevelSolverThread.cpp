@@ -33,6 +33,7 @@
 #include "LevelSolverThread.h"
 #include "DriveLedger.h"
 #include "MergeFiles.h"
+#include "FlusherPool.h"
 #include "RSFFileName.h"
 #include "OthelloBasics.h"
 #include "RingNestedIndex.h"

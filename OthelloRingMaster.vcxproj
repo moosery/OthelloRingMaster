@@ -159,6 +159,11 @@
     <ClCompile Include="InitSolver.cpp" />
     <ClCompile Include="StatsListener.cpp" />
     <ClCompile Include="Checkpoint.cpp" />
+    <ClCompile Include="FlusherPool.cpp" />
+    <ClCompile Include="IMergePool.cpp" />
+    <ClCompile Include="ConsolidationMaster.cpp" />
+    <ClCompile Include="RegistryAuditor.cpp" />
+    <ClCompile Include="DriveSpaceAuditor.cpp" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="GpuInfo.cu" />
@@ -178,6 +183,12 @@
     <ClInclude Include="InitSolver.h" />
     <ClInclude Include="StatsListener.h" />
     <ClInclude Include="Checkpoint.h" />
+    <ClInclude Include="Registry.h" />
+    <ClInclude Include="FlusherPool.h" />
+    <ClInclude Include="IMergePool.h" />
+    <ClInclude Include="ConsolidationMaster.h" />
+    <ClInclude Include="RegistryAuditor.h" />
+    <ClInclude Include="DriveSpaceAuditor.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="OthelloBasicsForCUDA\OthelloBasicsForCUDA.vcxproj">

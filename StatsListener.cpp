@@ -27,7 +27,7 @@
 #include "OthelloTypes.h"
 #include "Logger.h"
 #include "MergeFiles.h"
-#include "ClaimRegistry.h"
+#include "Registry.h"
 #include "Mem.h"
 #include <stdio.h>
 #include <string.h>
@@ -237,46 +237,43 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
     /* Current-level drive breakdown (cumulative since level start) */
     n += snprintf(buf + n, bufSize - n,
-                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht  OnDskB  OnDskW\n");
+                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht\n");
     n += snprintf(buf + n, bufSize - n,
-                  "  ---  -----  ------------  ------------  ------------  ----  ----  ------  ------\n");
+                  "  ---  -----  ------------  ------------  ------------  ----  ----\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
 
         /* mwDirectory[i] is this drive's one writer thread (1:1 with
         ** writerDriveStats[i] -- see InitSolver.cpp), so no scan needed.
+        ** RegistryCount is the real, current physical file count -- the
+        ** registry design collapses the old "lifetime created" vs.
+        ** "on-disk right now" pair of separately-maintained counters (which
+        ** could drift from each other and from reality) into this one
+        ** always-real number.
         */
-        int liveBlack = pSt->mwBlackFileCount[i];
-        int liveWhite = pSt->mwWhiteFileCount[i];
-
-        /* On-disk counts are real-time (created minus deleted, including
-        ** consolidation's own creates/deletes) -- unlike liveBlack/liveWhite
-        ** above (total ever created, never decremented), this answers "how
-        ** many files actually exist right now."
-        */
-        int onDiskBlack = pSt->mwBlackPhysicalFileCount[i];
-        int onDiskWhite = pSt->mwWhitePhysicalFileCount[i];
+        int blackFiles = RegistryCount(pSt, i, RSF_PLAYER_BLACK);
+        int whiteFiles = RegistryCount(pSt, i, RSF_PLAYER_WHITE);
 
         bool showUncomp = (d->levelBytesUncompressed > 0
                            && d->levelBytesUncompressed != d->levelBytesWritten);
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d  %6d  %6d\n",
+                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten      / (1024.0 * 1024.0 * 1024.0),
                           d->levelBytesUncompressed / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          liveBlack, liveWhite, onDiskBlack, onDiskWhite);
+                          blackFiles, whiteFiles);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d  %6d  %6d\n",
+                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          liveBlack, liveWhite, onDiskBlack, onDiskWhite);
+                          blackFiles, whiteFiles);
     }
 
     /* MW compressed-pool segment counts: live vs. lifetime high-water (never
@@ -385,23 +382,26 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     */
     {
         uint64_t nowMs = GetTickCount64();
+        static const char* kFlushPlayerNames[2] = { "white", "black" };
         for (int ti = 0; ti < pSt->numMergeWriters; ti++)
         {
-            if (pSt->mwFlushActive[ti])
+            for (int p = 0; p <= 1; p++)
             {
-                double   doneGB  = pSt->mwFlushDoneBytes[ti]  / (1024.0 * 1024.0 * 1024.0);
-                double   totalGB = pSt->mwFlushTotalBytes[ti] / (1024.0 * 1024.0 * 1024.0);
-                double   pct     = (pSt->mwFlushTotalBytes[ti] > 0)
-                                   ? 100.0 * (double)pSt->mwFlushDoneBytes[ti]
-                                           / (double)pSt->mwFlushTotalBytes[ti]
+                if (!pSt->mwFlushActive[ti][p]) continue;
+
+                double   doneGB  = pSt->mwFlushDoneBytes[ti][p]  / (1024.0 * 1024.0 * 1024.0);
+                double   totalGB = pSt->mwFlushTotalBytes[ti][p] / (1024.0 * 1024.0 * 1024.0);
+                double   pct     = (pSt->mwFlushTotalBytes[ti][p] > 0)
+                                   ? 100.0 * (double)pSt->mwFlushDoneBytes[ti][p]
+                                           / (double)pSt->mwFlushTotalBytes[ti][p]
                                    : 0.0;
-                uint64_t elapsedMs = nowMs - pSt->mwFlushStartTickMs[ti];
-                double   mbps      = (elapsedMs > 200 && pSt->mwFlushDoneBytes[ti] > 0)
-                                   ? (double)pSt->mwFlushDoneBytes[ti] / (1024.0 * 1024.0)
+                uint64_t elapsedMs = nowMs - pSt->mwFlushStartTickMs[ti][p];
+                double   mbps      = (elapsedMs > 200 && pSt->mwFlushDoneBytes[ti][p] > 0)
+                                   ? (double)pSt->mwFlushDoneBytes[ti][p] / (1024.0 * 1024.0)
                                      / (elapsedMs / 1000.0)
                                    : 0.0;
-                char detail[16];
-                snprintf(detail, sizeof(detail), "%c: pool->disk", pSt->mwDirectory[ti][0]);
+                char detail[24];
+                snprintf(detail, sizeof(detail), "%c: %s->disk", pSt->mwDirectory[ti][0], kFlushPlayerNames[p]);
                 char etaStr[16];
                 FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
                 n += snprintf(buf + n, bufSize - n,
@@ -412,42 +412,18 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         }
     }
 
-    /* Active background consolidation (TryConsolidatePair) -- one line per
-    ** active consolidation worker (CONSOLIDATION_POOL_THREADS total, no
-    ** per-pair cap), labeled with the worker's own index since more than
-    ** one worker can in principle be merging the same (writer, color) pair
-    ** at once. Same "records popped x 16 bytes" uncompressed-equivalent
-    ** convention as every other progress line, not a literal disk-write rate.
+    /* Background consolidation: the event-driven master (ConsolidationMaster.h)
+    ** dispatches bounded merges onto pConsolidatorPool as candidates appear --
+    ** no per-worker live byte-progress is tracked (nothing polls per-pair on
+    ** a timer anymore), so this is a simple busy/free gauge rather than a
+    ** per-worker GB/ETA line. Use CONSOL for a real-time list of every
+    ** writer-drive file's own reservation state.
     */
     {
-        uint64_t nowMs = GetTickCount64();
-        static const char* kConsolPlayerNames[2] = { "white", "black" };
-        for (int w = 0; w < CONSOLIDATION_POOL_THREADS; w++)
-        {
-            PConsolidationSlotStats pSlot = ConsolSlot(pSt, w);
-            if (!pSlot->active) continue;
-
-            double   doneGB  = pSlot->doneBytes  / (1024.0 * 1024.0 * 1024.0);
-            double   totalGB = pSlot->totalBytes / (1024.0 * 1024.0 * 1024.0);
-            double   pct     = (pSlot->totalBytes > 0)
-                               ? 100.0 * (double)pSlot->doneBytes / (double)pSlot->totalBytes
-                               : 0.0;
-            uint64_t elapsedMs = nowMs - pSlot->startTickMs;
-            double   mbps      = (elapsedMs > 200 && pSlot->doneBytes > 0)
-                               ? (double)pSlot->doneBytes / (1024.0 * 1024.0)
-                                 / (elapsedMs / 1000.0)
-                               : 0.0;
-            char detail[28];
-            snprintf(detail, sizeof(detail), "%c: %s (w%d)", pSt->mwDirectory[pSlot->writerIdx][0],
-                     kConsolPlayerNames[pSlot->player], w);
-            char etaStr[16];
-            FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-            n += snprintf(buf + n, bufSize - n,
-                          "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
-                          "   files: %d\n",
-                          "Consol", detail, doneGB, totalGB, pct, mbps,
-                          MbpsToBoardsPerSec(mbps), etaStr, pSlot->fileCount);
-        }
+        int free = (int)InterlockedCompareExchange((volatile LONG*)&pSt->consolidatorFreeCount, 0, 0);
+        n += snprintf(buf + n, bufSize - n,
+                      "  Consol workers busy    : %d / %d\n",
+                      CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
     }
 
     /* Active end-of-level merge (per player, runs concurrently for white and black) */
@@ -621,14 +597,15 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
 /*
 ** Function: BuildConsolResponse
-** @brief    Builds the --consol diagnostic response: every writer-file index
-**           currently found on disk for every (writer drive, color) pair,
-**           its real on-disk size, and its current disposition. Deliberately
-**           uses the exact same real GetFileAttributesExA-based bytes
-**           FindConsolidationCandidate/TryConsolidatePair gate the size cap
-**           on -- NOT the uncompressed-equivalent (recordCount*16) figure the
-**           live progress lines above use -- so "too large to consolidate"
-**           here always agrees with what the consolidator itself decided.
+** @brief    Builds the --consol diagnostic response: a live snapshot of
+**           every real writer-drive file currently in the registry
+**           (Registry.h/OthelloTypes.h) -- the sole source of truth for
+**           "does this file exist, and is it currently in use" -- for every
+**           (writer drive, color) pair, its real on-disk size, and its
+**           current reservation state. Replaces the old ticket-range scan
+**           (FindConsolidationCandidate over [0, ticketSnap)) with a direct
+**           registry read, since the registry itself now answers exactly
+**           this question.
 ** @param    pCtx    - solve context
 ** @param    buf     - out: response text
 ** @param    bufSize - capacity of buf
@@ -636,88 +613,53 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
 {
     POthelloRingMasterState pSt = pCtx->pState;
-    static const char* kPlayerNames[2] = { "white", "black" };   /* indexed by RSF_PLAYER_WHITE(0)/BLACK(1) */
+    static const char* kPlayerNames[2]     = { "white", "black" };   /* indexed by RSF_PLAYER_WHITE(0)/BLACK(1) */
+    static const char* kReservedByNames[5] = { "none", "flush", "consol", "imerge", "final-merge" };
     size_t n = 0;
+
+    int free = (int)InterlockedCompareExchange((volatile LONG*)&pSt->consolidatorFreeCount, 0, 0);
+    n += snprintf(buf + n, bufSize - n,
+                  "Consolidator workers busy: %d / %d\n\n", CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
 
     for (int wi = 0; wi < pSt->numMergeWriters; wi++)
     {
+        /* Snapshot the whole drive's node list under lock (real per-drive
+        ** file counts stay small -- 2-20, confirmed repeatedly against live
+        ** production data -- so a bounded copy is cheap), then format from
+        ** the copy so the lock is never held across the snprintf calls below.
+        */
+        RegistryFileNode snap[CHECKPOINT_MANIFEST_MAX_FILES];
+        int count = 0;
+        EnterCriticalSection(&pSt->driveRegistryCS[wi]);
+        for (auto& node : pSt->driveRegistry[wi])
+        {
+            if (count >= CHECKPOINT_MANIFEST_MAX_FILES) break;
+            snap[count++] = node;
+        }
+        LeaveCriticalSection(&pSt->driveRegistryCS[wi]);
+
         for (int player = 0; player <= 1; player++)
         {
-            /* player is RSF_PLAYER_WHITE(0)/RSF_PLAYER_BLACK(1), same convention
-            ** as kPlayerNames above -- pick the matching low-water-mark array
-            ** without needing RSFFileName.h's macros in this file.
-            */
-            volatile int* pConsolUpArr = (player == 1) ? pSt->mwBlackConsolidatedUpTo
-                                                        : pSt->mwWhiteConsolidatedUpTo;
-            int ticketSnap = (int)pSt->mwNextFileIdx[wi][player];
-            int consolUp   = pConsolUpArr[wi];
-            int scanning   = pSt->consolScanning[wi][player];
-
-            n += snprintf(buf + n, bufSize - n,
-                          "=== %c: %-5s ===  pConsolUp: %-6d  ticketSnap: %-6d  scanning: %s\n",
-                          pSt->mwDirectory[wi][0], kPlayerNames[player],
-                          consolUp, ticketSnap, scanning ? "yes" : "no");
+            n += snprintf(buf + n, bufSize - n, "=== %c: %-5s ===\n",
+                          pSt->mwDirectory[wi][0], kPlayerNames[player]);
 
             int shown = 0;
-            for (int idx = 0; idx < ticketSnap; idx++)
+            for (int i = 0; i < count; i++)
             {
-                char     path[MAX_FULL_PATH_NAME];
-                uint64_t sz;
-                if (!FindConsolidationCandidate(path, sizeof(path), pCtx, wi, player, idx, &sz))
-                    continue;   /* already consolidated away, or never existed */
+                if (snap[i].color != (uint8_t)player) continue;
 
-                const char* baseName = strrchr(path, '\\');
-                baseName = baseName ? baseName + 1 : path;
+                const char* baseName = strrchr(snap[i].filename, '\\');
+                baseName = baseName ? baseName + 1 : snap[i].filename;
 
                 char status[64];
-                strcpy(status, "eligible");
-                bool matched = false;
-                for (int w = 0; w < CONSOLIDATION_POOL_THREADS && !matched; w++)
-                {
-                    PConsolidationSlotStats pSlot = ConsolSlot(pSt, w);
-                    if (!pSlot->active || pSlot->writerIdx != wi || pSlot->player != player)
-                        continue;
-                    if (idx == pSlot->outIdx)
-                    {
-                        snprintf(status, sizeof(status), "new output, merge in progress (w%d)", w);
-                        matched = true;
-                        continue;
-                    }
-                    for (int k = 0; k < pSlot->fileCount; k++)
-                    {
-                        if (pSlot->batchIndices[k] == idx)
-                        {
-                            snprintf(status, sizeof(status),
-                                     "actively being consolidated by thread %s (w%d)",
-                                     kPlayerNames[player], w);
-                            matched = true;
-                            break;
-                        }
-                    }
-                }
-                if (!matched)
-                {
-                    if (ClaimIsHeld(pSt, wi, player, idx))
-                    {
-                        /* Flush claims its own new output ticket (FileTicketNext +
-                        ** ClaimSingle in FlushMergeWriterBuffer) for the whole time
-                        ** it's writing, releasing only on close -- indistinguishable
-                        ** from an iMerge input claim by ClaimIsHeld alone. Flush
-                        ** always targets the newest ticket for a pair, so a held
-                        ** claim on idx == ticketSnap-1 while this writer's flush is
-                        ** active is that file, not a cross-drive merge input.
-                        */
-                        if (pSt->mwFlushActive[wi] && idx == ticketSnap - 1)
-                            strcpy(status, "reserved, flush writing this file");
-                        else
-                            strcpy(status, "reserved (cross-drive merge)");
-                    }
-                    else if (sz >= CONSOLIDATION_SIZE_CAP_BYTES)
-                        strcpy(status, "too large to consolidate");
-                }
+                if (!snap[i].isReserved)
+                    strcpy(status, "available");
+                else
+                    snprintf(status, sizeof(status), "reserved (%s)",
+                             kReservedByNames[snap[i].reservedBy]);
 
                 n += snprintf(buf + n, bufSize - n, "  %-28s %9.2f GB  %s\n",
-                              baseName, sz / (1024.0 * 1024.0 * 1024.0), status);
+                              baseName, snap[i].physfilesize / (1024.0 * 1024.0 * 1024.0), status);
                 shown++;
             }
             if (shown == 0)

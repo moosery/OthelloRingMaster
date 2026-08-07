@@ -37,17 +37,27 @@
 ** @param    pSt    - solver state whose driveLedger entry gets initialized
 ** @param    letter - drive letter to query
 */
-static inline void DriveInitLedger(POthelloRingMasterState pSt, char letter)
+static inline void DriveInitLedger(POthelloRingMasterState pSt, char letter,
+                                    uint64_t safetyBufferGBOverride = 0)
 {
     char           root[4] = { letter, ':', '\\', '\0' };
     ULARGE_INTEGER freeAvail = {};
 
     /* Query the OS directly rather than trusting any cached figure -- this
     ** runs once per level to correct drift the ledger's own accounting
-    ** might have accumulated.
+    ** might have accumulated. safetyBufferGBOverride (0 = use the real
+    ** DRIVE_SPACE_LOW_GB default) lets a test run's --drive-space-low-gb
+    ** shrink the effective ceiling so DriveReserve starts failing -- and
+    ** therefore iMerge starts triggering -- on tiny real data, the same
+    ** "lie about the constraint, not the logic" pattern --memory-limit
+    ** already uses for flush frequency.
     */
+    uint64_t safetyBufferBytes = safetyBufferGBOverride
+        ? safetyBufferGBOverride * 1024ULL * 1024ULL * 1024ULL
+        : DRIVE_SPACE_LOW_BYTES;
+
     GetDiskFreeSpaceExA(root, &freeAvail, nullptr, nullptr);
-    int64_t available = (int64_t)freeAvail.QuadPart - (int64_t)DRIVE_SPACE_LOW_BYTES;
+    int64_t available = (int64_t)freeAvail.QuadPart - (int64_t)safetyBufferBytes;
     if (available < 0) available = 0;
     InterlockedExchange64(
         (volatile LONG64*)&pSt->driveLedger[(unsigned char)(letter - 'A')],

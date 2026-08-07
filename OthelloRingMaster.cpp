@@ -24,8 +24,14 @@
 #include "InitSolver.h"
 #include "CreateSeedFile.h"
 #include "DriveLedger.h"
+#include "Registry.h"
 #include "LevelSolverThread.h"
 #include "MergeFiles.h"
+#include "FlusherPool.h"
+#include "IMergePool.h"
+#include "ConsolidationMaster.h"
+#include "RegistryAuditor.h"
+#include "DriveSpaceAuditor.h"
 #include "Checkpoint.h"
 #include "StatsListener.h"
 #include "RSFFileName.h"
@@ -69,6 +75,20 @@ static void PrintUsage(const char* prog)
     printf("  --checkpoint-interval-hours H\n");
     printf("                    Mid-level checkpoint interval in hours (fractional allowed, e.g.\n");
     printf("                    0.05 for testing). <= 0 disables periodic checkpointing. [default: 5]\n");
+    printf("  --drive-space-low-gb N\n");
+    printf("                    Override the free-space threshold that triggers a cross-drive\n");
+    printf("                    iMerge -- testing/validation only, to force real iMerge activity\n");
+    printf("                    on a small real drive/level. [default: 20, DRIVE_SPACE_LOW_GB]\n");
+    printf("  --max-file-size-gb N\n");
+    printf("                    Override the consolidation-eligibility size cap -- testing/\n");
+    printf("                    validation only. Must be a comfortable multiple (5-10x) of what an\n");
+    printf("                    individual flushed file actually comes out to under whatever\n");
+    printf("                    --memory-limit is set, or nothing will ever be eligible to merge.\n");
+    printf("                    [default: 100, CONSOLIDATION_SIZE_CAP_GB]\n");
+    printf("  --audit-interval-seconds N\n");
+    printf("                    Override the interval for both background auditors (registry-vs-\n");
+    printf("                    disk, drive-space reconciliation) -- testing/validation only, to\n");
+    printf("                    observe them fire within a short run. [default: 120]\n");
     printf("  --help            Show this help\n\n");
     printf("Auto-resume: if storeDir already contains level files from a previous run,\n");
     printf("  the solver automatically resumes from the first missing level.\n");
@@ -94,6 +114,9 @@ static void ParseArgs(int argc, char* argv[])
     strncpy(g_config.lz4Drives,           "DEFY",                         sizeof(g_config.lz4Drives)           - 1);
     g_config.memoryLimitBytes = 0;   /* 0 = no override, use MM_RECOMMENDED against real free RAM */
     g_config.checkpointIntervalHours = 5.0;
+    g_config.driveSpaceLowGBOverride      = 0;   /* 0 = use DRIVE_SPACE_LOW_GB */
+    g_config.maxFileSizeGBOverride        = 0;   /* 0 = use CONSOLIDATION_SIZE_CAP_GB */
+    g_config.auditIntervalSecondsOverride = 0;   /* 0 = use AUDIT_INTERVAL_SECONDS_DEFAULT */
 
     for (int i = 1; i < argc; i++)
     {
@@ -178,6 +201,21 @@ static void ParseArgs(int argc, char* argv[])
             REQUIRE_NEXT("--checkpoint-interval-hours")
             g_config.checkpointIntervalHours = atof(argv[i]);
         }
+        else if (strcmp(argv[i], "--drive-space-low-gb") == 0)
+        {
+            REQUIRE_NEXT("--drive-space-low-gb")
+            g_config.driveSpaceLowGBOverride = (uint64_t)atoi(argv[i]);
+        }
+        else if (strcmp(argv[i], "--max-file-size-gb") == 0)
+        {
+            REQUIRE_NEXT("--max-file-size-gb")
+            g_config.maxFileSizeGBOverride = (uint64_t)atoi(argv[i]);
+        }
+        else if (strcmp(argv[i], "--audit-interval-seconds") == 0)
+        {
+            REQUIRE_NEXT("--audit-interval-seconds")
+            g_config.auditIntervalSecondsOverride = (uint32_t)atoi(argv[i]);
+        }
         else
         {
             printf("ERROR: unknown argument '%s'\n\n", argv[i]);
@@ -223,14 +261,26 @@ static BOOL WINAPI CtrlHandler(DWORD dwCtrlType)
         LoggerLog("Ctrl+C received - requesting graceful shutdown...\n");
         g_state.terminateThreads       = true;
         g_state.terminateConsolidation = true;
+
+        /* The consolidation master sleeps on this CV until woken -- without
+        ** this it wouldn't notice terminateThreads until its next natural
+        ** wake (flush/consolidator/iMerge completion), which may never come
+        ** once shutdown is underway.
+        */
+        {
+            std::lock_guard<std::mutex> lock(g_state.consolidationMasterMutex);
+            g_state.consolidationMasterWake = true;
+        }
+        g_state.consolidationMasterCV.notify_all();
         return TRUE;
     }
     return FALSE;
 }
 
-/* WaitForPoolIdle moved to Utility/ThreadPool.h -- shared with the new
-** checkpoint orchestration code (Checkpoint.cpp), which needs the identical
-** wait behavior when draining pConsolidationPool for a mid-level checkpoint.
+/* WaitForPoolIdle lives in Utility/ThreadPool.h -- shared with the
+** checkpoint orchestration code (Checkpoint.cpp) and this file's own
+** solve->merge transition, both of which need the identical wait behavior
+** when draining pMergeWriterPool/pFlusherPool/pIMergePool/pConsolidatorPool.
 */
 
 /*
@@ -375,6 +425,14 @@ int main(int argc, char* argv[])
     SolveContext ctx = { &g_config, &g_state, &g_machineInfo };
     SubmitStatsListenerJob(&ctx);
 
+    /* Own dedicated threads for the whole run (not per-level, unlike the
+    ** consolidation master) -- both need a stable PSolveContext, which is
+    ** why they start here rather than inside InitSolver (see InitSolver.cpp's
+    ** comment right above where these were deliberately NOT started).
+    */
+    g_state.registryAuditorThread   = std::thread(RegistryAuditorLoop, &ctx);
+    g_state.driveSpaceAuditorThread = std::thread(DriveSpaceAuditorLoop, &ctx);
+
     /* 4 pieces are pre-placed at game start; each level adds one piece.
     ** The last level (all squares filled) generates no children but counts
     ** terminal boards.
@@ -408,61 +466,48 @@ int main(int argc, char* argv[])
         g_state.checkpointPauseFlag           = false;
         g_state.checkpointRequestedNow        = false;
 
-        /* Reset per-level per-thread state -- EXCEPT mwNextFileIdx when this
-        ** exact level is resuming from a validated mid-level checkpoint
-        ** (Checkpoint.h): InitSolver already restored it from the checkpoint's
-        ** own snapshot, and zeroing it here would make FileTicketNext hand
-        ** out ticket 0 again, colliding with (and silently overwriting) the
-        ** real writer files already sitting on disk from before the pause.
-        ** Every other per-level counter here is either purely a display
-        ** metric or a racy scan-start hint (both harmless to reset, per
-        ** their own existing "hint only" documentation) -- mwNextFileIdx is
-        ** the one genuinely correctness-critical field in this block.
+        /* Reset per-level per-thread state -- EXCEPT the registry/naming
+        ** counter when this exact level is resuming from a validated
+        ** mid-level checkpoint (Checkpoint.h): InitSolver already rebuilt
+        ** the registry from a real disk scan and restored nextFileIdx from
+        ** the checkpoint's own snapshot, and clearing either here would
+        ** make RegistryNextFileIdx hand out index 0 again, colliding with
+        ** (and silently overwriting) the real writer files already sitting
+        ** on disk from before the pause. Every other per-level counter here
+        ** is purely a display metric, harmless to reset.
         */
         bool resumingThisLevelFromCheckpoint = g_state.resumeFromCheckpoint && level == g_state.resumeLevel;
         g_state.consolidationBytesInput = 0;
-        for (int i = 0; i < g_state.numMergeWriters; i++)
-        {
-            g_state.mwBlackFileCount[i]     = 0;
-            g_state.mwWhiteFileCount[i]     = 0;
-            g_state.mwBlackFilesConsumed[i] = 0;
-            g_state.mwWhiteFilesConsumed[i] = 0;
-            g_state.mwBlackConsolidatedUpTo[i] = 0;
-            g_state.mwWhiteConsolidatedUpTo[i] = 0;
-            if (!resumingThisLevelFromCheckpoint)
-            {
-                g_state.mwNextFileIdx[i][RSF_PLAYER_BLACK] = 0;
-                g_state.mwNextFileIdx[i][RSF_PLAYER_WHITE] = 0;
-            }
-            g_state.mwBlackPhysicalFileCount[i] = 0;
-            g_state.mwWhitePhysicalFileCount[i] = 0;
-            g_state.consolScanning[i][RSF_PLAYER_BLACK] = 0;
-            g_state.consolScanning[i][RSF_PLAYER_WHITE] = 0;
-        }
-        /* Background-consolidation worker stats: defensive re-clear, safe
-        ** since the previous level's WaitForPoolIdle(pConsolidationPool)
-        ** below already guarantees every worker has exited (nothing mid-merge)
-        ** at this point.
-        */
-        for (int w = 0; w < CONSOLIDATION_POOL_THREADS; w++)
-        {
-            PConsolidationSlotStats pSlot = ConsolSlot(&g_state, w);
-            pSlot->active     = 0;
-            pSlot->totalBytes = 0;
-            pSlot->doneBytes  = 0;
-        }
-        for (int wi = 0; wi < g_state.numMergeWriters; wi++)
-            for (int p = 0; p < 2; p++)
-                g_state.claimRegistry[wi][p].claimed.clear();
+        if (!resumingThisLevelFromCheckpoint)
+            for (int i = 0; i < g_state.numMergeWriters; i++)
+                RegistryResetForLevel(&g_state, i);
 
-        g_state.terminateConsolidation = false;   /* fresh per level; see solve->merge transition below */
-        StartConsolidationWorkers(&ctx);          /* queue this level's CONSOLIDATION_POOL_THREADS workers */
+        g_state.consolidatorFreeCount = CONSOLIDATOR_POOL_THREADS;
+
+        /* The consolidation master thread genuinely exits its loop whenever
+        ** terminateConsolidation is set (see ConsolidationMasterLoop's doc
+        ** comment) -- the previous level's solve->merge transition below
+        ** set it and joined the thread, so it must be started fresh here
+        ** for every level, including the very first.
+        */
+        g_state.terminateConsolidation = false;
+        g_state.consolidationMasterThread = std::thread(ConsolidationMasterLoop, &ctx);
+
         for (int p = 0; p < 2; p++)
         {
             g_state.imergeActive[p]          = 0;
             g_state.imergeTotalInputBytes[p] = 0;
             g_state.imergeDoneInputBytes[p]  = 0;
+            g_state.imergeFileCount[p]       = 0;
+            g_state.imergeSession[p].active  = false;
         }
+        for (int i = 0; i < g_state.numMergeWriters; i++)
+            for (int p = 0; p < 2; p++)
+            {
+                g_state.mwFlushActive[i][p]     = 0;
+                g_state.mwFlushTotalBytes[i][p] = 0;
+                g_state.mwFlushDoneBytes[i][p]  = 0;
+            }
         for (int i = 0; i < g_state.numMergeDirs; i++)
         {
             g_state.mergeFileBlackCount[i]  = 0;
@@ -492,7 +537,7 @@ int main(int argc, char* argv[])
         ** re-applied so space decisions never consume the last bytes.
         */
         for (int i = 0; i < g_state.numMergeWriters; i++)
-            DriveInitLedger(&g_state, g_state.mwDirectory[i][0]);
+            DriveInitLedger(&g_state, g_state.mwDirectory[i][0], g_config.driveSpaceLowGBOverride);
         for (int i = 0; i < g_state.numMergeDirs; i++)
             DriveInitLedger(&g_state, g_state.mergeDirectory[i][0]);
         DriveInitLedger(&g_state, g_config.storeDrive);
@@ -501,28 +546,25 @@ int main(int argc, char* argv[])
         SubmitGpuFeederJob(&ctx, (uint8_t)level);
         WaitForPoolIdle(g_state.pGPUFeederThreadPool);
 
-        /* Drain any merge-writer jobs still in flight, then flush remaining buffer segments.
-        ** pConsolidationPool must also go idle here, after pMergeWriterPool --
-        ** otherwise a still-running background consolidation could still be
-        ** renaming/deleting/creating writer files at the exact moment
-        ** DoEndOfLevelMerge starts enumerating them. terminateConsolidation is
-        ** set first (not the global terminateThreads -- this isn't a real
-        ** shutdown) so every consolidation worker notices within at most one
-        ** TryConsolidatePair call plus CONSOLIDATION_POLL_INTERVAL_MS, wraps
-        ** up any in-flight merge promptly (abandoning its partial output,
-        ** originals untouched -- see TryConsolidatePair), and returns from
-        ** ConsolidationWorkerLoop -- rather than running arbitrarily long into
-        ** this transition. WaitForPoolIdle blocks until every worker's
-        ** long-running loop-job has actually returned.
+        /* Drain every pool that could still be touching a writer-drive file,
+        ** same order as PerformMidLevelCheckpoint's mid-level drain
+        ** (Checkpoint.cpp) -- here it's a full level-end drain rather than a
+        ** pause, so the consolidation master is stopped and NOT restarted;
+        ** the per-level reset block at the top of the next iteration starts
+        ** a fresh one. Must finish before DoEndOfLevelMerge starts
+        ** enumerating writer-drive files, so nothing is still mid-write or
+        ** mid-consolidate at that moment.
         */
         WaitForPoolIdle(g_state.pMergeWriterPool);
-        g_state.terminateConsolidation = true;
-        WaitForPoolIdle(g_state.pConsolidationPool);
         if (!g_state.terminateThreads)
         {
             g_state.currentPhase = "Flushing buffers";
             FlushAllMergeWriterBuffers(&ctx);
         }
+        WaitForPoolIdle(g_state.pFlusherPool);
+        WaitForPoolIdle(g_state.pIMergePool);
+        ConsolidationMasterStop(&ctx);
+        WaitForPoolIdle(g_state.pConsolidatorPool);
         g_state.levelStats[level].solverNanos =
             ClockNanosSinceStart(&g_state.levelStats[level].startTick);
 

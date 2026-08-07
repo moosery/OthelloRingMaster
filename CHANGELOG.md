@@ -4,6 +4,62 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.0] - 2026-08-06
+
+### Writer-drive registry redesign: replaced all ticket-based merge/consolidation logic
+
+- Live production debugging at level 22 of a real multi-day 6x6 solve found a real,
+  confirmed bug: the old cross-drive-merge re-check compared a raw, ever-incrementing
+  file-ticket counter against a low-water mark advanced only by the merge itself. Ticket
+  churn included every consolidation merge *and* every empty flush attempt -- unrelated to
+  real file count -- so the gap between the two counters could exceed the merge trigger
+  even when the real physical file count was tiny (2-7 files, confirmed directly against
+  the filesystem). This caused far more multi-hour cross-drive merges than needed, tying
+  up a thread the routine flush path also depended on -- plausibly explaining a real
+  ~41-hour near-total GPU stall observed live (confirmed via direct process/GPU-utilization
+  inspection: same process the whole time, zero logged errors, GPU sitting at 6-11%
+  utilization). This was also the second time this project hit the same bug *class* (two
+  counters meant to stay in sync silently drifting apart) -- the first was a July-2026
+  issue in the predecessor design.
+- Replaced every ticket/low-water-mark/claim-registry mechanism wholesale with a single
+  thread-safe **file registry** per writer drive (`Registry.h`, new) that tracks real file
+  identity and reservation state directly -- "how many real files exist right now, and
+  which are in use" is always answered by looking at the registry itself, structurally
+  preventing this bug class from recurring (a per-drive naming counter still exists, but is
+  used exclusively to generate unique filenames -- never consulted for any backlog/trigger
+  decision).
+- Retired the ad-hoc thread spawning and 12-thread polling consolidation pool in favor of
+  four dedicated pools: a **flusher pool** (one job per color per GPU-buffer-full event,
+  `FlusherPool.cpp`/`.h`, new), an **iMerge pool** (one thread per color, triggered only by
+  a real `DriveReserve` failure, never a ticket-gap heuristic, `IMergePool.cpp`/`.h`, new),
+  a **consolidator worker pool**, and a single **event-driven consolidation master thread**
+  (wakes on any flush/consolidator/iMerge completion instead of polling on a timer,
+  `ConsolidationMaster.cpp`/`.h`, new).
+- Added two background auditors, own dedicated threads: a **registry-vs-disk** auditor
+  (`RegistryAuditor.cpp`/`.h`, new; WARNING-severity size-mismatch and stuck-reservation
+  checks) and a **drive-space reconciliation** auditor (`DriveSpaceAuditor.cpp`/`.h`, new;
+  recomputes real available bytes from the OS plus outstanding registry reservations every
+  pass, correcting the drive ledger if it disagrees).
+- Reworked mid-level checkpointing (`Checkpoint.cpp`/`.h`): a checkpoint now fully drains
+  every writer-drive-touching pool before capturing a full integrity manifest
+  (`{filename, color, size}` per real file) straight from the now-quiescent registry.
+  Restart rebuilds the registry from a real directory scan and cross-checks it against the
+  manifest with three independent hard-Fatal rules (missing file, untracked file, size
+  mismatch) rather than trusting stale state.
+- Added three test-only CLI overrides so the whole redesign can be exercised on a small,
+  disposable run instead of only finding out whether it works after another real
+  week-plus level: `--drive-space-low-gb`, `--max-file-size-gb`, `--audit-interval-seconds`.
+- Rewrote the `StatsListener.cpp` STATUS display and the `CONSOL` diagnostic command to
+  read the registry directly instead of walking a ticket range.
+- Retired `FileTicket.h`/`ClaimRegistry.h` (deleted) and every field/constant that existed
+  only to support the old scheme (`mwNextFileIdx`-as-logic, `pConsolUp`/
+  `mwXxxConsolidatedUpTo`, `mwXxxFilesConsumed`, `mwXxxPhysicalFileCount`, `MAX_MERGE_FANIN`
+  as a trigger -- its separate, legitimate file-handle-bounding role survives renamed as
+  `MAX_MERGE_INPUT_FILES`).
+- Major version bump (0.33.9 -> 1.0.0): this touches the entire housekeeping subsystem --
+  every merge/consolidation/flush decision in the solver now goes through the registry --
+  and is a wholesale replacement, not an incremental patch.
+
 ## [0.33.9] - 2026-07-31
 
 ### Added a UniqueOut column to the STATUS query's level history table
