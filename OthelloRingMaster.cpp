@@ -501,8 +501,9 @@ int main(int argc, char* argv[])
             g_state.imergeTotalInputBytes[p] = 0;
             g_state.imergeDoneInputBytes[p]  = 0;
             g_state.imergeFileCount[p]       = 0;
-            g_state.imergeSession[p].active  = false;
         }
+        g_state.spaceRelief.active = false;   /* no relief in progress at a fresh level start */
+        g_state.activeFlushWriters = 0;
         for (int i = 0; i < g_state.numMergeWriters; i++)
             for (int p = 0; p < 2; p++)
             {

@@ -31,8 +31,9 @@
 ** @brief    Writes merge-writer thread ti's currently-accumulated pool data
 **           (both colors, whatever is present -- not gated on "full"; the
 **           caller decides when to call this) to real files. For each
-**           color present: reserves a new registry file (retrying via
-**           IMergeTriggerAndWait if space is short), merges the pool into
+**           color present: reserves a new registry file (driving a
+**           coordinated space-relief event via RelieveSpacePressure if space
+**           is short), merges the pool into
 **           it (MergePoolToWriter/RSFWriter, unchanged mechanics), finishes
 **           the registry node, updates stats, and wakes the consolidation
 **           master. Blocks until both colors are done, then resets this

@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.4"
+#define VERSION "1.0.5"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -459,28 +459,28 @@ typedef struct __RegistryFileNode
 } RegistryFileNode, * PRegistryFileNode;
 
 /*
-** Type:    ImergeColorSession
-** @brief   Per-color "is a cross-drive iMerge session currently running"
-**          coordination -- lets a flush thread that needs relief wait on an
-**          *already-running* session for that color instead of starting a
-**          redundant one, and lets any number of waiters (multiple drives'
-**          flushes can genuinely need relief close together -- see
-**          project_writer_drive_registry_redesign memory's "today's GPU
-**          feeder/buffer architecture" section for why this is a real case,
-**          not a rare corner) be released together when it completes.
-**          std::mutex/std::condition_variable deliberately, to match
-**          ThreadPool's own existing synchronization style (the only other
-**          place in this project's C++ layer that needs wait/notify
-**          semantics, as opposed to plain mutual exclusion, which stays
-**          CRITICAL_SECTION elsewhere in this struct for consistency with
-**          the rest of the solver's Win32-primitive style).
+** Type:    SpaceReliefCoordinator
+** @brief   The single, global "a space-relief event is in progress" gate that
+**          replaced the old per-color imergeSession pair. When any writer-drive
+**          flush can't reserve, exactly one flusher thread becomes the relief
+**          coordinator (sets active=true), and EVERY other flush -- whether it
+**          also failed to reserve (a coalesced retry) or is just starting fresh
+**          (the new-flush gate) -- waits here until the event completes. Making
+**          it one global event, not two independent per-color ones, is what
+**          lets the coordinator quiesce all flushes, pause consolidation, and
+**          sweep BOTH colors off every NVMe drive in one shot -- see
+**          project_writer_drive_registry_redesign memory for the full rationale
+**          (the per-color design could livelock: a flush stuck behind the OTHER
+**          color's space hog could never free enough of its own to proceed).
+**          std::mutex/std::condition_variable deliberately, matching
+**          ThreadPool's own wait/notify style.
 */
-typedef struct __ImergeColorSession
+typedef struct __SpaceReliefCoordinator
 {
     bool                     active;
     std::mutex                m;
     std::condition_variable   cv;
-} ImergeColorSession;
+} SpaceReliefCoordinator;
 
 /*
 ** Type:    ConsolidatorSlotStats
@@ -639,23 +639,27 @@ typedef struct __OthelloRingMasterState
     volatile LONG  nextFileIdx[MAX_WRITERS];
 
     /*
-    ** Per-color cross-drive iMerge session coordination (see
-    ** ImergeColorSession above and the iMerge pool, IMergePool.h).
-    ** Indexed by RSF_PLAYER_WHITE(0)/RSF_PLAYER_BLACK(1) -- iMerge is a
-    ** per-color operation now (each color's session independently gathers
-    ** across *all* NVMe drives), not a per-writer one, so this replaces the
-    ** old imergeCS single lock spanning both colors.
+    ** The single global space-relief coordinator (see SpaceReliefCoordinator
+    ** above and the flusher/iMerge pools). One relief event at a time: when a
+    ** flush can't reserve, it either becomes the coordinator or waits here.
+    ** activeFlushWriters is the count of flushes currently mid-WRITE (bracketed
+    ** around MergePoolToWriter only, NOT the reserve/relief wait) -- the
+    ** coordinator drains this to zero (all in-flight writes finished, drives
+    ** quiescent) before sweeping. Distinct from mwFlushActive, which stays 1
+    ** across the whole flush including a relief wait and so must NOT be used
+    ** for the drain (a flush blocked in relief would wait on itself).
     */
-    ImergeColorSession  imergeSession[2];
+    SpaceReliefCoordinator  spaceRelief;
+    volatile LONG           activeFlushWriters;
 
     /*
     ** Per-color live intermediate-merge progress (written by the iMerge pool,
     ** read by the stats thread). Indexed by RSF_PLAYER_WHITE(0)/
-    ** RSF_PLAYER_BLACK(1) -- per-color now, not per-writer, matching
-    ** imergeSession above (a single iMerge session for a color spans every
-    ** NVMe drive at once). imergeActive[p] is set to 1 before the merge and
-    ** 0 after; the other fields are populated before imergeActive is set so
-    ** the stats reader always sees consistent data.
+    ** RSF_PLAYER_BLACK(1) -- a single iMerge for a color spans every NVMe drive
+    ** at once, and both colors now run together under one relief event.
+    ** imergeActive[p] is set to 1 before the merge and 0 after; the other
+    ** fields are populated before imergeActive is set so the stats reader
+    ** always sees consistent data.
     */
     volatile int      imergeActive[2];
     volatile int64_t  imergeTotalInputBytes[2];

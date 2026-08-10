@@ -46,8 +46,9 @@ void ConsolidationMasterLoop(PSolveContext pCtx);
 **           consolidator worker finishing (frees a slot, and its own output
 **           may itself be eligible for further consolidation), and an
 **           iMerge finishing (files it didn't take may now be worth
-**           examining). See ImergeColorSession (OthelloTypes.h) for the
-**           analogous per-color wake used by the iMerge pool.
+**           examining -- note the space-relief coordinator stops and restarts
+**           this master around a sweep, see SpaceReliefCoordinator in
+**           OthelloTypes.h and RelieveSpacePressure in IMergePool.cpp).
 ** @param    pCtx - solve context
 */
 void ConsolidationMasterWake(PSolveContext pCtx);

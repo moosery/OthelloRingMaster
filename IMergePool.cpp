@@ -27,57 +27,138 @@
 #include "DriveLedger.h"
 #include "RSFFileName.h"
 #include "RingStoreFile.h"
+#include "ThreadPool.h"
 #include "Logger.h"
 #include "Mem.h"
 #include <windows.h>
 #include <mutex>
+#include <thread>
 
 /* Functions */
 
 /*
-** Function: IMergeTriggerAndWait
+** Function: SpaceReliefGateWait
 ** @brief    See IMergePool.h.
 */
-void IMergeTriggerAndWait(PSolveContext pCtx, int player)
+void SpaceReliefGateWait(PSolveContext pCtx)
 {
-    POthelloRingMasterState pSt      = pCtx->pState;
-    ImergeColorSession&     session  = pSt->imergeSession[player];
+    POthelloRingMasterState pSt = pCtx->pState;
+    std::unique_lock<std::mutex> lock(pSt->spaceRelief.m);
+    pSt->spaceRelief.cv.wait(lock, [pSt] { return !pSt->spaceRelief.active; });
+}
 
-    std::unique_lock<std::mutex> lock(session.m);
-    if (!session.active)
+/*
+** Function: RunBothColorIMerge
+** @brief    Dispatches both colors' IMergeRunSession onto pIMergePool and
+**           waits for both -- the parallel, cross-drive both-color sweep at
+**           the heart of a relief event. The two run genuinely concurrently
+**           (one iMerge-pool thread each); they gather disjoint colors, so
+**           they never contend for the same file. Only ever called by the
+**           relief coordinator, with new flushes gated and consolidation
+**           already stopped, so the registry is quiescent -- no other thread
+**           mutates it during the sweep.
+** @param    pCtx - solve context
+*/
+static void RunBothColorIMerge(PSolveContext pCtx)
+{
+    POthelloRingMasterState pSt = pCtx->pState;
+
+    /* events[] lives on this stack; the jobs SetEvent it and we block on it
+    ** before returning, so the by-reference capture is valid throughout --
+    ** same pattern FlushMergeWriterBuffer uses for its two flusher jobs.
+    */
+    HANDLE events[2];
+    events[RSF_PLAYER_WHITE] = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    events[RSF_PLAYER_BLACK] = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+
+    pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
+        { IMergeRunSession(pCtx, RSF_PLAYER_WHITE); SetEvent(events[RSF_PLAYER_WHITE]); });
+    pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
+        { IMergeRunSession(pCtx, RSF_PLAYER_BLACK); SetEvent(events[RSF_PLAYER_BLACK]); });
+
+    WaitForMultipleObjects(2, events, TRUE, INFINITE);
+    CloseHandle(events[RSF_PLAYER_WHITE]);
+    CloseHandle(events[RSF_PLAYER_BLACK]);
+}
+
+/*
+** Function: RelieveSpacePressure
+** @brief    See IMergePool.h.
+*/
+PRegistryFileNode RelieveSpacePressure(PSolveContext pCtx, int ti, int player,
+                                        const char* path, char driveLetter, int64_t reserveBytes)
+{
+    POthelloRingMasterState pSt = pCtx->pState;
+
     {
-        /* No session running for this color -- claim it and dispatch the
-        ** REAL work onto pIMergePool. Critical: this function must not run
-        ** IMergeRunSession itself on the calling thread -- the caller is a
-        ** flusher pool thread, and running iMerge inline on it would
-        ** recreate the exact starvation this whole redesign exists to fix
-        ** (housekeeping consuming flush's own thread capacity). The
-        ** dispatched job clears `active` and notifies every waiter
-        ** (including this call, below) once it's genuinely done.
-        */
-        session.active = true;
-        lock.unlock();
-
-        pSt->pIMergePool->QueueJob([pCtx, player](uint32_t)
+        std::unique_lock<std::mutex> lock(pSt->spaceRelief.m);
+        if (pSt->spaceRelief.active)
         {
-            IMergeRunSession(pCtx, player);
-            ImergeColorSession& s = pCtx->pState->imergeSession[player];
-            {
-                std::lock_guard<std::mutex> l(s.m);
-                s.active = false;
-            }
-            s.cv.notify_all();
-        });
-
-        lock.lock();
+            /* Coalesce: a relief event is already running. Wait for it to
+            ** finish, then let the caller retry its own RegistryReserveNew --
+            ** which now succeeds, since the coordinator swept the drives.
+            */
+            pSt->spaceRelief.cv.wait(lock, [pSt] { return !pSt->spaceRelief.active; });
+            return nullptr;
+        }
+        /* Become the coordinator. From here, SpaceReliefGateWait blocks every
+        ** other flush (new or reserve-failed) until we clear this below.
+        */
+        pSt->spaceRelief.active = true;
     }
 
-    /* Whether we just dispatched a new session or found one already
-    ** running, wait here until it completes -- a true broadcast wait, so
-    ** any number of simultaneous callers for this color are released
-    ** together.
+    /* (1) Drain: wait for every in-flight WRITE to finish. New flushes are now
+    ** gated, so activeFlushWriters only falls -- it always reaches zero. Once
+    ** it does, the drives are quiescent AND every finished flush has reclaimed
+    ** its worst-case over-reservation (that reclaim alone may free enough).
     */
-    session.cv.wait(lock, [&session] { return !session.active; });
+    while (InterlockedCompareExchange(&pSt->activeFlushWriters, 0, 0) != 0)
+        Sleep(5);
+
+    /* (2) Re-check: try the caller's reservation before any sweep -- the
+    ** reclaimed slack from the drain is often enough on its own (the drive
+    ** only looked "full" because of pessimistic in-flight reservations).
+    */
+    PRegistryFileNode node = RegistryReserveNew(pSt, ti, player, REGISTRY_RESERVED_FLUSH,
+                                                 path, driveLetter, reserveBytes);
+    if (!node)
+    {
+        /* (3) Genuinely full of real finished files -- sweep. Stop consolidation
+        ** first (abandon in-flight work so its reserved files/space are released
+        ** and become gatherable), wait for its workers to actually be idle, then
+        ** move BOTH colors off every NVMe drive in parallel, then restart the
+        ** consolidation master. Same stop/restart machinery as the level
+        ** boundary, re-entered mid-level -- safe because a relief is a global
+        ** singleton (only one runs at a time), so nothing else is stopping or
+        ** starting the master concurrently.
+        */
+        LoggerLog("RelieveSpacePressure: %c: reclaim wasn't enough, sweeping both colors off NVMe...\n",
+                  driveLetter);
+        ConsolidationMasterStop(pCtx);
+        WaitForPoolIdle(pSt->pConsolidatorPool);
+
+        RunBothColorIMerge(pCtx);
+
+        pSt->terminateConsolidation = false;
+        pSt->consolidationMasterThread = std::thread(ConsolidationMasterLoop, pCtx);
+
+        node = RegistryReserveNew(pSt, ti, player, REGISTRY_RESERVED_FLUSH,
+                                   path, driveLetter, reserveBytes);
+        if (!node)
+            Fatal(FATAL_DRIVE_SPACE,
+                  "RelieveSpacePressure: %c: still cannot reserve %.2f GB after a full "
+                  "both-color sweep to the medium/store drive -- genuinely out of space",
+                  driveLetter, reserveBytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    /* Done -- open the gate and release every coalesced/gated waiter together. */
+    {
+        std::lock_guard<std::mutex> lock(pSt->spaceRelief.m);
+        pSt->spaceRelief.active = false;
+    }
+    pSt->spaceRelief.cv.notify_all();
+
+    return node;
 }
 
 /*

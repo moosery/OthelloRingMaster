@@ -61,9 +61,10 @@ static void buildWriterFilePath(char* out, size_t outSize, PSolveContext pCtx,
 /*
 ** Function: FlushOneColor
 ** @brief    Writes one color's currently-accumulated pool for writer ti to
-**           a real, registry-tracked file. Retries (via IMergeTriggerAndWait)
-**           if space is short, per this project's simple "trigger and
-**           re-check" retry loop -- see IMergePool.h.
+**           a real, registry-tracked file. If space is short it drives a
+**           coordinated space-relief event (RelieveSpacePressure) and retries,
+**           and it gates on any relief already in progress before starting --
+**           see IMergePool.h.
 ** @param    pCtx   - solve context
 ** @param    ti     - writer drive index
 ** @param    player - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
@@ -101,14 +102,31 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
     char     path[MAX_FULL_PATH_NAME];
     buildWriterFilePath(path, sizeof(path), pCtx, ti, player, fileIdx);
 
+    /* Gate: if a space-relief event is in progress, wait for it before even
+    ** attempting to reserve -- otherwise this write could start mid-relief and
+    ** keep the coordinator's drain from ever reaching zero (see
+    ** SpaceReliefGateWait / the design memory's Finding 2). While gated, this
+    ** flusher thread (and, upstream, its merge-writer thread and the GPU
+    ** feeder) stall -- the intended, acceptable pause for a relief's duration.
+    */
+    SpaceReliefGateWait(pCtx);
+
     PRegistryFileNode pNode = nullptr;
     while (!pNode)
     {
         pNode = RegistryReserveNew(pSt, ti, player, REGISTRY_RESERVED_FLUSH,
                                     path, driveLetter, reserveBytes);
         if (!pNode)
-            IMergeTriggerAndWait(pCtx, player);   /* re-checks/retries via the while loop */
+            pNode = RelieveSpacePressure(pCtx, ti, player, path, driveLetter, reserveBytes);
     }
+
+    /* Count this as an active WRITE for its whole disk-holding duration. The
+    ** relief coordinator drains activeFlushWriters to zero before a sweep
+    ** (Finding 1) -- bracketed around the real write/finish only, never the
+    ** reserve/relief wait above, so a flush blocked in relief can't wedge the
+    ** drain by waiting on itself. Decremented on every exit path below.
+    */
+    InterlockedIncrement((volatile LONG*)&pSt->activeFlushWriters);
 
     RSFWriter* pw = compressMW ? RSFWriterOpenZ(path) : RSFWriterOpen(path);
     MergePoolToWriter(pw, mwBuf, segCount, segOffsets, segSizes, segBoards,
@@ -124,6 +142,7 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
         DeleteFileA(path);
         RegistryAbandonNew(pSt, ti, pNode);
         DriveReclaim(pSt, driveLetter, reserveBytes);
+        InterlockedDecrement((volatile LONG*)&pSt->activeFlushWriters);
         return;
     }
 
@@ -140,6 +159,7 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
     pSt->writerDriveStats[ti].levelBytesUncompressed += uncompressedBytes;
 
     ConsolidationMasterWake(pCtx);
+    InterlockedDecrement((volatile LONG*)&pSt->activeFlushWriters);
 }
 
 /*

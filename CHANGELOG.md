@@ -4,6 +4,46 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.5] - 2026-08-09
+
+### Coordinated space relief -- fixes a latent iMerge livelock, and does both colors together
+
+The v1.0.0 space-relief path was per-color: a flush that couldn't reserve triggered an
+iMerge for *its own* color only. That has a latent livelock -- if the OTHER color is the
+space hog, sweeping your own (small) color off never frees enough, and once you've swept
+all of your own files you spin triggering no-op iMerges forever, wedging the flush and the
+whole pipeline. It also produces lots of small, frequent iMerges when the space race
+favors one color. Replaced it with a single, coordinated, global **space-relief event**
+(design + full deadlock/livelock analysis in `IMergePool.h`/`.cpp` and the design memory):
+
+- When a flush can't reserve, exactly one flusher thread becomes the **coordinator**;
+  all other flushes -- reserve-failures *and* fresh starts -- wait on a global gate
+  (`SpaceReliefGateWait`), so no write starts mid-relief. That backs the merge-writer
+  threads up and stalls the GPU feeder, deliberately, for the relief's duration.
+- The coordinator **drains all in-flight writes to zero** (a new `activeFlushWriters`
+  counter bracketed around the actual write only -- deliberately NOT `mwFlushActive`, which
+  stays set across a relief wait and would make a blocked flush wait on itself). Draining
+  also reclaims every finished flush's worst-case over-reservation, which is frequently
+  enough on its own -- so it **re-checks the reservation before any sweep**, and skips the
+  sweep entirely when the reclaim covered it.
+- Only if still full: **pause consolidation** (abandon in-flight work so its reserved files
+  are released and gatherable), sweep **both** colors off every NVMe drive in parallel
+  (`RunBothColorIMerge` -> two concurrent `IMergeRunSession`s, disjoint colors), restart
+  consolidation, then reserve and return. Space is fungible, so freeing both colors always
+  makes room regardless of which one is the hog -- no livelock.
+- Retired the per-color `IMergeTriggerAndWait` / `imergeSession[2]` / `ImergeColorSession`
+  in favor of the single `SpaceReliefCoordinator`. `IMergeRunSession` (the actual
+  cross-drive merge mechanics) is unchanged.
+
+Coordination is deadlock-free by construction: the coordinator only ever waits on things
+that run on *other* pools and always make progress (draining writers finish their disk I/O;
+the both-color sweep runs on the iMerge pool; consolidation shutdown runs on the master +
+consolidator pools), and it holds no lock across any of that work. Verified against
+double-merge (both colors gather disjoint files; each swept input is deleted and
+deregistered so it can't be gathered again; the sweep runs only when the registry is
+quiescent) and reservation accounting (exactly one reserve per flush file, reconciled on
+every exit path).
+
 ## [1.0.4] - 2026-08-09
 
 ### Fix iMerge STATUS progress showing >100% (unit mismatch)

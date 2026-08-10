@@ -2,21 +2,19 @@
 ** Filename:  IMergePool.h
 **
 ** Purpose:
-**   Declares the cross-drive intermediate merge pool -- replaces
-**   DoCrossDriveIntermediateMerge (MergeFiles.cpp, retired). Two dedicated
-**   threads per trigger (one per color), so black and white sessions run
-**   genuinely concurrently (no imergeCS-style single lock spanning both
-**   colors). Triggered ONLY by real space pressure (DriveReserve/
-**   DriveAvailable failure) -- no fanin/ticket-based trigger. See
-**   project_writer_drive_registry_redesign memory for the full design.
-**
-** Notes:
-**   A flush that can't get space for its new output calls
-**   IMergeTriggerAndWait, which either starts a fresh session for that
-**   color or, if one is already running, just waits on it
-**   (OthelloRingMasterState.imergeSession[player]) -- multiple simultaneous
-**   waiters is a real case (see that struct's own comment), not a rare
-**   corner, so this is a true broadcast wait, not built assuming one caller.
+**   Declares the coordinated cross-drive space-relief path -- replaces
+**   DoCrossDriveIntermediateMerge (MergeFiles.cpp, retired) and the earlier
+**   per-color IMergeTriggerAndWait design. When a writer-drive flush can't
+**   reserve space, exactly ONE flusher thread runs a single global relief
+**   event (SpaceReliefCoordinator, OthelloTypes.h): it gates all other
+**   flushes, drains in-flight writes, and -- only if the reclaimed slack from
+**   that drain isn't enough -- pauses consolidation and sweeps BOTH colors off
+**   every NVMe drive to the medium/store drive in parallel. See
+**   project_writer_drive_registry_redesign memory for the full design and the
+**   detailed deadlock/livelock analysis behind it (the two subtle
+**   requirements: a WRITE-only "active writers" signal distinct from
+**   mwFlushActive, and a gate every flush checks before reserving so the drain
+**   can actually reach zero).
 */
 
 #pragma once
@@ -27,34 +25,53 @@
 /* Functions */
 
 /*
-** Function: IMergeTriggerAndWait
-** @brief    Ensures a cross-drive iMerge session is running (or already
-**           running) for the given color, and blocks the caller until that
-**           session completes. If a session for this color is already in
-**           flight, does not start a redundant one -- just waits on the
-**           existing session's completion (ImergeColorSession, OthelloTypes.h).
-**           Otherwise dispatches a new session onto pIMergePool and waits
-**           for it. Does NOT itself re-check whether space is now
-**           sufficient after returning -- the caller (flush) is responsible
-**           for re-checking and calling this again if still insufficient
-**           (a simple retry loop, not a special case -- see design memory).
-** @param    pCtx   - solve context
-** @param    player - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE -- which color needs relief
+** Function: SpaceReliefGateWait
+** @brief    Called at the top of a flush, BEFORE it tries to reserve: if a
+**           space-relief event is currently in progress, block here until it
+**           finishes. This is what keeps new flushes from starting a fresh
+**           write mid-relief -- without it the GPU could keep feeding the
+**           other drive, new writes would keep starting, and the coordinator's
+**           "wait for all writes to finish" drain would never reach zero
+**           (livelock). While every flush is gated, the merge-writer threads
+**           back up and the GPU feeder stalls -- the intended, acceptable
+**           stall for the duration of a relief.
+** @param    pCtx - solve context
 */
-void IMergeTriggerAndWait(PSolveContext pCtx, int player);
+void SpaceReliefGateWait(PSolveContext pCtx);
+
+/*
+** Function: RelieveSpacePressure
+** @brief    Called by a flush whose RegistryReserveNew just failed. Either
+**           becomes the single relief coordinator or (if one is already
+**           running) waits for it to finish. The coordinator: gates new
+**           flushes, drains all in-flight writes to zero, re-tries the
+**           caller's reservation (the drained writers' worst-case reclaims may
+**           already be enough -- no sweep needed), and only if that still
+**           fails pauses consolidation, runs a both-color cross-drive sweep,
+**           restarts consolidation, and reserves again.
+** @param    pCtx         - solve context
+** @param    ti           - writer drive index of the caller's flush
+** @param    player       - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    path         - the caller's already-built output file path
+** @param    driveLetter  - the caller's writer-drive letter
+** @param    reserveBytes - the caller's worst-case reservation size
+** @return   A reserved node for the caller's file when this call did the
+**           coordinating (caller writes into it), or nullptr for a coalesced
+**           waiter (caller simply retries RegistryReserveNew in its own loop,
+**           which now succeeds -- the drive has been swept).
+*/
+PRegistryFileNode RelieveSpacePressure(PSolveContext pCtx, int ti, int player,
+                                        const char* path, char driveLetter, int64_t reserveBytes);
 
 /*
 ** Function: IMergeRunSession
-** @brief    The actual cross-drive merge work for one color: reserve every
-**           currently-unreserved file for that color across all NVMe
-**           drives, move (single file) or merge (multiple) to the medium
-**           drive (fallback: store drive if medium is full), delete
-**           sources, unreserve, trigger the consolidation master. Runs on
-**           a pIMergePool worker thread; not for direct external use
-**           outside IMergePool.cpp/IMergeTriggerAndWait -- exposed here
-**           only so IMergePool.cpp's dispatch site and this declaration
-**           stay in the same header pair as everything else in this file's
-**           public surface.
+** @brief    The actual cross-drive merge work for ONE color: reserve every
+**           currently-unreserved file for that color across all NVMe drives,
+**           move (single file) or k-way merge (multiple) to the medium drive
+**           (fallback: store drive if medium is full), delete + deregister the
+**           sources. Run on a pIMergePool worker thread by the relief
+**           coordinator (both colors dispatched together); not a standalone
+**           trigger.
 ** @param    pCtx   - solve context
 ** @param    player - which color this session handles
 */

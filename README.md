@@ -46,8 +46,9 @@ Store drive (Y:)
          │              completion, dispatches bounded merges of small registry-eligible
          │              writer files onto a worker pool -- shrinks what DoEndOfLevelMerge
          │              has to process]
-         │  [NVMe low (registry-derived DriveReserve failure): iMerge pool clears real
-         │              space pressure for that color → imerge files on F:]
+         │  [NVMe full (a flush can't reserve): one coordinated space-relief event --
+         │              gate all flushes, drain in-flight writes, and (if still full) sweep
+         │              BOTH colors off D:/E: in parallel → imerge files on F: (→ Y: if F: full)]
          │
     DoEndOfLevelMerge (parallel: black thread + white thread)
       ├─ black: merge remaining pool segments + writer/imerge files, straight into
@@ -131,15 +132,29 @@ drift. Four dedicated thread pools replace the old ad-hoc thread spawning and 12
 polling pool:
 
 - **Flusher pool** -- one job per color per GPU-buffer-full event; reserves a new
-  registry node before writing, retries via the iMerge pool on real space pressure.
-- **iMerge pool** -- one thread per color, triggered only by a real `DriveReserve`
-  failure (never by a ticket-gap heuristic); clears every real unreserved file for that
-  color to the medium drive.
+  registry node before writing. If it can't reserve, it drives a coordinated **space-relief
+  event** (below) and retries.
+- **iMerge pool** -- the cross-drive sweep: gathers every unreserved file for a color across
+  all NVMe drives and k-way-merges (deduping across drives) to the medium drive, falling
+  back to the store drive if the medium is full. Runs as part of a space-relief event, not
+  on a standalone per-color trigger.
 - **Consolidator worker pool** -- runs the actual bounded merges the master thread below
   dispatches to it.
 - **Consolidation master thread** -- a single event-driven thread (not a poller) that
   wakes on any flush/consolidator/iMerge completion, scans the registry for eligible
   files, and dispatches bounded consolidation work onto the consolidator pool.
+
+**Space relief (v1.0.5)** is a single, coordinated, global event rather than an independent
+per-color trigger. When a flush can't reserve, exactly one flusher thread becomes the
+coordinator and: (1) **gates** every other flush (new or reserve-failed) so no write starts
+mid-relief -- which stalls the GPU feeder, deliberately; (2) **drains** all in-flight writes
+to zero, so the drives go quiescent and each finished flush reclaims its worst-case
+over-reservation -- often enough on its own that no sweep is needed; (3) only if it's still
+full, **pauses consolidation** (freeing its in-flight files), sweeps **both** colors off
+every NVMe drive in parallel, and restarts consolidation. Making it one global both-color
+event fixes a livelock the earlier per-color design allowed -- a flush stuck behind the
+*other* color's space hog could never free enough of its own color to proceed. See
+`IMergePool.h`/`.cpp` and the design memory for the full deadlock/livelock analysis.
 
 Two background auditors (own dedicated threads, `--audit-interval-seconds` to tune) catch
 drift early rather than only at the next checkpoint: a **registry-vs-disk** auditor
@@ -458,7 +473,7 @@ OthelloRingMaster/
   Registry.h                    Per-writer-drive file registry (v1.0.0) -- the single source
                                   of truth for real file identity + reservation state
   FlusherPool.cpp / .h          Flusher pool: GPU-buffer-full → real writer-drive file
-  IMergePool.cpp / .h           iMerge pool: real space-pressure relief, one thread per color
+  IMergePool.cpp / .h           Coordinated space-relief event (gate + drain + both-color cross-drive sweep)
   ConsolidationMaster.cpp / .h  Event-driven consolidation master + worker pool dispatch
   RegistryAuditor.cpp / .h      Background registry-vs-disk drift auditor
   DriveSpaceAuditor.cpp / .h    Background drive-space-ledger reconciliation auditor
