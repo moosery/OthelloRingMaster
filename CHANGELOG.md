@@ -4,6 +4,37 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.2] - 2026-08-09
+
+### Post-first-run fixes from the v1.0.1 shakedown
+
+v1.0.1 launched and ran a fresh 6x6 test correctly (every `UniqueOut` matched the known-good
+store exactly through L14), which surfaced three things to clean up:
+
+- **Drive-space auditor was far too twitchy.** Its `free = OS_free - buffer - reservations`
+  formula double-counts a flush's in-flight bytes: `OS_free` reflects what's been written so
+  far, but the reservation still counts the file's full worst-case size, so it reported a
+  spurious shortfall and "corrected down / up" every 10s during active I/O. Now it (a) skips a
+  writer drive entirely while it has an in-flight write outstanding -- the ledger's own
+  reserve/reclaim accounting is trusted during active I/O, reconciling only in the quiescent
+  gaps -- and (b) applies a deadband (`DRIVE_AUDIT_TOLERANCE_BYTES`, 4 GB) so filesystem
+  rounding and small timing jitter no longer trigger corrections. Only a real, sizable
+  external change (a file copied onto / deleted from the drive) now moves the ledger.
+- **Restored per-worker consolidation progress in STATUS.** The v1.0.0 rewrite had collapsed
+  it to a bare "Consol workers busy: N/8" gauge because the event-driven design dropped the
+  old `ConsolidationSlotStats`. Added a lightweight `ConsolidatorSlotStats consolSlot[]`
+  indexed by the consolidator pool's worker-thread index; `ConsolidatorWorkerBody` publishes
+  drive/color/file-count/total and live byte progress into it (feeding `KWayMergeFiles`'s
+  progress pointer), and STATUS again prints a `Consol  D: black (w3): X / Y GB (Z%) @ ...
+  MB/s ... ETA ... files: N` line per active worker. CONSOL still gives the full per-file
+  registry dump.
+- **Registry-vs-disk auditor false positive during the end-of-level merge.** `DoEndOfLevelMerge`
+  deleted each consumed writer file without removing its registry node, so the auditor flagged
+  the stale nodes ("in registry but missing on disk") until the next `RegistryResetForLevel`.
+  It now removes each writer-drive input's node as the file is deleted (new
+  `RegistryRemoveByFilename`), keeping the registry truthful; no data was ever at risk (the
+  files were legitimately merged into the store).
+
 ## [1.0.1] - 2026-08-09
 
 ### Fix v1.0.0 build errors and a startup stack-overflow crash

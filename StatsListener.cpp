@@ -412,18 +412,46 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         }
     }
 
-    /* Background consolidation: the event-driven master (ConsolidationMaster.h)
-    ** dispatches bounded merges onto pConsolidatorPool as candidates appear --
-    ** no per-worker live byte-progress is tracked (nothing polls per-pair on
-    ** a timer anymore), so this is a simple busy/free gauge rather than a
-    ** per-worker GB/ETA line. Use CONSOL for a real-time list of every
-    ** writer-drive file's own reservation state.
+    /* Active background consolidation -- one line per busy consolidator worker
+    ** (ConsolidatorWorkerBody publishes into consolSlot[], indexed by its
+    ** pConsolidatorPool thread index). Same "records popped x 16 bytes"
+    ** uncompressed-equivalent convention as every other progress line, not a
+    ** literal disk-write rate. A summary busy/free count leads, then the
+    ** per-worker detail; CONSOL still gives the full per-file registry dump.
     */
     {
         int free = (int)InterlockedCompareExchange((volatile LONG*)&pSt->consolidatorFreeCount, 0, 0);
         n += snprintf(buf + n, bufSize - n,
                       "  Consol workers busy    : %d / %d\n",
                       CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
+
+        uint64_t nowMs = GetTickCount64();
+        static const char* kConsolPlayerNames[2] = { "white", "black" };
+        for (int w = 0; w < CONSOLIDATOR_POOL_THREADS; w++)
+        {
+            const ConsolidatorSlotStats* cs = &pSt->consolSlot[w];
+            if (!cs->active) continue;
+
+            double   doneGB  = cs->doneBytes  / (1024.0 * 1024.0 * 1024.0);
+            double   totalGB = cs->totalBytes / (1024.0 * 1024.0 * 1024.0);
+            double   pct     = (cs->totalBytes > 0)
+                               ? 100.0 * (double)cs->doneBytes / (double)cs->totalBytes
+                               : 0.0;
+            uint64_t elapsedMs = nowMs - cs->startTickMs;
+            double   mbps      = (elapsedMs > 200 && cs->doneBytes > 0)
+                               ? (double)cs->doneBytes / (1024.0 * 1024.0) / (elapsedMs / 1000.0)
+                               : 0.0;
+            char detail[28];
+            snprintf(detail, sizeof(detail), "%c: %s (w%d)",
+                     pSt->mwDirectory[cs->writerIdx][0], kConsolPlayerNames[cs->player], w);
+            char etaStr[16];
+            FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
+            n += snprintf(buf + n, bufSize - n,
+                          "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
+                          "   files: %d\n",
+                          "Consol", detail, doneGB, totalGB, pct, mbps,
+                          MbpsToBoardsPerSec(mbps), etaStr, cs->fileCount);
+        }
     }
 
     /* Active end-of-level merge (per player, runs concurrently for white and black) */

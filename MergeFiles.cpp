@@ -1752,6 +1752,20 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
             if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
                 DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
             DeleteFileA(pd.inputPaths[i]);
+
+            /* If this input lived on a writer drive, drop its registry node
+            ** too, so the registry stays truthful the instant the file leaves
+            ** disk -- otherwise the registry-vs-disk auditor flags the stale
+            ** node until the next level's RegistryResetForLevel. Inputs on the
+            ** medium/store drives have no registry node; the loop simply finds
+            ** no match for them.
+            */
+            for (int w = 0; w < pSt->numMergeWriters; w++)
+                if (pSt->mwDirectory[w][0] == pd.inputPaths[i][0])
+                {
+                    RegistryRemoveByFilename(pSt, w, pd.inputPaths[i]);
+                    break;
+                }
         }
 
         pd.actualBytes = actual;

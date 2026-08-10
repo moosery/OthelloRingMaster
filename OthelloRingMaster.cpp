@@ -483,6 +483,8 @@ int main(int argc, char* argv[])
                 RegistryResetForLevel(&g_state, i);
 
         g_state.consolidatorFreeCount = CONSOLIDATOR_POOL_THREADS;
+        for (int w = 0; w < CONSOLIDATOR_POOL_THREADS; w++)
+            g_state.consolSlot[w] = {};   /* clear live per-worker consolidation progress (STATUS display) */
 
         /* The consolidation master thread genuinely exits its loop whenever
         ** terminateConsolidation is set (see ConsolidationMasterLoop's doc

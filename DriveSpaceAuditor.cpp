@@ -29,6 +29,14 @@
 #include "Logger.h"
 #include <windows.h>
 
+/* Discrepancies smaller than this are treated as agreement (see
+** reconcileOneDrive's deadband). Sized to swallow filesystem rounding and the
+** small timing jitter between the running ledger and a live OS free-space
+** query, while still catching a real external file copy/delete (which is
+** typically much larger). Tunable if it proves too tight or too loose.
+*/
+static const int64_t DRIVE_AUDIT_TOLERANCE_BYTES = 4LL * 1024 * 1024 * 1024;
+
 /* Functions */
 
 /*
@@ -82,6 +90,22 @@ static void reconcileOneDrive(PSolveContext pCtx, char driveLetter, int writerId
         LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
     }
 
+    /* Skip while a writer drive has an in-flight write outstanding. OS free
+    ** space reflects the bytes written SO FAR, but the reservation counts the
+    ** file's full worst-case size, so realAvailable would subtract those
+    ** in-flight bytes twice and report a spurious shortfall -- every pass,
+    ** for the whole duration of a big flush. During active I/O the ledger's
+    ** own reserve/reclaim accounting is trusted; reconcile only in the
+    ** quiescent gaps between flushes (which is also when an external change
+    ** would actually be noticeable). This was the main source of the
+    ** "correcting down / correcting up" churn seen on the first real run.
+    */
+    if (writerIdx >= 0 && outstandingReservations > 0)
+    {
+        wasHigherLastPass = false;
+        return;
+    }
+
     /* Same safety buffer the ledger itself was seeded with (DriveInitLedger,
     ** DriveLedger.h) -- writer drives only respect --drive-space-low-gb,
     ** matching InitSolver.cpp's own convention, so this auditor never
@@ -97,7 +121,14 @@ static void reconcileOneDrive(PSolveContext pCtx, char driveLetter, int writerId
     int64_t ledgerValue = DriveAvailable(pSt, driveLetter);
     int64_t diff        = realAvailable - ledgerValue;   /* positive = real has more room than the ledger thinks */
 
-    if (diff == 0)
+    /* Deadband: treat sub-threshold differences as agreement. Filesystem
+    ** rounding and small ledger-vs-live-query timing jitter routinely produce
+    ** fractional-GB differences that are not real drift; correcting them just
+    ** spams the log and churns the ledger. Only a sizable, genuine divergence
+    ** (an externally copied/deleted file) is worth acting on.
+    */
+    int64_t absDiff = (diff < 0) ? -diff : diff;
+    if (absDiff < DRIVE_AUDIT_TOLERANCE_BYTES)
     {
         wasHigherLastPass = false;
         return;

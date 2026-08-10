@@ -22,6 +22,7 @@
 #include "MergeFiles.h"
 #include "DriveLedger.h"
 #include "RSFFileName.h"
+#include "RingStoreFile.h"
 #include "Logger.h"
 #include "Mem.h"
 #include <windows.h>
@@ -87,8 +88,10 @@ static void buildConsolOutputPath(char* out, size_t outSize, PSolveContext pCtx,
 ** @param    outNode  - the reserved new-output node (RegistryReserveNew)
 ** @param    outPath  - the new output file's path
 ** @param    reserveBytes - worst-case bytes reserved for outPath
+** @param    slot     - this worker's pConsolidatorPool thread index, used to
+**                      index consolSlot[] for the live STATUS progress line
 */
-static void ConsolidatorWorkerBody(PSolveContext pCtx, int wi, int player,
+static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int player,
                                     PRegistryFileNode* nodes, char** paths, int count,
                                     PRegistryFileNode outNode, char outPath[MAX_FULL_PATH_NAME],
                                     int64_t reserveBytes)
@@ -98,12 +101,34 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int wi, int player,
     bool                    compress = (pCtx->pConfig->compressMode == COMPRESS_ALL);
     char                    driveLetter = pSt->mwDirectory[wi][0];
 
-    volatile int64_t dummyProgress = 0;
-    uint64_t unique = KWayMergeFiles(paths, count, outPath, &dummyProgress,
+    /* Publish live progress for the STATUS display. totalBytes is the
+    ** uncompressed-equivalent (recordCount*16) of every input, matching the
+    ** unit KWayMergeFiles increments doneBytes in, so the percentage/rate read
+    ** the same as every other progress line. Read each input's trailer for its
+    ** record count (cheap -- trailer only, small file counts); fields are set
+    ** before active=1 so the stats reader never sees a half-populated slot.
+    */
+    ConsolidatorSlotStats* ps = &pSt->consolSlot[slot];
+    int64_t totalRecs = 0;
+    for (int i = 0; i < count; i++)
+    {
+        RSFReader* r = RSFOpen(paths[i]);
+        if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+    }
+    ps->writerIdx   = wi;
+    ps->player      = player;
+    ps->fileCount   = count;
+    ps->totalBytes  = totalRecs * (int64_t)sizeof(UINT64_PAIR);
+    ps->doneBytes   = 0;
+    ps->startTickMs = GetTickCount64();
+    ps->active      = 1;
+
+    uint64_t unique = KWayMergeFiles(paths, count, outPath, &ps->doneBytes,
                                       compress, &pSt->terminateConsolidation);
 
     if (pSt->terminateConsolidation)
     {
+        ps->active = 0;
         /* Abandon cleanly: delete the partial output, release the new-file
         ** reservation and node, release every input back to available
         ** (unreserve, not remove -- the real files are untouched), no
@@ -151,6 +176,7 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int wi, int player,
               RSFPlayerStr(player), wi, count, outPath, (unsigned long long)unique,
               (long long)inputTotal, (long long)actual);
 
+    ps->active = 0;
     InterlockedIncrement((volatile LONG*)&pSt->consolidatorFreeCount);
     ConsolidationMasterWake(pCtx);
 }
@@ -287,9 +313,9 @@ void ConsolidationMasterLoop(PSolveContext pCtx)
                     ** the closure owns its own copy of the buffer, safe to use
                     ** after this scope returns.
                     */
-                    [pCtx, wi, player, nodes, paths, count, outNode, outPath, runningSize](uint32_t) mutable
+                    [pCtx, wi, player, nodes, paths, count, outNode, outPath, runningSize](uint32_t thdIdx) mutable
                     {
-                        ConsolidatorWorkerBody(pCtx, wi, player, nodes, paths, count,
+                        ConsolidatorWorkerBody(pCtx, (int)thdIdx, wi, player, nodes, paths, count,
                                                 outNode, outPath, runningSize);
                     });
             }

@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -483,6 +483,30 @@ typedef struct __ImergeColorSession
 } ImergeColorSession;
 
 /*
+** Type:    ConsolidatorSlotStats
+** @brief   Live progress for one in-flight background consolidation merge,
+**          indexed by the pConsolidatorPool worker thread's own index (the
+**          uint32_t the pool passes each job). Populated by
+**          ConsolidatorWorkerBody (ConsolidationMaster.cpp) and read by the
+**          STATUS display to show per-worker "Consol" progress lines --
+**          restores the visibility the retired ConsolidationSlotStats gave,
+**          minus its ticket-era batchIndices/outIdx (the CONSOL command reads
+**          the registry directly now). totalBytes/doneBytes are the
+**          uncompressed-equivalent (recordCount*16) convention every other
+**          progress line uses, so % and rate read the same way.
+*/
+typedef struct __ConsolidatorSlotStats
+{
+    volatile int      active;       /* 1 while this worker is merging, 0 otherwise */
+    int               writerIdx;
+    int               player;       /* RSF_PLAYER_WHITE / RSF_PLAYER_BLACK */
+    int               fileCount;    /* number of input files this merge is combining */
+    volatile int64_t  totalBytes;   /* total uncompressed-equivalent input bytes */
+    volatile int64_t  doneBytes;    /* progress, same unit; updated live by KWayMergeFiles */
+    uint64_t          startTickMs;  /* GetTickCount64() when this merge started */
+} ConsolidatorSlotStats;
+
+/*
 ** Type:    OthelloRingMasterConfig
 ** @brief   Fixed run configuration, set once from command-line args at
 **          startup and never mutated afterward.
@@ -638,6 +662,12 @@ typedef struct __OthelloRingMasterState
     volatile int64_t  imergeDoneInputBytes[2];
     uint64_t          imergeStartTickMs[2];   /* GetTickCount64() when the imerge starts */
     int               imergeFileCount[2];     /* valid only while imergeActive -- number of input files this cross-drive merge is combining */
+
+    /* Per-consolidator-worker live progress (ConsolidatorSlotStats above),
+    ** indexed by pConsolidatorPool worker thread index. Written by
+    ** ConsolidatorWorkerBody, read by the STATUS display's "Consol" lines.
+    */
+    ConsolidatorSlotStats  consolSlot[CONSOLIDATOR_POOL_THREADS];
 
     size_t   gpuAccumCapacity;   /* GPU accumulator board capacity (shared black+white) */
     size_t   mwStagingSize;      /* bytes per staging area = gpuAccumCapacity * sizeof(UINT64_PAIR) */

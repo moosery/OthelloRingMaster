@@ -315,6 +315,28 @@ static inline void RegistryRemoveNode(POthelloRingMasterState pSt, int writerIdx
 }
 
 /*
+** Function: RegistryRemoveByFilename
+** @brief    Erases any node whose filename matches (case-insensitive), for a
+**           real file just deleted where the caller has the path but not the
+**           node pointer -- notably DoEndOfLevelMerge, which consumes and
+**           deletes writer files by path. Keeps the registry truthful the
+**           moment a file leaves disk, so the registry-vs-disk auditor
+**           doesn't flag a stale node until the next RegistryResetForLevel.
+**           No-op if no node matches (e.g. the path was on a non-writer drive
+**           with no registry).
+** @param    pSt      - solver state
+** @param    writerIdx - which writer drive
+** @param    filename  - full path of the file just deleted
+*/
+static inline void RegistryRemoveByFilename(POthelloRingMasterState pSt, int writerIdx, const char* filename)
+{
+    EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    pSt->driveRegistry[writerIdx].remove_if(
+        [filename](const RegistryFileNode& n) { return _stricmp(n.filename, filename) == 0; });
+    LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+}
+
+/*
 ** Function: RegistryRebuildFromDisk
 ** @brief    Populates one drive's registry from a real directory scan of its
 **           writer files -- used on restart when resuming from a valid
