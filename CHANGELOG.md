@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.4] - 2026-08-09
+
+### Fix iMerge STATUS progress showing >100% (unit mismatch)
+
+The cross-drive iMerge progress line read nonsense once iMerge started firing at level 16
+(e.g. `58.40 / 16.84 GB (346%)`). Cause: the display *total* (`imergeTotalInputBytes`) was
+summed from each input's `physfilesize` -- the **compressed** on-disk size -- while the
+*done* counter is fed by `KWayMergeFiles`'s progress pointer in **uncompressed-equivalent**
+(recordCount x 16) bytes. The ~3-4x compression ratio made done exceed total. Now the display
+total is computed in the same uncompressed-equivalent unit (read each input's trailer for its
+record count), so the percentage reads correctly. Display-only; the merge itself was always
+correct. (The consolidation display already did this since 1.0.2; iMerge was missed.) The
+real per-input sizes used for drive-space reservation are unchanged (still compressed bytes).
+
 ## [1.0.3] - 2026-08-09
 
 ### Drive-space auditor: reconcile continuously by real bytes-written, not skip

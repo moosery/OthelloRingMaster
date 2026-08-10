@@ -26,6 +26,7 @@
 #include "ConsolidationMaster.h"
 #include "DriveLedger.h"
 #include "RSFFileName.h"
+#include "RingStoreFile.h"
 #include "Logger.h"
 #include "Mem.h"
 #include <windows.h>
@@ -175,7 +176,6 @@ void IMergeRunSession(PSolveContext pCtx, int player)
             nodes[numFiles]    = scanBuf[f];
             writerOf[numFiles] = wi;
             totalBytes        += scanBuf[f]->physfilesize;
-            pSt->imergeTotalInputBytes[player] += scanBuf[f]->physfilesize;
             numFiles++;
         }
     }
@@ -190,6 +190,23 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     pSt->imergeFileCount[player] = numFiles;
     LoggerLog("IMergeRunSession: %s gathered %d files (%.2f GB)\n",
               RSFPlayerStr(player), numFiles, totalBytes / (1024.0 * 1024.0 * 1024.0));
+
+    /* Display total in the same uncompressed-equivalent (recordCount*16) unit
+    ** KWayMergeFiles increments imergeDoneInputBytes in below -- physfilesize
+    ** is the COMPRESSED on-disk size (~3-4x smaller), which made the STATUS
+    ** percentage blow past 100% (done was uncompressed-equiv, total was
+    ** compressed). Read each input's trailer for its record count (cheap --
+    ** trailer only). Set before the merge starts feeding doneBytes.
+    */
+    {
+        int64_t totalRecs = 0;
+        for (int i = 0; i < numFiles; i++)
+        {
+            RSFReader* r = RSFOpen(paths[i]);
+            if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+        }
+        pSt->imergeTotalInputBytes[player] = totalRecs * (int64_t)sizeof(UINT64_PAIR);
+    }
 
     /* Try each medium drive in turn; fall back to the store drive (a "total
     ** flush") if none has room. Reservation worst-case = sum of real input
