@@ -40,6 +40,7 @@
 
 /* Includes */
 #include "OthelloTypes.h"
+#include "DriveLedger.h"
 
 /* Functions */
 

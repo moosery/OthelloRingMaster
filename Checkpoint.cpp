@@ -32,6 +32,7 @@
 #include "Error.h"
 #include <windows.h>
 #include <time.h>
+#include "Mem.h"
 
 /* Functions */
 
@@ -92,7 +93,12 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     ** from the registry (already reflects exactly this quiescent state,
     ** no need for a separate directory scan here).
     */
-    CheckpointStats cp = {};
+    /* Heap, never stack -- CheckpointStats (~30 MB, manifest arrays) would
+    ** overflow the 1 MB stack on entry. MemMalloc zero-fills; freed after the
+    ** checkpoint file is written (below).
+    */
+    CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+    CheckpointStats& cp    = *cpPtr;
     cp.boardSize                = pCfg->boardSize;
     cp.level                    = (uint8_t)level;
     cp.activeSubPass             = (uint8_t)activeSubPass;
@@ -141,6 +147,7 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     WriteFile(h, &magic, (DWORD)sizeof(magic), &nw, NULL);
     WriteFile(h, &cp,    (DWORD)sizeof(cp),    &nw, NULL);
     CloseHandle(h);
+    MemFree(cpPtr);
 
     LoggerLog("Checkpoint: wrote '%s'\n", path);
 
@@ -175,7 +182,13 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
         return false;   /* no checkpoint -- normal, not an error */
 
     uint64_t        magic = 0;
-    CheckpointStats  cp    = {};
+    /* Heap, never stack -- CheckpointStats (~30 MB, manifest arrays) would
+    ** overflow the 1 MB stack on entry. MemMalloc zero-fills; every exit path
+    ** below frees it (the failure returns and the validated return true; the
+    ** Fatal paths intentionally don't, since Fatal ends the process).
+    */
+    CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+    CheckpointStats& cp    = *cpPtr;
     DWORD           nr    = 0;
     bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
               && nr == sizeof(magic)
@@ -187,6 +200,7 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
     if (!ok)
     {
         LoggerLog("Checkpoint: '%s' exists but is not a valid checkpoint payload -- ignoring, falling back to a fresh level start.\n", path);
+        MemFree(cpPtr);
         return false;
     }
 
@@ -194,12 +208,14 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
         cp.numMergeWriters != pSt->numMergeWriters)
     {
         LoggerLog("Checkpoint: '%s' doesn't match the current run (boardSize/level/numMergeWriters) -- ignoring.\n", path);
+        MemFree(cpPtr);
         return false;
     }
 
     if (cp.activeSubPass != RSF_PLAYER_BLACK && cp.activeSubPass != RSF_PLAYER_WHITE)
     {
         LoggerLog("Checkpoint: '%s' has an invalid activeSubPass value -- ignoring.\n", path);
+        MemFree(cpPtr);
         return false;
     }
 
@@ -213,12 +229,14 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
     if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
     {
         LoggerLog("Checkpoint: level %d already has a _complete sentinel -- ignoring stale checkpoint '%s'.\n", level, path);
+        MemFree(cpPtr);
         return false;
     }
     SentinelNameMerging(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level);
     if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
     {
         LoggerLog("Checkpoint: level %d has a _merging sentinel -- ignoring stale checkpoint '%s'.\n", level, path);
+        MemFree(cpPtr);
         return false;
     }
 
@@ -233,6 +251,7 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
         if (GetFileAttributesA(sentPath) == INVALID_FILE_ATTRIBUTES)
         {
             LoggerLog("Checkpoint: previous level %d has no _complete sentinel -- ignoring checkpoint '%s'.\n", level - 1, path);
+            MemFree(cpPtr);
             return false;
         }
     }
@@ -317,6 +336,7 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
     LoggerLog("Checkpoint: '%s' validated OK (%s sub-pass, %llu records consumed, written %s).\n",
               path, RSFPlayerStr(cp.activeSubPass),
               (unsigned long long)cp.recordsConsumedInSubPass, cp.timestamp);
+    MemFree(cpPtr);
     return true;
 }
 

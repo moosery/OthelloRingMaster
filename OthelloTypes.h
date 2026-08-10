@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -772,6 +772,7 @@ typedef struct __OthelloRingMasterState
     std::condition_variable   consolidationMasterCV;
     volatile bool             consolidationMasterWake;   /* predicate for the CV wait -- set by any of the three trigger events, cleared once the master wakes and processes it */
     volatile int              consolidatorFreeCount;     /* free worker count in pConsolidatorPool -- checked by the master before reserving, so it never locks files behind a job nothing can start yet */
+    volatile int64_t          consolidationBytesInput;   /* real on-disk input bytes across every successful consolidation merge this level -- live-only (STATUS display), deliberately NOT in LevelStats (that struct has a real backward-compat history from growing mid-struct, see project_sentinel_stats_backward_compat_regression memory) */
 
     /*
     ** The two new background auditors (RegistryAuditor.h,

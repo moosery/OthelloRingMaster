@@ -661,7 +661,14 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     ** so a later attempt at this same level can never pick it up by mistake.
     */
     SolveContext tempCtx = { pConfig, pState, pMachineInfo };
-    CheckpointStats cp = {};
+    /* Heap, never stack: CheckpointStats is ~30 MB (its per-drive integrity
+    ** manifest arrays), which overflows the 1 MB default stack the instant
+    ** this function is entered (MSVC's __chkstk prologue probe) -- a real
+    ** crash caught on the first v1.0.0 run. MemMalloc zero-initializes, same
+    ** as the old `= {}`; freed below once the checkpoint decision is made.
+    */
+    CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+    CheckpointStats& cp    = *cpPtr;
     bool haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
     if (haveValidCheckpoint)
     {
@@ -687,6 +694,7 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         pState->resumeFromCheckpoint = false;
         DeleteLevelCheckpoint(&tempCtx, pState->resumeLevel);
     }
+    MemFree(cpPtr);
     cleanUpDrives(pState, pMachineInfo, haveValidCheckpoint);
     createDirectories(pState);
 

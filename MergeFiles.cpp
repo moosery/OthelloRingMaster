@@ -211,9 +211,9 @@ static int CountByPattern(const char* fullPattern)
 ** @return   Unique record count written.
 */
 uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath,
-                                volatile int64_t* pProgressBytes, bool compressed = false,
-                                const volatile bool* pTerminate = nullptr,
-                                const std::vector<RSFReader*>& extraReaders = {})
+                                volatile int64_t* pProgressBytes, bool compressed,
+                                const volatile bool* pTerminate,
+                                const std::vector<RSFReader*>& extraReaders)
 {
     std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
 
@@ -1028,7 +1028,7 @@ void MergePoolToWriter(
     int segCount, const size_t* segOffsets, const size_t* segSizes, const int* segBoardCounts,
     const UINT64_PAIR* stagingBegin, int stagingCount,
     const volatile bool* pTerminate,
-    volatile int64_t* pProgressBytes = nullptr)
+    volatile int64_t* pProgressBytes)
 {
     std::priority_queue<PoolMergeHead,
                         std::vector<PoolMergeHead>,

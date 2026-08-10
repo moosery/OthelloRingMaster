@@ -4,6 +4,45 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.1] - 2026-08-09
+
+### Fix v1.0.0 build errors and a startup stack-overflow crash
+
+First, the compile fixes needed to get v1.0.0 to build at all (it was tagged before a
+build, so these were never committed):
+
+- `OthelloTypes.h`: `OthelloRingMasterState.consolidationBytesInput` had been dropped
+  during the struct rewrite despite three files referencing it -- re-added (live-only
+  int64, deliberately not in `LevelStats`).
+- `MergeFiles.cpp`: `KWayMergeFiles`/`MergePoolToWriter` had default arguments repeated on
+  both the `.h` declaration and the `.cpp` definition (C2572) after being promoted from
+  file-private `static` to exported -- removed the duplicates (defaults live in the header).
+- `Registry.h`: called `DriveReserve`/`DriveReclaim` without including `DriveLedger.h`
+  itself -- added the include.
+
+### Then, a startup stack-overflow crash in the registry redesign
+
+- First real v1.0.0 run crashed silently inside `InitSolver` right after the ring
+  self-test (banner + "PASS" printed, then a `0xC00000FD` stack-overflow dump, before any
+  RAM/drive detection). Root cause: `CheckpointStats` is ~30 MB -- its integrity manifest
+  is `manifest[MAX_WRITERS=30][CHECKPOINT_MANIFEST_MAX_FILES=256]` and each entry carries a
+  `filename[MAX_FULL_PATH_NAME=4000]`. Three functions declared one as a plain stack local,
+  and MSVC reserves a function's whole local frame at entry (via `__chkstk`), so the 30 MB
+  frame overflowed the 1 MB stack the instant `InitSolver` was entered -- before its first
+  statement ran, which is why nothing printed.
+- Moved all three `CheckpointStats` locals (`InitSolver`, `PerformMidLevelCheckpoint`,
+  `ReadValidCheckpoint`) off the stack to `MemMalloc`/`MemFree` (the project's tracked
+  allocator; `MemMalloc` zero-inits, same as the old `= {}`). `ReadValidCheckpoint` frees
+  on each of its early-return validation paths.
+- Fixed a second latent instance of the same class found while sweeping: `StatsListener.cpp`'s
+  `CONSOL` handler declared `RegistryFileNode snap[256]` on the stack (~1 MB, since
+  `RegistryFileNode` also carries the 4000-byte filename) -- would have crashed the stats
+  thread the first time `--consol` was queried. Also moved to `MemMalloc`.
+- No behavior change beyond fixing the crashes; purely where these structures are allocated.
+- Known follow-up (not addressed here, non-urgent): the ~30 MB `CheckpointStats` also means
+  ~30 MB checkpoint files on the store drive whenever checkpointing runs; shrinking the
+  manifest's `filename` field (4000 -> ~256 bytes) would cut that to ~2 MB.
+
 ## [1.0.0] - 2026-08-06
 
 ### Writer-drive registry redesign: replaced all ticket-based merge/consolidation logic

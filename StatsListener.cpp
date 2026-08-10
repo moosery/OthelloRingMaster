@@ -621,6 +621,13 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
     n += snprintf(buf + n, bufSize - n,
                   "Consolidator workers busy: %d / %d\n\n", CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
 
+    /* Heap, never stack -- RegistryFileNode is ~4 KB each (full-path filename),
+    ** so this bounded snapshot is ~1 MB and would overflow the stats thread's
+    ** 1 MB stack. Allocated once, reused per drive, freed after the loop.
+    */
+    RegistryFileNode* snap = (RegistryFileNode*)MemMalloc("consolSnap",
+                                 sizeof(RegistryFileNode) * (size_t)CHECKPOINT_MANIFEST_MAX_FILES);
+
     for (int wi = 0; wi < pSt->numMergeWriters; wi++)
     {
         /* Snapshot the whole drive's node list under lock (real per-drive
@@ -628,7 +635,6 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
         ** production data -- so a bounded copy is cheap), then format from
         ** the copy so the lock is never held across the snprintf calls below.
         */
-        RegistryFileNode snap[CHECKPOINT_MANIFEST_MAX_FILES];
         int count = 0;
         EnterCriticalSection(&pSt->driveRegistryCS[wi]);
         for (auto& node : pSt->driveRegistry[wi])
@@ -666,6 +672,7 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
                 n += snprintf(buf + n, bufSize - n, "  (none)\n");
         }
     }
+    MemFree(snap);
     n += snprintf(buf + n, bufSize - n, "END\n");
     (void)n;
 }
