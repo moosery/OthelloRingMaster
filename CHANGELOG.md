@@ -4,6 +4,27 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.6] - 2026-08-10
+
+### RegistryAuditor false-positive fix -- consolidation's "stuck reservation" threshold was too tight at real scale
+
+Live level 16/17 output (real 6x6 run, post-v1.0.5) showed a flood of
+`WARNING RegistryAuditor: '...' reserved for N min (role 2) -- possible leaked reservation`
+for ordinary, healthy consolidation jobs. Root cause: `RegistryAuditor.cpp`'s
+`stuckThresholdMs` assumed consolidation writes are "always fast in practice (minutes at
+most, even for multi-GB files)" and gave `REGISTRY_RESERVED_CONSOL` only the same 15-minute
+allowance as a single flush write. That assumption held at small levels but breaks at
+level-16+ scale, where one consolidation job now k-way-merges several tens-of-GB inputs on
+an 8-thread pool shared with every other in-flight consol job -- real jobs were still
+legitimately in-flight past 37 minutes. Confirmed as a pure false positive, not a leak: every
+flagged filename later appeared in a matching `ConsolidatorWorkerBody: ... merged 3 files ->
+'<same file>'` completion line. Fixed by giving `REGISTRY_RESERVED_CONSOL` its own 4-hour
+allowance (bounded by `MAX_FILE_SIZE`, so it doesn't need iMerge's full 96-hour allowance,
+but needs far more than 15 minutes) instead of falling through to the flush/final-merge
+default. No change to flush's or iMerge's thresholds.
+
+---
+
 ## [1.0.5] - 2026-08-09
 
 ### Coordinated space relief -- fixes a latent iMerge livelock, and does both colors together

@@ -25,20 +25,34 @@
 /*
 ** Function: stuckThresholdMs
 ** @brief    How long a node may sit reserved before RegistryAuditor
-**           considers it suspicious. Role-aware: flush/consolidation
-**           writes are always fast in practice (minutes at most, even for
-**           multi-GB files); a cross-drive iMerge's own new-output node can
-**           legitimately stay reserved for many real hours (confirmed
-**           directly against live production data -- a single iMerge
-**           session gathering across both NVMe drives has run 50+ hours),
-**           so iMerge gets a much longer allowance rather than constantly
-**           false-positiving on ordinary long merges.
+**           considers it suspicious. Role-aware:
+**             - flush: always a single buffered write of one MW buffer,
+**               genuinely fast regardless of level scale -- short allowance.
+**             - consol: WRONG ASSUMPTION FIXED v1.0.6 -- originally assumed
+**               "always fast (minutes at most, even for multi-GB files)",
+**               but confirmed false against live production data at level
+**               16/17 scale: a single consolidation job now k-way-merges
+**               several tens-of-GB inputs on an 8-thread pool shared across
+**               every other in-flight consol job, and real jobs were seen
+**               still legitimately in-flight past 37 minutes (matching
+**               ConsolidatorWorkerBody completion lines appeared later for
+**               the same filenames -- not leaks, just slow at this scale).
+**               Consol is bounded by MAX_FILE_SIZE (the consolidation size
+**               cap) the way iMerge is not, so it doesn't need iMerge's full
+**               96-hour allowance, but needs far more than 15 minutes.
+**             - imerge: a cross-drive iMerge's own new-output node can
+**               legitimately stay reserved for many real hours (confirmed
+**               directly against live production data -- a single iMerge
+**               session gathering across both NVMe drives has run 50+ hours).
 */
 static uint64_t stuckThresholdMs(uint8_t reservedBy)
 {
     if (reservedBy == REGISTRY_RESERVED_IMERGE)
         return 96ULL * 60 * 60 * 1000;   /* 96 hours */
-    return 15ULL * 60 * 1000;            /* 15 minutes -- flush/consol/final-merge */
+    if (reservedBy == REGISTRY_RESERVED_CONSOL)
+        return 4ULL * 60 * 60 * 1000;    /* 4 hours -- bounded by MAX_FILE_SIZE, but real
+                                          ** jobs already run 30-40+ min at level 16/17 */
+    return 15ULL * 60 * 1000;            /* 15 minutes -- flush/final-merge */
 }
 
 /*
