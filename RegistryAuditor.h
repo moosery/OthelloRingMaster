@@ -33,11 +33,14 @@
 **           drive snapshots the registry briefly under lock, compares
 **           against a fresh directory scan taken without holding the lock,
 **           and logs a WARNING for any node that fails either check
-**           (size-mismatch for non-reserved nodes; stuck-reservation for
-**           nodes reserved far longer than any real operation should take)
-**           on 2 or more consecutive passes -- a single-pass discrepancy is
-**           treated as a benign race against real concurrent activity, not
-**           reported. Loops until terminateThreads is set.
+**           (size-mismatch for non-reserved nodes; stuck-reservation for a
+**           reserved node whose linked live progress counter -- see
+**           RegistryLinkProgress, Registry.h -- has stopped moving, or, for
+**           the rare node with no progress link, one reserved far longer
+**           than a no-progress operation should take) on 2 or more
+**           consecutive passes -- a single-pass discrepancy is treated as a
+**           benign race against real concurrent activity, not reported.
+**           Loops until terminateThreads is set.
 ** @param    pCtx - solve context
 */
 void RegistryAuditorLoop(PSolveContext pCtx);

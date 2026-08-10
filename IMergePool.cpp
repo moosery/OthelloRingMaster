@@ -340,6 +340,16 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     }
     else
     {
+        /* Link every gathered input to imergeDoneInputBytes so
+        ** RegistryAuditor.h can see this session is still genuinely moving,
+        ** regardless of how long a real cross-drive gather legitimately
+        ** takes. Not done for the single-file move case above -- MoveFileExA
+        ** reports no incremental progress, so those nodes fall back to
+        ** reservedSinceTick with a generous flat allowance instead.
+        */
+        for (int i = 0; i < numFiles; i++)
+            RegistryLinkProgress(pSt, writerOf[i], nodes[i], &pSt->imergeDoneInputBytes[player]);
+
         unique = KWayMergeFiles(paths, numFiles, outPath, &pSt->imergeDoneInputBytes[player],
                                  compress, &pSt->terminateThreads);
     }

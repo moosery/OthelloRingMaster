@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.6"
+#define VERSION "1.0.7"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -455,7 +455,19 @@ typedef struct __RegistryFileNode
     bool      isReserved;
     uint8_t   reservedBy;        /* REGISTRY_RESERVED_* -- valid only while isReserved */
     int64_t   reservedBytes;     /* worst-case bytes claimed at reservation time -- valid only while isReserved */
-    uint64_t  reservedSinceTickMs; /* GetTickCount64() when reserved -- used by RegistryAuditor.h's stuck-reservation check */
+    ClockTick reservedSinceTick; /* ClockStart'd when reserved -- fallback for RegistryAuditor.h's
+                                  ** stuck-reservation check on nodes with no pProgressBytes linked */
+    volatile int64_t* pProgressBytes; /* nullptr, or points at whichever live progress counter
+                                       ** (mwFlushDoneBytes/consolSlot.doneBytes/imergeDoneInputBytes)
+                                       ** the job currently holding this node is updating -- lets
+                                       ** RegistryAuditor.h tell "reserved a long time but genuinely
+                                       ** still moving" apart from "reserved and stalled," regardless
+                                       ** of file size or how long a real operation legitimately
+                                       ** takes at whatever level scale is running. Set by the
+                                       ** owning job (RegistryLinkProgress, Registry.h) right before
+                                       ** it starts real I/O; left null for the rare operations that
+                                       ** don't report incremental progress (e.g. iMerge's single-
+                                       ** file MoveFileExA path), which fall back to reservedSinceTick. */
 } RegistryFileNode, * PRegistryFileNode;
 
 /*

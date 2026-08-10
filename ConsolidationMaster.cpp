@@ -123,6 +123,16 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
     ps->startTickMs = GetTickCount64();
     ps->active      = 1;
 
+    /* Link every node this job holds (inputs + the new output) to this slot's
+    ** doneBytes -- RegistryAuditor.h watches it move instead of guessing a
+    ** flat "consolidation should always be fast" duration (see v1.0.6's
+    ** false-positive fix and the design memory for why that guess broke at
+    ** level 16+ scale).
+    */
+    for (int i = 0; i < count; i++)
+        RegistryLinkProgress(pSt, wi, nodes[i], &ps->doneBytes);
+    RegistryLinkProgress(pSt, wi, outNode, &ps->doneBytes);
+
     uint64_t unique = KWayMergeFiles(paths, count, outPath, &ps->doneBytes,
                                       compress, &pSt->terminateConsolidation);
 

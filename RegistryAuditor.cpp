@@ -19,41 +19,9 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 
 /* Functions */
-
-/*
-** Function: stuckThresholdMs
-** @brief    How long a node may sit reserved before RegistryAuditor
-**           considers it suspicious. Role-aware:
-**             - flush: always a single buffered write of one MW buffer,
-**               genuinely fast regardless of level scale -- short allowance.
-**             - consol: WRONG ASSUMPTION FIXED v1.0.6 -- originally assumed
-**               "always fast (minutes at most, even for multi-GB files)",
-**               but confirmed false against live production data at level
-**               16/17 scale: a single consolidation job now k-way-merges
-**               several tens-of-GB inputs on an 8-thread pool shared across
-**               every other in-flight consol job, and real jobs were seen
-**               still legitimately in-flight past 37 minutes (matching
-**               ConsolidatorWorkerBody completion lines appeared later for
-**               the same filenames -- not leaks, just slow at this scale).
-**               Consol is bounded by MAX_FILE_SIZE (the consolidation size
-**               cap) the way iMerge is not, so it doesn't need iMerge's full
-**               96-hour allowance, but needs far more than 15 minutes.
-**             - imerge: a cross-drive iMerge's own new-output node can
-**               legitimately stay reserved for many real hours (confirmed
-**               directly against live production data -- a single iMerge
-**               session gathering across both NVMe drives has run 50+ hours).
-*/
-static uint64_t stuckThresholdMs(uint8_t reservedBy)
-{
-    if (reservedBy == REGISTRY_RESERVED_IMERGE)
-        return 96ULL * 60 * 60 * 1000;   /* 96 hours */
-    if (reservedBy == REGISTRY_RESERVED_CONSOL)
-        return 4ULL * 60 * 60 * 1000;    /* 4 hours -- bounded by MAX_FILE_SIZE, but real
-                                          ** jobs already run 30-40+ min at level 16/17 */
-    return 15ULL * 60 * 1000;            /* 15 minutes -- flush/final-merge */
-}
 
 /*
 ** Function: auditIntervalMs
@@ -65,6 +33,28 @@ static uint64_t auditIntervalMs(PSolveContext pCtx)
                  : (uint32_t)AUDIT_INTERVAL_SECONDS_DEFAULT;
     return (uint64_t)sec * 1000ULL;
 }
+
+/*
+** Constants: NO_PROGRESS_STALE_MS / NO_PROGRESS_LINK_FALLBACK_MS
+** @brief    v1.0.6 gave the old duration-only stuck check role-specific
+**           allowances (15 min flush/final-merge, 4 hr consol, 96 hr iMerge)
+**           after real level-16/17 data showed a flat "consol is always
+**           fast" guess false-positiving on perfectly healthy, still-moving
+**           merges. v1.0.7 replaces duration entirely with real progress:
+**           every reserved node now links to whichever live counter its job
+**           is updating (RegistryLinkProgress, Registry.h) -- a node is only
+**           suspicious once that counter stops moving, not once a clock runs
+**           out. This scales to any level/file size with zero per-role
+**           tuning, and catches an actual leak FASTER than the old flat
+**           thresholds did (a truly abandoned reservation goes stale within
+**           a few minutes, not hours). NO_PROGRESS_LINK_FALLBACK_MS is only
+**           for the rare node with no progress link at all (iMerge's
+**           single-file MoveFileExA path, which reports no incremental
+**           progress) -- generous, since that's a real but normally-quick
+**           cross-drive copy, not merge work.
+*/
+static const uint64_t NO_PROGRESS_STALE_MS         = 3ULL * 60 * 1000;    /* 3 minutes with zero movement */
+static const uint64_t NO_PROGRESS_LINK_FALLBACK_MS = 60ULL * 60 * 1000;   /* 60 minutes, unlinked nodes only */
 
 /*
 ** Function: RegistryAuditorLoop
@@ -80,6 +70,15 @@ void RegistryAuditorLoop(PSolveContext pCtx)
     */
     std::set<std::string> prevSuspects[MAX_WRITERS];
 
+    /* Per-node progress-staleness tracking, per drive: last observed value of
+    ** whatever counter a reserved node is linked to, and when it last
+    ** actually changed. Rebuilt fresh each pass from the prior pass's
+    ** values, so a node that disappears (finished/removed) is naturally
+    ** dropped rather than accumulating forever.
+    */
+    struct ProgressState { int64_t lastValue; ClockTick lastChangeTick; };
+    std::map<std::string, ProgressState> progressTrack[MAX_WRITERS];
+
     while (!pSt->terminateThreads)
     {
         Sleep((DWORD)auditIntervalMs(pCtx));
@@ -88,28 +87,62 @@ void RegistryAuditorLoop(PSolveContext pCtx)
         for (int wi = 0; wi < pSt->numMergeWriters; wi++)
         {
             /* Snapshot the registry briefly under lock. */
-            struct Snap { std::string filename; int64_t size; bool reserved; uint8_t reservedBy; uint64_t sinceMs; };
+            struct Snap { std::string filename; int64_t size; bool reserved; uint8_t reservedBy;
+                          ClockTick sinceTick; volatile int64_t* pProgress; };
             std::vector<Snap> snap;
             EnterCriticalSection(&pSt->driveRegistryCS[wi]);
             for (auto& n : pSt->driveRegistry[wi])
-                snap.push_back({ n.filename, n.physfilesize, n.isReserved, n.reservedBy, n.reservedSinceTickMs });
+                snap.push_back({ n.filename, n.physfilesize, n.isReserved, n.reservedBy,
+                                  n.reservedSinceTick, n.pProgressBytes });
             LeaveCriticalSection(&pSt->driveRegistryCS[wi]);
 
-            uint64_t nowMs = GetTickCount64();
             std::set<std::string> thisPassSuspects;
+            std::map<std::string, ProgressState> thisPassTrack;
 
             for (auto& s : snap)
             {
                 if (s.reserved)
                 {
-                    uint64_t heldMs = nowMs - s.sinceMs;
-                    if (heldMs > stuckThresholdMs(s.reservedBy))
+                    long long idleMs;
+                    bool      stale;
+
+                    if (s.pProgress)
+                    {
+                        /* Linked to a live counter -- alive as long as it's
+                        ** still moving, no matter how long that legitimately
+                        ** takes at whatever data volume this level has.
+                        */
+                        int64_t cur = *s.pProgress;
+                        ProgressState st;
+                        auto it = progressTrack[wi].find(s.filename);
+                        if (it != progressTrack[wi].end() && it->second.lastValue == cur)
+                            st = it->second;             /* unchanged -- keep the stale-clock running */
+                        else
+                        {
+                            st.lastValue = cur;
+                            ClockStart(&st.lastChangeTick);   /* first sight, or genuinely moved -- reset */
+                        }
+                        thisPassTrack[s.filename] = st;
+                        idleMs = ClockMillisSinceStart(&st.lastChangeTick);
+                        stale  = (uint64_t)idleMs > NO_PROGRESS_STALE_MS;
+                    }
+                    else
+                    {
+                        /* No progress link (e.g. iMerge's single-file move) --
+                        ** fall back to a generous flat allowance since the
+                        ** age of the reservation is all there is to go on.
+                        */
+                        idleMs = ClockMillisSinceStart(&s.sinceTick);
+                        stale  = (uint64_t)idleMs > NO_PROGRESS_LINK_FALLBACK_MS;
+                    }
+
+                    if (stale)
                     {
                         std::string key = s.filename + "|stuck";
                         thisPassSuspects.insert(key);
                         if (prevSuspects[wi].count(key))
-                            LoggerLog("WARNING RegistryAuditor: '%s' reserved for %.1f min (role %d) -- possible leaked reservation\n",
-                                      s.filename.c_str(), heldMs / 60000.0, (int)s.reservedBy);
+                            LoggerLog("WARNING RegistryAuditor: '%s' reserved, no progress for %.1f min (role %d) -- possible leaked reservation\n",
+                                      s.filename.c_str(), idleMs / 60000.0, (int)s.reservedBy);
                     }
                     continue;   /* size is expected to be 0/partial while reserved -- not a mismatch */
                 }
@@ -135,7 +168,8 @@ void RegistryAuditorLoop(PSolveContext pCtx)
                 }
             }
 
-            prevSuspects[wi] = std::move(thisPassSuspects);
+            prevSuspects[wi]   = std::move(thisPassSuspects);
+            progressTrack[wi]  = std::move(thisPassTrack);
         }
     }
 }

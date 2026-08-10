@@ -144,7 +144,9 @@ static inline PRegistryFileNode RegistryReserveNew(POthelloRingMasterState pSt, 
     node.isReserved          = true;
     node.reservedBy          = reservedBy;
     node.reservedBytes       = reserveBytes;
-    node.reservedSinceTickMs = GetTickCount64();
+    ClockStart(&node.reservedSinceTick);
+    node.pProgressBytes      = nullptr;   /* caller links this via RegistryLinkProgress once it
+                                           ** knows which live counter its job will update */
 
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
     pSt->driveRegistry[writerIdx].push_back(node);
@@ -265,14 +267,47 @@ static inline bool RegistryReserveOne(POthelloRingMasterState pSt, int writerIdx
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
     if (!pNode->isReserved)
     {
-        pNode->isReserved          = true;
-        pNode->reservedBy          = reservedBy;
-        pNode->reservedSinceTickMs = GetTickCount64();
+        pNode->isReserved   = true;
+        pNode->reservedBy   = reservedBy;
+        ClockStart(&pNode->reservedSinceTick);
+        pNode->pProgressBytes = nullptr;   /* stale link from a prior reservation cycle must not
+                                            ** survive -- caller links the real one via
+                                            ** RegistryLinkProgress before starting real I/O */
         claimed = true;
     }
     LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
 
     return claimed;
+}
+
+/*
+** Function: RegistryLinkProgress
+** @brief    Points a reserved node at the live progress counter the job
+**           currently holding it is updating (mwFlushDoneBytes for a flush,
+**           a ConsolidatorSlotStats::doneBytes for a consolidation merge,
+**           imergeDoneInputBytes for an iMerge session) -- all three are
+**           already-existing counters that feed today's STATUS progress
+**           bars, just not previously linked back to the registry node
+**           itself. RegistryAuditor.h uses this to tell "reserved a long
+**           time but genuinely still moving" apart from "reserved and
+**           stalled," without needing any new instrumentation inside the
+**           actual read/write loops (KWayMergeFiles, MergePoolToWriter).
+**           Call once, right before the owning job starts real I/O against
+**           this node; leave unlinked (never call this) for operations that
+**           report no incremental progress, e.g. iMerge's single-file
+**           MoveFileExA path -- those fall back to reservedSinceTick.
+** @param    pSt            - solver state
+** @param    writerIdx      - which writer drive pNode lives on
+** @param    pNode          - the reserved node to link
+** @param    pProgressBytes - address of the volatile int64_t counter the
+**                            owning job increments as it works
+*/
+static inline void RegistryLinkProgress(POthelloRingMasterState pSt, int writerIdx,
+                                         PRegistryFileNode pNode, volatile int64_t* pProgressBytes)
+{
+    EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    pNode->pProgressBytes = pProgressBytes;
+    LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
 }
 
 /*

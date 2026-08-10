@@ -4,6 +4,40 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.7] - 2026-08-10
+
+### RegistryAuditor stuck-reservation check replaced with real progress tracking, not duration
+
+v1.0.6 fixed the immediate false-positive spam by giving `REGISTRY_RESERVED_CONSOL` its own
+4-hour allowance, but the user correctly pushed back on the underlying approach: any flat
+duration threshold is fragile -- it needed retuning once already (15 min -> 4 hr) and could
+need retuning again at deeper levels with even larger files. Replaced duration-based
+detection entirely with real progress tracking:
+
+- `RegistryFileNode` gains `volatile int64_t* pProgressBytes` -- points at whichever live
+  counter the job currently holding this node is updating. All three roles already had one
+  (previously used only to drive the STATUS progress bars, never linked back to the
+  registry): `ConsolidatorSlotStats::doneBytes` for consolidation, `imergeDoneInputBytes`
+  for iMerge, `mwFlushDoneBytes` for a flush. New `RegistryLinkProgress` (`Registry.h`)
+  points a node at its job's counter right before real I/O starts; `ConsolidatorWorkerBody`,
+  `IMergeRunSession` (multi-file merge path only), and `FlushOneColor` each call it. No
+  changes needed inside `KWayMergeFiles`/`MergePoolToWriter` themselves -- their existing
+  progress-bytes out-parameters were already exactly the right signal.
+- `RegistryAuditor.cpp` now watches the linked counter instead of a clock: a reserved node
+  is only flagged once its counter stops moving for 3+ minutes, regardless of how long the
+  job has legitimately been running or how large the file is. This self-scales to any level
+  size with zero per-role tuning, and catches a genuinely leaked reservation FASTER than the
+  old flat thresholds did (dead within a few minutes, not hours).
+- iMerge's single-file `MoveFileExA` path (no incremental progress API) is the one
+  intentional gap -- those nodes stay unlinked and fall back to a flat 60-minute allowance
+  off `reservedSinceTick`.
+- `RegistryFileNode.reservedSinceTickMs` (a raw `GetTickCount64()` millisecond) converted to
+  `reservedSinceTick`, a proper `ClockTick` (`Utility/ClockTick.h` -- the project's existing
+  monotonic elapsed-time facility, already used for level/phase timing elsewhere but not
+  previously by the registry code, which had been hand-rolling `GetTickCount64()` instead).
+
+---
+
 ## [1.0.6] - 2026-08-10
 
 ### RegistryAuditor false-positive fix -- consolidation's "stuck reservation" threshold was too tight at real scale

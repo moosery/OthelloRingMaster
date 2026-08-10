@@ -128,6 +128,13 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
     */
     InterlockedIncrement((volatile LONG*)&pSt->activeFlushWriters);
 
+    /* mwFlushDoneBytes[ti][player] is already reset to 0 and fed to
+    ** MergePoolToWriter as its progress pointer below (was already true
+    ** before this change, for the STATUS display) -- link it to the node too
+    ** so RegistryAuditor.h can see a still-writing flush is genuinely moving.
+    */
+    RegistryLinkProgress(pSt, ti, pNode, &pSt->mwFlushDoneBytes[ti][player]);
+
     RSFWriter* pw = compressMW ? RSFWriterOpenZ(path) : RSFWriterOpen(path);
     MergePoolToWriter(pw, mwBuf, segCount, segOffsets, segSizes, segBoards,
                        stagingBegin, stagingCount,
