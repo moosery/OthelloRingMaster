@@ -218,38 +218,47 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
         return false;
     }
 
-    /* This level must genuinely still be in progress -- a checkpoint
-    ** coexisting with a _complete or _merging sentinel for the SAME level
-    ** means something is inconsistent (stale checkpoint left behind by an
-    ** interrupted attempt, most likely); never trust it in that case.
+    /* This solve step must genuinely still be in progress. CRITICAL
+    ** level-numbering off-by-one (fixed v1.0.9 -- this rejected EVERY
+    ** checkpoint on restart before): iteration `level` READS Level_`level`
+    ** and WRITES Level_`level+1` (see InitSolver.cpp's resume scan and
+    ** project_level_numbering_offset_by_one). So "this step already
+    ** finished" is marked by Level_`level+1`'s _complete sentinel, NOT
+    ** Level_`level`'s -- Level_`level`_complete is this step's INPUT-ready
+    ** marker (written by the PREVIOUS step) and is ALWAYS present while this
+    ** step runs. Checking `level` here (the original bug) therefore always
+    ** fired and discarded the checkpoint. Same off-by-one for _merging (the
+    ** merge that could be mid-flight produces Level_`level+1`).
     */
     char sentPath[MAX_FULL_PATH_NAME];
-    SentinelNameComplete(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level);
+    SentinelNameComplete(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level + 1);
     if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
     {
-        LoggerLog("Checkpoint: level %d already has a _complete sentinel -- ignoring stale checkpoint '%s'.\n", level, path);
+        LoggerLog("Checkpoint: level %d solve step already completed (Level_%04d _complete present) -- ignoring stale checkpoint '%s'.\n", level, level + 1, path);
         MemFree(cpPtr);
         return false;
     }
-    SentinelNameMerging(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level);
+    SentinelNameMerging(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level + 1);
     if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
     {
-        LoggerLog("Checkpoint: level %d has a _merging sentinel -- ignoring stale checkpoint '%s'.\n", level, path);
+        LoggerLog("Checkpoint: level %d output is mid-merge (Level_%04d _merging present) -- ignoring stale checkpoint '%s'.\n", level, level + 1, path);
         MemFree(cpPtr);
         return false;
     }
 
-    /* Previous level must be genuinely complete (matches the same
-    ** precondition ScanForResumeLevel already establishes to have picked
-    ** this level as the resume point in the first place -- re-asserted
-    ** explicitly here rather than assumed).
+    /* This step's INPUT must be genuinely complete: iteration `level` reads
+    ** Level_`level`, whose readiness is marked by Level_`level`_complete
+    ** (written by the previous step). Re-asserts the precondition
+    ** ScanForResumeLevel already established when it chose this resume level.
+    ** (Was `level - 1` -- same off-by-one; harmless in practice since every
+    ** lower level is complete too, but corrected for consistency.)
     */
     if (level > 0)
     {
-        SentinelNameComplete(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level - 1);
+        SentinelNameComplete(sentPath, sizeof(sentPath), pSt->storeDirectory, pCfg->boardSize, level);
         if (GetFileAttributesA(sentPath) == INVALID_FILE_ATTRIBUTES)
         {
-            LoggerLog("Checkpoint: previous level %d has no _complete sentinel -- ignoring checkpoint '%s'.\n", level - 1, path);
+            LoggerLog("Checkpoint: input level %d has no _complete sentinel -- ignoring checkpoint '%s'.\n", level, path);
             MemFree(cpPtr);
             return false;
         }

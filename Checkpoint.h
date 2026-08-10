@@ -72,10 +72,13 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 ** @details  Validation (all must pass, or this returns false):
 **             - file exists, has the right magic, and is exactly sizeof(CheckpointStats)
 **             - boardSize/level/numMergeWriters match the current run's config/resume level
-**             - level's own _complete/_merging sentinels are ABSENT (this level must
-**               genuinely still be in progress, never both a checkpoint and a
-**               finished/mid-merge level at once)
-**             - for level > 0, the PREVIOUS level's _complete sentinel exists
+**             - this step's OUTPUT sentinels are ABSENT: Level_(level+1)'s _complete and
+**               _merging (iteration `level` writes Level_(level+1), so those -- not
+**               Level_(level)'s -- mark this step done/mid-merge; the step must genuinely
+**               still be in progress). Checking Level_(level)'s here was a real off-by-one
+**               that rejected every checkpoint on restart, fixed v1.0.9.
+**             - this step's INPUT is complete: Level_(level)'s _complete sentinel exists
+**               (the data iteration `level` reads, written by the previous step)
 **             - a real directory scan of every writer drive, cross-checked against the
 **               checkpoint's own integrity manifest, agrees on all three counts: no
 **               manifest file missing on disk, no real file on disk the manifest never

@@ -4,6 +4,37 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.9] - 2026-08-10
+
+### Checkpoint restart was rejecting every checkpoint (level-numbering off-by-one in the staleness guard)
+
+Found while live-testing the checkpoint/restart path (Test 2 of a 3-part validation): after a
+mid-level checkpoint + hard kill, restarting always **ignored the checkpoint and re-solved the
+level from scratch**, logging `level N already has a _complete sentinel -- ignoring stale
+checkpoint`. The checkpoint write path is fine (Tests 1 and 3 passed); this was purely the
+restart-time staleness guard in `ReadValidCheckpoint`.
+
+Root cause is the project's level-numbering off-by-one (`project_level_numbering_offset_by_one`,
+and `InitSolver.cpp`'s resume scan): iteration `level` **reads** `Level_level` and **writes**
+`Level_(level+1)`, so completing the *previous* step writes `Level_(level)_complete` -- the
+input-ready marker, which is **always present** while this step runs. The guard checked
+`SentinelNameComplete(level)` and so always found that marker and declared the checkpoint stale.
+The sentinel that actually means "this step finished" is `Level_(level+1)_complete`, which
+correctly does not exist mid-step. Fixes:
+
+- Staleness check now tests `Level_(level+1)`'s `_complete` sentinel (was `Level_(level)`).
+- The parallel `_merging` check likewise tests `Level_(level+1)` (the merge that could be
+  mid-flight produces `Level_(level+1)`).
+- The input-ready check now tests `Level_(level)`'s `_complete` (was `Level_(level-1)` -- same
+  off-by-one; harmless in practice since every lower level is complete too, corrected for
+  consistency).
+
+With this, a valid mid-level checkpoint is accepted on restart, its integrity manifest is
+cross-checked against the writer dirs (the three hard-Fatal rules, unchanged), and the input
+stream resumes from the checkpointed position. No change to the write path or the manifest rules.
+
+---
+
 ## [1.0.8] - 2026-08-10
 
 ### Mid-level checkpoint pause no longer closes and re-decodes its own read stream
