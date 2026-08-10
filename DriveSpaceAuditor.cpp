@@ -28,6 +28,7 @@
 #include "DriveLedger.h"
 #include "Logger.h"
 #include <windows.h>
+#include <string.h>
 
 /* Discrepancies smaller than this are treated as agreement (see
 ** reconcileOneDrive's deadband). Sized to swallow filesystem rounding and the
@@ -80,30 +81,52 @@ static void reconcileOneDrive(PSolveContext pCtx, char driveLetter, int writerId
     if (!GetDiskFreeSpaceExA(root, &freeAvail, nullptr, nullptr))
         return;   /* transient failure (e.g. a NAS drive momentarily unreachable) -- try again next pass */
 
-    int64_t outstandingReservations = 0;
+    /* Value each in-flight write by how much of its reservation is NOT YET on
+    ** disk: (reservedBytes - bytesWrittenSoFar). OS free space already reflects
+    ** the bytes written so far, so subtracting only the *unwritten* remainder
+    ** keeps realAvailable steady across the whole write -- as the file grows,
+    ** the shrinking "unwritten" term cancels the shrinking OS free exactly, so
+    ** the number a reader compares against the ledger doesn't move just because
+    ** a write is in progress. That lets us reconcile every pass, even mid-write,
+    ** with no spurious "correction" -- instead of skipping active drives and
+    ** hoping to catch a quiet gap. bytesWrittenSoFar is the file's real current
+    ** on-disk size (the registry has its path); only NEW-file writes hold a
+    ** reservation (reservedBytes > 0), so reserved-as-input nodes are ignored.
+    */
+    int64_t outstandingUnwritten = 0;
     if (writerIdx >= 0)
     {
         EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
         for (auto& n : pSt->driveRegistry[writerIdx])
-            if (n.isReserved)
-                outstandingReservations += n.reservedBytes;
+        {
+            if (!n.isReserved || n.reservedBytes <= 0) continue;
+            int64_t onDisk = 0;
+            WIN32_FILE_ATTRIBUTE_DATA fad = {};
+            if (GetFileAttributesExA(n.filename, GetFileExInfoStandard, &fad))
+                onDisk = ((int64_t)fad.nFileSizeHigh << 32) | (int64_t)fad.nFileSizeLow;
+            int64_t unwritten = n.reservedBytes - onDisk;
+            if (unwritten > 0) outstandingUnwritten += unwritten;
+        }
         LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
     }
-
-    /* Skip while a writer drive has an in-flight write outstanding. OS free
-    ** space reflects the bytes written SO FAR, but the reservation counts the
-    ** file's full worst-case size, so realAvailable would subtract those
-    ** in-flight bytes twice and report a spurious shortfall -- every pass,
-    ** for the whole duration of a big flush. During active I/O the ledger's
-    ** own reserve/reclaim accounting is trusted; reconcile only in the
-    ** quiescent gaps between flushes (which is also when an external change
-    ** would actually be noticeable). This was the main source of the
-    ** "correcting down / correcting up" churn seen on the first real run.
-    */
-    if (writerIdx >= 0 && outstandingReservations > 0)
+    else
     {
-        wasHigherLastPass = false;
-        return;
+        /* Non-registry drives (store, medium) hold their in-flight output
+        ** outside the registry, and the store merge in particular reserves a
+        ** large worst-case for minutes -- we can't yet value its unwritten
+        ** remainder the way we do for writer drives. Until that output is
+        ** tracked too, skip reconciling one of these while a merge/iMerge is
+        ** actively writing to it (the only window it drifts); reconcile
+        ** normally when quiescent. TODO: plumb the store/medium in-flight
+        ** output sizes so these get the same continuous treatment as D:/E:.
+        */
+        bool storeMergeActive = pSt->currentPhase && strcmp(pSt->currentPhase, "Merging to store") == 0;
+        bool anyImergeActive  = pSt->imergeActive[0] || pSt->imergeActive[1];
+        if (storeMergeActive || anyImergeActive)
+        {
+            wasHigherLastPass = false;
+            return;
+        }
     }
 
     /* Same safety buffer the ledger itself was seeded with (DriveInitLedger,
@@ -115,7 +138,7 @@ static void reconcileOneDrive(PSolveContext pCtx, char driveLetter, int writerId
     uint64_t safetyBufferBytes = safetyBufferGB ? safetyBufferGB * 1024ULL * 1024ULL * 1024ULL
                                                  : DRIVE_SPACE_LOW_BYTES;
 
-    int64_t realAvailable = (int64_t)freeAvail.QuadPart - (int64_t)safetyBufferBytes - outstandingReservations;
+    int64_t realAvailable = (int64_t)freeAvail.QuadPart - (int64_t)safetyBufferBytes - outstandingUnwritten;
     if (realAvailable < 0) realAvailable = 0;
 
     int64_t ledgerValue = DriveAvailable(pSt, driveLetter);

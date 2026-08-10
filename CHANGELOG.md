@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.3] - 2026-08-09
+
+### Drive-space auditor: reconcile continuously by real bytes-written, not skip
+
+v1.0.2 stopped the auditor's spam by *skipping* a writer drive while it had an in-flight
+write, and skipping the store drive during its (minutes-long) end-of-level merge -- but that
+was a cop-out, and the store merge in particular still logged a burst of "correcting up/down"
+because the store drive isn't registry-tracked. Replaced the skip with real accounting:
+
+- The auditor now values each in-flight write by how much of its reservation is **not yet on
+  disk** (`reservedBytes - bytesWrittenSoFar`), where `bytesWrittenSoFar` is the file's real
+  current on-disk size (statted via `GetFileAttributesExA`; the registry has the path). As a
+  file grows, the shrinking "unwritten" term cancels the shrinking OS free-space exactly, so
+  the reconciled figure holds steady across the whole write -- no false drift -- and the
+  auditor can run **every pass, even mid-write**, instead of skipping active drives. The
+  4 GB deadband stays for filesystem rounding / stat-vs-OS timing jitter; a genuine, sizable
+  mismatch is still logged as a WARNING (external file copied onto / deleted from the drive).
+- **Store/medium drives** (Y:/F:) hold their in-flight merge/iMerge output outside the
+  registry, so they can't yet be valued this way; for now they still skip reconciliation only
+  while a merge/iMerge is actively writing to them, and reconcile normally when quiescent.
+  Flagged in-code as a TODO to plumb those in-flight output sizes so the store drive gets the
+  same continuous treatment as the writer drives.
+
 ## [1.0.2] - 2026-08-09
 
 ### Post-first-run fixes from the v1.0.1 shakedown
