@@ -49,9 +49,13 @@ bool CheckpointDueNow(PSolveContext pCtx);
 **           and a full integrity manifest directly from that now-quiescent
 **           state, writes the checkpoint file, then restarts the
 **           consolidation master for the remainder of the level (the level
-**           isn't ending, only pausing). Clears checkpointPauseFlag/
-**           checkpointRequestedNow and resets the interval timer before
-**           returning.
+**           isn't ending, only pausing). Clears checkpointRequestedNow and
+**           resets the interval timer before returning. Called synchronously
+**           from inside the GPU feeder's own read callback
+**           (FeedBoardIntoBatch, LevelSolverThread.cpp) -- the read stream
+**           is never unwound for this, so there is nothing to reseek or
+**           re-decode on return; only a real terminateThreads shutdown ever
+**           interrupts the stream.
 ** @details Caller must have already flushed the GPU accumulator
 **          (FlushAccumulator) before calling this -- by the time this
 **          function starts, boardsReadFromStore must already equal exactly

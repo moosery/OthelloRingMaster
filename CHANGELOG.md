@@ -4,6 +4,53 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.8] - 2026-08-10
+
+### Mid-level checkpoint pause no longer closes and re-decodes its own read stream
+
+Live level 18 testing (6x6, ~145 billion records into the white sub-pass) showed
+`--checkpt` requests taking a long time to resolve, with GPU-generation counters frozen
+while consolidation kept running normally. Root cause: `FeedNestedIndexLevel`
+(`LevelSolverThread.cpp`) handled an in-process checkpoint pause exactly like a real
+shutdown -- it let `RingNestedIndexStreamAll` unwind and close all 4 of its readers, took
+the checkpoint, then re-entered from the true start of the sub-pass's files and
+skip-decoded every already-consumed record (`st.skipRemaining = st.recordsThisSubPass;`)
+before real processing could resume. That's a real, non-incremental, O(records-so-far)
+disk read + decompress + ring-index reconstruction on every single checkpoint -- and it
+gets more expensive the deeper into a sub-pass you are, since the skip count is never
+relative to the previous checkpoint, only to the very start.
+
+There was never a technical need for this in the in-process case: `PerformMidLevelCheckpoint`
+only ever touches writer-drive (write-side) files, completely disjoint from the read-side
+store files `RingNestedIndexStreamAll` holds open. Fixed by taking the checkpoint
+synchronously, in place, from inside the GPU feeder's own per-record callback
+(`FeedBoardIntoBatch`) instead of signaling the stream to stop:
+
+- `FeedBoardIntoBatch` now calls `PerformMidLevelCheckpoint` directly (guarded by
+  `!terminateThreads`, matching the old top-of-function bail-out so a race with a real
+  shutdown can never kick one off) once `CheckpointDueNow` is true, after flushing whatever's
+  currently batched. The stream's 4 `RSFReader`s and all lookahead state stay open and
+  untouched on `FeedNestedIndexLevel`'s stack the entire time -- once the checkpoint
+  returns, the very next record just keeps streaming from exactly where it was. No reseek,
+  no re-decode, regardless of how deep into a sub-pass the checkpoint lands.
+- `RingNestedIndexStreamAll`'s `pTerminate` is wired directly to `terminateThreads` again
+  (reverted to how it worked before checkpointing existed) instead of the retired
+  `checkpointPauseFlag` -- a checkpoint no longer needs to interrupt the stream at all, so
+  the flag that used to exist purely to distinguish "stop for a checkpoint" from "stop for
+  real" is gone; only a genuine shutdown ever stops this stream now.
+- `FeedNestedIndexLevel`'s pause/resume-and-loop structure collapses to a single
+  `RingNestedIndexStreamAll` call -- the whole "loop back after a checkpoint" branch is
+  gone, since a checkpoint pause can no longer cause the stream to return early.
+- The skip-based resume mechanism (`skipRemaining`/`resumeCheckpointRecords`) is unchanged
+  and still used for its one remaining real purpose: a genuine cross-process restart, where
+  there is no live stream to resume and a real (still O(n), but now much rarer) skip-decode
+  from the last checkpoint's recorded position is unavoidable.
+
+Not applied retroactively to any already-running v1.0.5-v1.0.7 process -- this only affects
+runs built and started after this fix.
+
+---
+
 ## [1.0.7] - 2026-08-10
 
 ### RegistryAuditor stuck-reservation check replaced with real progress tracking, not duration

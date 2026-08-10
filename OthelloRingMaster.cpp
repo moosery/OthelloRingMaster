@@ -460,10 +460,9 @@ int main(int argc, char* argv[])
         g_state.playLevel = (uint8_t)level;
 
         /* Mid-level checkpointing (Checkpoint.h): fresh interval window and
-        ** no pending pause/on-demand request at the start of every level.
+        ** no pending on-demand request at the start of every level.
         */
         g_state.checkpointIntervalStartTickMs = GetTickCount64();
-        g_state.checkpointPauseFlag           = false;
         g_state.checkpointRequestedNow        = false;
 
         /* Reset per-level per-thread state -- EXCEPT the registry/naming

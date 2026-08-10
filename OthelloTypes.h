@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.7"
+#define VERSION "1.0.8"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -597,17 +597,17 @@ typedef struct __OthelloRingMasterState
     uint64_t          cascadeStartTickMs[2];        /* GetTickCount64() at the start of the whole cascade (group 1); used for the stats thread's ETA */
     uint64_t          currentLevelTotalBoards;      /* total boards in current level's input file(s); set by GPU feeder before reading starts */
 
-    /* Mid-level checkpointing (see Checkpoint.h). checkpointPauseFlag is
-    ** passed as RingNestedIndexStreamAll's pTerminate argument in place of
-    ** terminateThreads during normal solving -- a distinct flag so the
-    ** existing "drop the partial ping-pong slot" behavior tied to
-    ** terminateThreads (correct for a real shutdown, wrong for a checkpoint
-    ** pause) never fires here. Set by the GPU feeder itself (FeedBoardIntoBatch)
-    ** once checkpointRequestedNow is seen, or once checkpointIntervalStartTickMs
-    ** shows the configured interval has elapsed; cleared once the checkpoint
-    ** sequence completes and streaming is about to resume.
+    /* Mid-level checkpointing (see Checkpoint.h). v1.0.8: a checkpoint pause
+    ** is now handled synchronously, in place, from inside FeedBoardIntoBatch
+    ** itself -- the GPU feeder's read stream (RingNestedIndexStreamAll) is
+    ** never interrupted for a checkpoint, only for a real terminateThreads
+    ** shutdown, so pTerminate is wired directly to terminateThreads and no
+    ** separate pause-signaling flag is needed any more (retired
+    ** checkpointPauseFlag, which used to exist solely to distinguish the two
+    ** without also triggering terminateThreads' "drop the partial ping-pong
+    ** slot" behavior -- moot now that a checkpoint pause never unwinds the
+    ** stream at all).
     */
-    volatile bool  checkpointPauseFlag;
     volatile bool  checkpointRequestedNow;      /* set by the CHECKPT stats-port command; cleared once handled */
     uint64_t       checkpointIntervalStartTickMs; /* GetTickCount64() when the current interval window started; reset at level start and after each checkpoint */
 

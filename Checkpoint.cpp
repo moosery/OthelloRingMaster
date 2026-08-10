@@ -162,7 +162,6 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 
     pSt->checkpointRequestedNow        = false;
     pSt->checkpointIntervalStartTickMs = GetTickCount64();
-    pSt->checkpointPauseFlag           = false;
 }
 
 /*

@@ -263,7 +263,13 @@ point every real writer-drive file is finished and unreserved. It then captures,
 from the now-quiescent file registry, the per-drive naming counter plus a full integrity
 manifest (`{filename, color, size}` for every real file) and writes a small
 `Level_NNNN_WxH_checkpoint` file recording exactly where the input stream had gotten to,
-before restarting the consolidation master (the level isn't ending, only pausing).
+before restarting the consolidation master (the level isn't ending, only pausing). The
+pause is taken **in place**, synchronously, from inside the GPU feeder's own read callback --
+the store-side read stream (a separate, disjoint set of files from everything the checkpoint
+drain touches) is never closed or unwound for this, so resuming costs nothing regardless of
+how many billions of records into the current sub-pass the checkpoint lands (v1.0.8; a real
+process restart is the only case that still needs to skip-decode back to the checkpointed
+position, since there's no live stream left to resume in that case).
 
 On the next startup, if that level's checkpoint validates (previous level's `_complete`
 sentinel present) the writer directories are preserved instead of wiped, the registry is

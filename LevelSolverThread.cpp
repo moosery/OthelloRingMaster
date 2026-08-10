@@ -248,27 +248,22 @@ static void FlushAccumulator(GpuAccumulator* pAccum, PSolveContext pCtx);
 /*
 ** Function: FeedBoardIntoBatch
 ** @brief    Appends one expanded board into the current ping-pong slot,
-**           flushing a full batch to the GPU accumulator once optBatch is reached.
+**           flushing a full batch to the GPU accumulator once optBatch is
+**           reached. Also where a due mid-level checkpoint is taken, IN
+**           PLACE, synchronously -- see the checkpoint block below.
 ** @param    st  - the batching state to append into
 ** @param    key - the ring-ordered board to feed
 */
 static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
 {
     POthelloRingMasterState pSt = st->pCtx->pState;
-    /* Propagate a real shutdown into checkpointPauseFlag too, since that's
-    ** the flag actually passed to RingNestedIndexStreamAll as pTerminate
-    ** below (see FeedNestedIndexLevel) -- terminateThreads itself is still
-    ** what the post-stream code checks to decide real-shutdown vs
-    ** checkpoint-pause, this just makes sure the stream actually stops
-    ** promptly either way.
-    */
-    if (pSt->terminateThreads) { pSt->checkpointPauseFlag = true; return; }
 
-    /* Resume-from-checkpoint replay: this exact record was already fed to
-    ** the GPU before whatever pause (in-process or a real restart) this
-    ** call is recovering from. Pure decode-and-discard -- no GPU work, no
-    ** boardsReadFromStore increment (that would double-count it in the
-    ** live "% of level done" display).
+    /* Resume-from-checkpoint replay (real process restart only, as of
+    ** v1.0.8 -- an in-process checkpoint pause no longer needs this at all,
+    ** see below): this exact record was already fed to the GPU before
+    ** whatever restart this call is recovering from. Pure decode-and-
+    ** discard -- no GPU work, no boardsReadFromStore increment (that would
+    ** double-count it in the live "% of level done" display).
     */
     if (st->skipRemaining > 0)
     {
@@ -283,17 +278,43 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
     st->recordsThisSubPass++;
     pSt->levelStats[pSt->playLevel].boardsReadFromStore++;
 
-    if (!pSt->checkpointPauseFlag && CheckpointDueNow(st->pCtx))
-        pSt->checkpointPauseFlag = true;
+    if (st->count >= st->optBatch)
+    {
+        if (!GpuAccumulatorHasRoom(st->pAccum, st->count))
+            FlushAccumulator(st->pAccum, st->pCtx);
 
-    if (st->count < st->optBatch) return;
+        GpuProcessBatch(st->pAccum, st->slots[st->slotIdx], st->count, st->playerBit);
+        st->slotIdx = (st->slotIdx + 1) % PING_PONG_SLOTS;
+        st->count   = 0;
+    }
 
-    if (!GpuAccumulatorHasRoom(st->pAccum, st->count))
+    /* v1.0.8: a due checkpoint is taken right here, synchronously, instead
+    ** of setting a flag and letting RingNestedIndexStreamAll unwind (which
+    ** used to force a resume-time full re-decode of everything already
+    ** consumed this sub-pass -- O(records-so-far) and NOT incremental
+    ** across repeated checkpoints, since it made every checkpoint after the
+    ** first look even further back). Nothing needs to be reseeked: the
+    ** stream's 4 open RSFReaders and all lookahead state live on
+    ** FeedNestedIndexLevel's stack the entire time this call runs, and
+    ** PerformMidLevelCheckpoint only ever touches writer-drive files -- a
+    ** completely disjoint set from the read-side store files this stream is
+    ** open against. Once it returns, this function just returns too, and
+    ** the stream keeps reading the very next record from exactly where it
+    ** was, no different from any other call.
+    */
+    if (!pSt->terminateThreads && CheckpointDueNow(st->pCtx))
+    {
+        if (st->count > 0)
+        {
+            if (!GpuAccumulatorHasRoom(st->pAccum, st->count))
+                FlushAccumulator(st->pAccum, st->pCtx);
+            GpuProcessBatch(st->pAccum, st->slots[st->slotIdx], st->count, st->playerBit);
+            st->slotIdx = (st->slotIdx + 1) % PING_PONG_SLOTS;
+            st->count   = 0;
+        }
         FlushAccumulator(st->pAccum, st->pCtx);
-
-    GpuProcessBatch(st->pAccum, st->slots[st->slotIdx], st->count, st->playerBit);
-    st->slotIdx = (st->slotIdx + 1) % PING_PONG_SLOTS;
-    st->count   = 0;
+        PerformMidLevelCheckpoint(st->pCtx, st->playerBit, st->recordsThisSubPass);
+    }
 }
 
 /*
@@ -358,79 +379,34 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
     st.recordsThisSubPass = skipRecords;
     st.skipRemaining      = skipRecords;
 
-    /* Loops back after a mid-level checkpoint pause: the checkpoint's own
-    ** flush/write/consolidation-restart sequence runs, then this re-streams
-    ** from the true start of the file, silently skipping everything already
-    ** fed (st.skipRemaining), and continues real processing right where it
-    ** left off. A real shutdown (terminateThreads) or a genuine end-of-stream
-    ** finish both break out normally, exactly as before this loop existed.
+    /* Streams directly from disk -- never holds the whole level's board-key
+    ** data resident, regardless of board count (see RingNestedIndex.h's own
+    ** Notes on RingNestedIndexStreamAll vs. Load()/ExpandAll()). pTerminate
+    ** wired directly to terminateThreads: as of v1.0.8, a mid-level
+    ** checkpoint no longer needs to interrupt this stream at all (it's taken
+    ** synchronously, in place, from inside FeedBoardIntoBatch -- see there),
+    ** so the only reason this call can return early is a real shutdown.
+    ** streamOk still comes back true on a caller-requested stop (see the
+    ** function's own header comment), so this Fatal only fires on genuine
+    ** corruption/truncation, never on a normal stop.
     */
-    for (;;)
-    {
-        /* Streams directly from disk -- never holds the whole level's board-key
-        ** data resident, regardless of board count (see RingNestedIndex.h's
-        ** own Notes on RingNestedIndexStreamAll vs. Load()/ExpandAll()).
-        ** pTerminate wired to checkpointPauseFlag, not terminateThreads
-        ** directly (changed for mid-level checkpointing, see Checkpoint.h) --
-        ** FeedBoardIntoBatch propagates a real terminateThreads into this
-        ** same flag so the stream still stops just as promptly as before
-        ** (added 2026-07-23 originally: without it, Ctrl+C mid-solve had to
-        ** wait for this entire loop to stream through every remaining board
-        ** in the level -- potentially billions of real disk reads -- before
-        ** the GPU feeder could ever notice shutdown was requested). streamOk
-        ** still comes back true on a caller-requested stop (see the
-        ** function's own header comment), so this Fatal only fires on
-        ** genuine corruption/truncation, never on a normal stop of either kind.
-        */
-        bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
-                                                  [&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); },
-                                                  &pSt->checkpointPauseFlag);
-        if (!streamOk)
-            Fatal(FATAL_MERGE_LOGIC_ERROR,
-                  "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "
-                  "failed to stream -- corrupt or truncated data. Files:\n"
-                  "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
-                  existCount, expectedCount, level, RSFPlayerStr(player),
-                  cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
-                  hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
+    bool streamOk = RingNestedIndexStreamAll(cellsInUsePath, ring1Path, ring2Path, ring34Path,
+                                              [&st](const BOARD_KEY& key) { FeedBoardIntoBatch(&st, key); },
+                                              &pSt->terminateThreads);
+    if (!streamOk)
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "FeedNestedIndexLevel: nested-index files exist (%d/%d) for level %d %s but "
+              "failed to stream -- corrupt or truncated data. Files:\n"
+              "  CellsInUse: '%s'\n  Ring_1:     '%s'\n  Ring_2:     '%s'\n  Ring_3_4:   '%s'",
+              existCount, expectedCount, level, RSFPlayerStr(player),
+              cellsInUsePath, hasRing1 ? ring1Path : "(not applicable for this board size)",
+              hasRing2 ? ring2Path : "(not applicable for this board size)", ring34Path);
 
-        if (pSt->terminateThreads)
-            break;   /* real shutdown -- partial slot deliberately dropped below, level is being wiped and restarted anyway */
-
-        if (pSt->checkpointPauseFlag)
-        {
-            /* Checkpoint pause, not a real shutdown: unlike the terminate
-            ** path, the partial slot MUST be flushed for real here -- these
-            ** records already incremented boardsReadFromStore, so leaving
-            ** them unprocessed would silently lose them the moment this
-            ** checkpoint is later resumed from (they'd be skipped as
-            ** "already consumed" without ever having reached the GPU).
-            */
-            if (st.count > 0)
-            {
-                if (!GpuAccumulatorHasRoom(pAccum, st.count))
-                    FlushAccumulator(pAccum, pCtx);
-                GpuProcessBatch(pAccum, st.slots[st.slotIdx], st.count, playerBit);
-                st.slotIdx = (st.slotIdx + 1) % PING_PONG_SLOTS;
-                st.count   = 0;
-            }
-            FlushAccumulator(pAccum, pCtx);
-            PerformMidLevelCheckpoint(pCtx, player, st.recordsThisSubPass);
-
-            /* Resume: re-stream from the true start, skipping everything
-            ** already fed (including whatever prior pauses already skipped).
-            ** PerformMidLevelCheckpoint already cleared checkpointPauseFlag.
-            */
-            st.skipRemaining = st.recordsThisSubPass;
-            continue;
-        }
-
-        break;   /* genuine end of stream -- nothing left to feed for this sub-pass */
-    }
-
-    /* Flush whatever's left in the current partially-filled slot. Only
-    ** reached on a real finish or a real terminate -- the checkpoint-pause
-    ** case above already flushed its own partial slot before looping.
+    /* Flush whatever's left in the current partially-filled slot. Skipped on
+    ** a real terminate -- the partial slot is deliberately dropped, the
+    ** level is being wiped and restarted anyway. A checkpoint pause never
+    ** reaches here needing this: FeedBoardIntoBatch already flushed its own
+    ** partial slot synchronously before taking the checkpoint.
     */
     if (st.count > 0 && !pSt->terminateThreads)
     {
