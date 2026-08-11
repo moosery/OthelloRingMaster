@@ -26,6 +26,7 @@
 #include "Checkpoint.h"
 #include "Registry.h"
 #include "FlusherPool.h"
+#include "IMergePool.h"
 #include "ConsolidationMaster.h"
 #include "RSFFileName.h"
 #include "Logger.h"
@@ -69,23 +70,35 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     LoggerLog("Checkpoint: pausing level %d (%s sub-pass, %llu records consumed) to checkpoint...\n",
               level, RSFPlayerStr(activeSubPass), (unsigned long long)recordsConsumedInSubPass);
 
-    /* Drain every pool that could still be touching a writer-drive file:
-    ** the D2H/compress pool (pMergeWriterPool), whatever it hands off to
-    ** the flusher pool, and the iMerge pool -- then explicitly force-flush
-    ** any thread's leftover in-memory pool data (FlushMergeWriterBuffer
-    ** already no-ops safely if a thread has nothing accumulated), so
-    ** everything is durably on disk before the manifest below is captured.
-    ** Consolidation master + workers stop last (via ConsolidationMasterStop,
-    ** which itself waits for the pool to idle) -- it's the one thing
-    ** deliberately restarted afterward, since the level isn't ending, only
-    ** pausing.
+    /* Drain, honoring the hard rule (fixed v1.0.11): a flush or an iMerge has
+    ** PRIORITY and must FINISH -- it is never interrupted by a checkpoint.
+    ** Consolidation is the ONLY thing that may be stopped. Taking a checkpoint
+    ** while a space-relief iMerge was mid-flight (plowing through it with a
+    ** force-flush + a second ConsolidationMasterStop while the relief was
+    ** still coordinating its own) left a half-migrated iMerge output on the
+    ** medium drive that the writer-drive-only manifest never covered -- real
+    ** data loss (a resumed level came back ~1.7B boards short). So the order
+    ** is now: let everything flush/iMerge-related go fully quiescent first,
+    ** and only then stop consolidation and snapshot.
+    **
+    ** (1) Let any in-flight space relief run to completion -- it drives the
+    **     iMerges and its own consolidation stop/restart cycle; never barge in.
+    ** (2) Drain the GPU->pool (D2H/compress) handoff.
+    ** (3) Force-flush leftover in-memory pool data to disk. This is a flush;
+    **     it must fully complete, and if it hits space pressure it drives its
+    **     own relief (iMerge), which must also complete -- (4) waits for that.
+    ** (4) Confirm every flush/iMerge/relief is genuinely idle.
+    ** (5) NOW stop consolidation -- the one interruptible thing -- and (6, below)
+    **     snapshot a fully quiescent, flush/iMerge-complete state.
     */
-    WaitForPoolIdle(pSt->pMergeWriterPool);
-    for (int ti = 0; ti < (int)pSt->numMergeWriters; ti++)
+    SpaceReliefGateWait(pCtx);                                   /* (1) */
+    WaitForPoolIdle(pSt->pMergeWriterPool);                      /* (2) */
+    for (int ti = 0; ti < (int)pSt->numMergeWriters; ti++)      /* (3) */
         FlushMergeWriterBuffer(ti, pCtx);
+    SpaceReliefGateWait(pCtx);                                   /* (4) any relief (3) kicked off */
     WaitForPoolIdle(pSt->pFlusherPool);
     WaitForPoolIdle(pSt->pIMergePool);
-    ConsolidationMasterStop(pCtx);
+    ConsolidationMasterStop(pCtx);                              /* (5) */
     WaitForPoolIdle(pSt->pConsolidatorPool);
 
     /* Every writer-drive file is now real, finished, and unreserved --

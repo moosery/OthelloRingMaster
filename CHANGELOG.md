@@ -4,6 +4,37 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.11] - 2026-08-11
+
+### Checkpoint no longer plows through an in-flight flush/iMerge (fixes ~1.7B-board data loss on resume)
+
+With v1.0.9/v1.0.10 in place, a cross-process resume validated, didn't crash, and skipped
+correctly -- but the resumed level came back **~1.72B boards short** (L15 = 18,071,067,055 vs
+the correct 19,794,510,189). Root cause, confirmed against the user's live observation (an
+iMerge was running when the checkpoint was requested, and it "went away" as flushes started):
+
+`PerformMidLevelCheckpoint` assumed a quiescent, writer-drive-only world. When a checkpoint
+fired while a **space-relief iMerge** was mid-flight, it barged in -- ran its own
+`FlushMergeWriterBuffer` and a second `ConsolidationMasterStop` while the relief coordinator
+was still running its own iMerge + consolidation stop/restart. That left a half-migrated
+iMerge output on the medium drive (F:), which the checkpoint manifest never covers (it tracks
+only the writer drives D:/E:), so the incomplete state went undetected and the black-early
+output the skip relies on was lost.
+
+Fix follows the rule: **a flush or iMerge has priority and must finish; only consolidation may
+be stopped.** The drain now (1) waits for any in-flight space relief to fully complete before
+touching anything, (2) drains the GPU->pool handoff, (3) force-flushes leftover pool data (a
+flush that must complete, and any relief it triggers must complete), (4) waits for every
+flush/iMerge/relief to be genuinely idle, and only then (5) stops consolidation and snapshots.
+No more barging through in-flight flush/iMerge work; the manifest is captured against a fully
+quiescent state.
+
+Known follow-up (not required for this fix, since the reorder makes the iMerge output complete
+and consistent): the checkpoint manifest still covers only the writer drives, so medium-drive
+iMerge outputs have no cross-restart integrity check -- worth extending later for defense in depth.
+
+---
+
 ## [1.0.10] - 2026-08-10
 
 ### Checkpoint restart corrupted its own preserved writer files (naming counter reset to 0 after restore)
