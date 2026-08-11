@@ -122,8 +122,22 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                            ? (uint64_t)(elapsedNanos / (int64_t)cur->boardsReadFromStore) : 0;
     FormatDuration(elapsedNanos, dur, sizeof(dur));
 
-    const char* phase = curDone ? "done"
-                               : (pSt->currentPhase ? pSt->currentPhase : "RUNNING");
+    /* A resumed sub-pass that's still skip-decoding its already-consumed
+    ** records shows an explicit relocation banner instead of the normal phase
+    ** -- otherwise gen=0 and a solve% climbing from 0 read like a from-scratch
+    ** restart (v1.0.12). */
+    char phaseBuf[80];
+    const char* phase;
+    if (!curDone && pSt->resumeSkipActive && pSt->resumeSkipTotal > 0)
+    {
+        double relocPct = 100.0 * (double)pSt->resumeSkipDone / (double)pSt->resumeSkipTotal;
+        snprintf(phaseBuf, sizeof(phaseBuf), "resuming from checkpoint: %.1f%% relocated", relocPct);
+        phase = phaseBuf;
+    }
+    else
+    {
+        phase = curDone ? "done" : (pSt->currentPhase ? pSt->currentPhase : "RUNNING");
+    }
     n += snprintf(buf + n, bufSize - n,
                   "=== Level %d / %d  [%s]  %s  (%llu brd/s  %llu ns/brd) ===\n",
                   curLevel, maxLevel - 1, phase,
@@ -581,7 +595,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         char curDur[16];
         FormatDuration(elapsedNanos, curDur, sizeof(curDur));
         char phaseStr[24] = "[running]";
-        if (curDone)
+        if (!curDone && pSt->resumeSkipActive && pSt->resumeSkipTotal > 0)
+            snprintf(phaseStr, sizeof(phaseStr), "[reloc%6.1f%%]",
+                     100.0 * (double)pSt->resumeSkipDone / (double)pSt->resumeSkipTotal);
+        else if (curDone)
             snprintf(phaseStr, sizeof(phaseStr), "[done]");
         else if (pSt->currentPhase
                  && strcmp(pSt->currentPhase, "Merging to store") == 0)

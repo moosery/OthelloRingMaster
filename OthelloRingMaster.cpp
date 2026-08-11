@@ -464,6 +464,9 @@ int main(int argc, char* argv[])
         */
         g_state.checkpointIntervalStartTickMs = GetTickCount64();
         g_state.checkpointRequestedNow        = false;
+        g_state.resumeSkipActive              = false;   /* STATUS resume banner off until a sub-pass sets it */
+        g_state.resumeSkipTotal               = 0;
+        g_state.resumeSkipDone                = 0;
 
         /* Reset per-level per-thread state -- EXCEPT the registry/naming
         ** counter when this exact level is resuming from a validated

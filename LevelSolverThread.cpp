@@ -269,8 +269,11 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
     {
         st->skipRemaining--;
         st->recordsThisSubPass++;
+        pSt->resumeSkipDone++;              /* STATUS: "% relocated" progress */
         return;
     }
+    if (pSt->resumeSkipActive)
+        pSt->resumeSkipActive = false;     /* first real record fed -- skip-decode is complete */
 
     st->slots[st->slotIdx][st->count].hi = key.ullCellsInUse;
     st->slots[st->slotIdx][st->count].lo = key.ullCellColors;
@@ -378,6 +381,16 @@ static void FeedNestedIndexLevel(PSolveContext pCtx, GpuAccumulator* pAccum,
     st.pCtx               = pCtx;
     st.recordsThisSubPass = skipRecords;
     st.skipRemaining      = skipRecords;
+
+    /* Publish resume-skip progress for STATUS (v1.0.12): a nonzero skipRecords
+    ** means this sub-pass re-decodes that many already-consumed records before
+    ** real GPU work resumes -- surfaced as "resuming from checkpoint: N%
+    ** relocated" so it isn't mistaken for a from-scratch restart. Cleared in
+    ** FeedBoardIntoBatch the instant the first real record is fed.
+    */
+    pSt->resumeSkipTotal  = skipRecords;
+    pSt->resumeSkipDone   = 0;
+    pSt->resumeSkipActive = (skipRecords > 0);
 
     /* Streams directly from disk -- never holds the whole level's board-key
     ** data resident, regardless of board count (see RingNestedIndex.h's own

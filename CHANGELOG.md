@@ -4,6 +4,26 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.12] - 2026-08-11
+
+### STATUS shows an explicit resume/relocation banner during skip-decode
+
+When a run resumes from a mid-level checkpoint, it first re-decodes the already-consumed
+records from disk (the skip-decode) before real GPU work restarts. During that phase the live
+counters read misleadingly -- `Boards generated = 0` and a `solve %` that climbs from 0 -- which
+looks exactly like a from-scratch restart (it prompted a "did it start over?" double-take during
+testing). `boardsReadFromStore` legitimately doesn't count skipped records, so there was no
+on-screen signal distinguishing a resume from a restart until the totals plateaued far later.
+
+Added a live resume indicator: while skip-decoding, the STATUS header shows
+`[resuming from checkpoint: N% relocated]` (and the level-table phase shows `[reloc N%]`), where
+N = skipped-so-far / total-to-skip. It clears the instant the first real record is fed and normal
+`[GPU solving]` / `[solve N%]` resumes. New live fields `resumeSkipActive/Total/Done`
+(OthelloTypes.h), updated by the GPU feeder (LevelSolverThread.cpp) and read by StatsListener.
+Display-only; no effect on solving.
+
+---
+
 ## [1.0.11] - 2026-08-11
 
 ### Checkpoint no longer plows through an in-flight flush/iMerge (fixes ~1.7B-board data loss on resume)

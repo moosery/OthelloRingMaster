@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.11"
+#define VERSION "1.0.12"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -619,6 +619,19 @@ typedef struct __OthelloRingMasterState
     bool     resumeFromCheckpoint;
     int      resumeCheckpointSubPass;      /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE, valid only if resumeFromCheckpoint */
     uint64_t resumeCheckpointRecords;      /* records already consumed in that sub-pass, valid only if resumeFromCheckpoint */
+
+    /* Live resume-skip progress for the STATUS display (v1.0.12). While a
+    ** resumed sub-pass re-decodes its already-consumed records from disk
+    ** (the skip-decode, before real GPU work restarts), the normal live
+    ** counters read misleadingly -- gen=0, and solve% climbs from 0 as if the
+    ** level restarted. These let STATUS show an explicit
+    ** "resuming from checkpoint: N% relocated" banner instead, so a resume is
+    ** never mistaken for a from-scratch restart. Set true at the start of a
+    ** sub-pass with records to skip, cleared the moment the first real
+    ** (non-skipped) record is fed. */
+    volatile bool     resumeSkipActive;
+    volatile uint64_t resumeSkipTotal;     /* records this sub-pass must skip-decode */
+    volatile uint64_t resumeSkipDone;      /* records skip-decoded so far */
 
     /* Merge-writer threads: one per NVMe drive, stable thdIdx maps to buffer/dir */
     uint8_t  numMergeWriters;
