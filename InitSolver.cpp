@@ -669,25 +669,30 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     */
     CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
     CheckpointStats& cp    = *cpPtr;
+    int savedNextFileIdx[MAX_WRITERS] = {0};
     bool haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
     if (haveValidCheckpoint)
     {
         pState->resumeFromCheckpoint    = true;
         pState->resumeCheckpointSubPass = cp.activeSubPass;
         pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
-        /* Restore each drive's naming counter only -- naming, never logic
-        ** (see OthelloTypes.h's CheckpointStats comment). The registry
-        ** ITSELF is deliberately not restored from the checkpoint at all;
-        ** it gets rebuilt below from a fresh directory scan (RegistryInit +
-        ** a real enumeration of each writer dir), cross-checked against
-        ** cp.manifest by ReadValidCheckpoint's own three hard-Fatal rules
-        ** (already run, above, before this block executes) -- so by the
-        ** time we get here the manifest has already proven the scan and
-        ** the checkpoint agree, and rebuilding by scan is strictly safer
-        ** than trusting persisted state that could have gone stale.
+        /* Stash each drive's naming counter to re-apply AFTER the RegistryInit
+        ** loop below -- naming, never logic (see OthelloTypes.h's
+        ** CheckpointStats comment). CRITICAL (fixed v1.0.10): RegistryInit
+        ** resets nextFileIdx to 0, so restoring straight into
+        ** pState->nextFileIdx HERE gets clobbered by that loop, and new
+        ** post-resume flushes then REUSE indices 0,1,2... -- overwriting
+        ** (truncating) the very writer files the checkpoint preserved,
+        ** corrupting them (a resume crashed on exactly this: an LZ4 decode
+        ** error reading a file a new flush had just truncated). So stash here,
+        ** re-apply after RegistryInit. The registry ITSELF is deliberately not
+        ** restored from the checkpoint -- it gets rebuilt below from a fresh
+        ** directory scan, already cross-checked against cp.manifest by
+        ** ReadValidCheckpoint's three hard-Fatal rules, so rebuilding by scan
+        ** is strictly safer than trusting persisted state that could go stale.
         */
         for (int wi = 0; wi < cp.numMergeWriters; wi++)
-            pState->nextFileIdx[wi] = cp.nextFileIdx[wi];
+            savedNextFileIdx[wi] = cp.nextFileIdx[wi];
     }
     else
     {
@@ -709,9 +714,16 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     */
     for (int i = 0; i < pState->numMergeWriters; i++)
     {
-        RegistryInit(pState, i);
+        RegistryInit(pState, i);   /* resets nextFileIdx[i] to 0 */
         if (haveValidCheckpoint)
+        {
             RegistryRebuildFromDisk(pState, i, pState->mwDirectory[i]);
+            /* Re-apply the checkpoint's naming counter AFTER RegistryInit's
+            ** reset, so new post-resume files never reuse (and overwrite) a
+            ** preserved writer file's index -- see the stash above.
+            */
+            pState->nextFileIdx[i] = savedNextFileIdx[i];
+        }
     }
 
     /* Initialize drive space ledgers after cleanup so we start from clean

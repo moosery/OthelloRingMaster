@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.10] - 2026-08-10
+
+### Checkpoint restart corrupted its own preserved writer files (naming counter reset to 0 after restore)
+
+With the v1.0.9 off-by-one fix in place, a checkpoint restart finally got far enough to validate
+and resume -- and then **crashed** mid-solve with an LZ4 decompress error, because it was
+overwriting the very writer files it had just preserved. `RegistryAuditor` flagged it first
+(`registry size 2639009729 != real size 471859200` -- a 2.6 GB preserved file truncated to 471 MB).
+
+Cause: `InitSolver` restored the per-drive naming counter `nextFileIdx` from the checkpoint
+(so new files continue past the preserved ones), but the `RegistryInit` loop that runs right
+after resets `nextFileIdx` to 0 -- clobbering the restore. Post-resume flushes then reused
+indices 0,1,2..., opening (and thus `CREATE_ALWAYS`-truncating) the preserved `writer_*_0000`,
+`writer_*_0001` files, corrupting them until a later read hit the garbage and died. A latent bug
+in the never-before-validated cross-process resume path, only reachable once v1.0.9 let a restart
+actually proceed.
+
+Fix: stash the checkpoint's `nextFileIdx` in a local and re-apply it **after** the `RegistryInit`
+loop (i.e. after the reset), alongside `RegistryRebuildFromDisk`, so new files always number past
+every preserved file and never reuse an index. Write path and manifest rules unchanged.
+
+---
+
 ## [1.0.9] - 2026-08-10
 
 ### Checkpoint restart was rejecting every checkpoint (level-numbering off-by-one in the staleness guard)
