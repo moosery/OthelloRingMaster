@@ -676,6 +676,12 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         pState->resumeFromCheckpoint    = true;
         pState->resumeCheckpointSubPass = cp.activeSubPass;
         pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
+        /* Carry the checkpoint's cumulative-counter snapshot into live state so
+        ** RunGpuFeederJob can restore it after the per-level reset -- makes the
+        ** resumed level report the FULL level's work (UniqueOut/Generated/
+        ** Written/solve%) and the _complete sentinel's numbers correct, not just
+        ** the post-resume slice. Copied out before MemFree(cpPtr) below. */
+        pState->resumeLevelStats        = cp.levelStatsSnapshot;
         /* Stash each drive's naming counter to re-apply AFTER the RegistryInit
         ** loop below -- naming, never logic (see OthelloTypes.h's
         ** CheckpointStats comment). CRITICAL (fixed v1.0.10): RegistryInit

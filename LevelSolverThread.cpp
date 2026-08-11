@@ -273,13 +273,7 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
         return;
     }
     if (pSt->resumeSkipActive)
-    {
-        pSt->resumeSkipActive = false;     /* first real record fed -- skip-decode is complete */
-        /* DIAGNOSTIC (v1.0.13): census the boards on disk the moment we reach
-        ** the resume position, before any new GPU output -- compare to the
-        ** CHECKPOINT-DONE census to localize where lost boards go. */
-        LogDiskBoardCensus(st->pCtx, "RESUME-AT-POSITION");
-    }
+        pSt->resumeSkipActive = false;     /* first real record fed -- skip-decode is complete (clears STATUS resume banner) */
 
     st->slots[st->slotIdx][st->count].hi = key.ullCellsInUse;
     st->slots[st->slotIdx][st->count].lo = key.ullCellColors;
@@ -600,6 +594,41 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
     int      resumeSubPass          = pSt->resumeCheckpointSubPass;
     uint64_t resumeRecords          = pSt->resumeCheckpointRecords;
     pSt->resumeFromCheckpoint = false;
+
+    /* Restore this level's cumulative counters from the checkpoint snapshot.
+    ** The per-level reset (OthelloRingMaster.cpp) already ran and zeroed
+    ** levelStats[level] fresh before this feeder job started, so the resumed
+    ** solve would otherwise report only its post-resume slice: UniqueOut,
+    ** BoardsGenerated, Written and solve% would all undercount, and the
+    ** end-of-level merge derives mrgDupsRemoved as boardsWrittenToDisk -
+    ** totalUnique -- with boardsWrittenToDisk short, the _complete sentinel's
+    ** numbers come out wrong even though the stored board data is correct.
+    ** Restore ONLY the cumulative counters, never the timing/merge/snapshot
+    ** fields: startTick stays this restart's fresh start (Duration counts
+    ** post-resume wall time), the merge-phase fields stay 0 until the real
+    ** merge fills them, and the per-drive snapshot is captured fresh at level
+    ** completion. Post-resume flushes/gen then ADD onto these restored bases,
+    ** so at merge time every total matches a straight-through solve exactly. */
+    if (resumingFromCheckpoint)
+    {
+        const LevelStats& src = pSt->resumeLevelStats;
+        LevelStats&       dst = pSt->levelStats[level];
+        dst.boardsReadFromStore       = src.boardsReadFromStore;
+        dst.boardsGenerated           = src.boardsGenerated;
+        dst.gpuDupsRemoved            = src.gpuDupsRemoved;
+        dst.gpuFlushes                = src.gpuFlushes;
+        dst.boardsReceivedFromGpu     = src.boardsReceivedFromGpu;
+        dst.boardsWrittenToDisk       = src.boardsWrittenToDisk;
+        dst.mwFilesCreated            = src.mwFilesCreated;
+        dst.mwBytes                   = src.mwBytes;
+        dst.consolidationFilesCreated = src.consolidationFilesCreated;
+        dst.consolidationFilesRemoved = src.consolidationFilesRemoved;
+        dst.consolidationBytesWritten = src.consolidationBytesWritten;
+        dst.passBoards                = src.passBoards;
+        dst.terminalBoards            = src.terminalBoards;
+        if (src.maxMovesInLevel > dst.maxMovesInLevel)
+            dst.maxMovesInLevel = src.maxMovesInLevel;
+    }
 
     /* Sub-pass 1: black-turn input boards -> playerBit = RSF_PLAYER_BLACK.
     ** Skipped entirely if the checkpoint shows white was already the active

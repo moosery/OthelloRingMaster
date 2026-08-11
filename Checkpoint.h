@@ -67,21 +67,6 @@ bool CheckpointDueNow(PSolveContext pCtx);
 void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t recordsConsumedInSubPass);
 
 /*
-** Function: LogDiskBoardCensus
-** @brief    DIAGNOSTIC (v1.0.13). Logs the real board count durably on disk
-**           right now (all writer/merge/store-merge dirs, all compression
-**           tiers), per player + grand total, plus per-drive nextFileIdx and
-**           the checkpoint record position. Call at CHECKPOINT-DONE and again
-**           at RESUME-AT-POSITION (after skip-decode, before new GPU work) to
-**           localize any lost boards: a drop between the two points implicates
-**           the checkpoint/resume path; intact-then-short-at-level-end
-**           implicates the resumed-solve consolidation / end-of-level merge.
-** @param    pCtx  - solve context
-** @param    label - short tag printed in the census header
-*/
-void LogDiskBoardCensus(PSolveContext pCtx, const char* label);
-
-/*
 ** Function: ReadValidCheckpoint
 ** @brief    Reads and validates level's checkpoint file, if one exists.
 ** @details  Validation (all must pass, or this returns false):

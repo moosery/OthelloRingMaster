@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.13"
+#define VERSION "1.0.14"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -273,6 +273,19 @@ typedef struct __CheckpointStats
     int      nextFileIdx[MAX_WRITERS];       /* per-drive naming-counter snapshot -- naming only, never logic */
     int      manifestCount[MAX_WRITERS];     /* how many of manifest[wi][*] are valid */
     CheckpointManifestEntry manifest[MAX_WRITERS][CHECKPOINT_MANIFEST_MAX_FILES];
+    /*
+    ** Full snapshot of this level's live cumulative counters at checkpoint
+    ** time. On a cross-process restart the per-level reset zeroes
+    ** levelStats[level] fresh, so without this the resumed level would report
+    ** only the work done AFTER the resume -- UniqueOut/BoardsGenerated/Written
+    ** and the solve% would all undercount, and (since mrgDupsRemoved is derived
+    ** as boardsWrittenToDisk - totalUnique at end-of-level merge) the _complete
+    ** sentinel's numbers would be wrong even though the stored board data is
+    ** correct. Restored into levelStats[level] on resume (counters only, not
+    ** timing/merge/snapshot fields -- see RunGpuFeederJob) so a resumed level's
+    ** reported totals match a straight-through solve exactly.
+    */
+    LevelStats levelStatsSnapshot;
     char     timestamp[24];                  /* "YYYY-MM-DD HH:MM:SS", informational only */
 } CheckpointStats, * PCheckpointStats;
 
@@ -619,6 +632,7 @@ typedef struct __OthelloRingMasterState
     bool     resumeFromCheckpoint;
     int      resumeCheckpointSubPass;      /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE, valid only if resumeFromCheckpoint */
     uint64_t resumeCheckpointRecords;      /* records already consumed in that sub-pass, valid only if resumeFromCheckpoint */
+    LevelStats resumeLevelStats;           /* cumulative counter snapshot from the checkpoint, valid only if resumeFromCheckpoint -- restored into levelStats[resumeLevel] by RunGpuFeederJob so the resumed level reports full work, not just post-resume work */
 
     /* Live resume-skip progress for the STATUS display (v1.0.12). While a
     ** resumed sub-pass re-decodes its already-consumed records from disk

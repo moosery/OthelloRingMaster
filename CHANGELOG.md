@@ -4,6 +4,43 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.14] - 2026-08-11
+
+### Resumed levels now report the FULL level's work (the "resume data loss" was a stat bug)
+
+Root cause found, and it was never lost data. A cross-process resume of L15 reported
+`UniqueOut=17,044,074,617` with `MrgDups=0` instead of the correct `19,794,510,189` -- but
+`OthelloRingMasterStoreStats` against the actual store confirmed the on-disk board data was
+`19,794,510,189` exactly, both times. The stored data was always correct; only the *reported*
+number was short. The per-level reset (`OthelloRingMaster.cpp`) zeroes `levelStats[level]` fresh
+on every process start, so a resumed level's `boardsWrittenToDisk` began at 0 and only counted
+post-resume flushes. End-of-level merge derives `mrgDupsRemoved = boardsWrittenToDisk -
+totalUnique`; with `boardsWrittenToDisk` short of `totalUnique`, that clamped to 0 (hence
+`MrgDups=0`) and the completion-row `UniqueOut` (derived from the same short base) undercounted.
+
+Fix: the checkpoint now snapshots this level's cumulative counters (`CheckpointStats.
+levelStatsSnapshot`, captured after the full drain in `PerformMidLevelCheckpoint`), carries them
+into `resumeLevelStats` at restart (`InitSolver`), and `RunGpuFeederJob` restores them into
+`levelStats[level]` right after the per-level reset -- counters only (`boardsReadFromStore`,
+`boardsGenerated`, `gpuDupsRemoved`, `gpuFlushes`, `boardsReceivedFromGpu`, `boardsWrittenToDisk`,
+`mwFilesCreated`/`mwBytes`, the three consolidation counters, `passBoards`, `terminalBoards`,
+`maxMovesInLevel`), never the timing/merge/drive-snapshot fields (so Duration counts post-resume
+wall time, merge fields stay 0 until the real merge fills them, and the drive snapshot is captured
+fresh at completion). Post-resume work adds onto the restored bases, so at merge time every
+total -- `UniqueOut`, `BoardsGenerated`, `Written`, `MrgDups`, solve %, and the `_complete`
+sentinel -- matches a straight-through solve exactly. `DoEndOfLevelMerge` needed no change.
+
+Also removed the v1.0.13 `LogDiskBoardCensus` diagnostic (Checkpoint.cpp/.h, plus its call sites
+in LevelSolverThread.cpp and MergeFiles.cpp and the now-unused includes) -- it did its job
+localizing this to the stat path and is no longer needed.
+
+Checkpoint/restart is now validated end to end: take-and-continue (test 1) and
+multiple-checkpoints (test 3) both matched `19,794,510,189` at L15; cross-process
+kill-and-restart (test 2) produced correct stored data all along and, with this fix, now reports
+the correct numbers too.
+
+---
+
 ## [1.0.13] - 2026-08-11  (diagnostic)
 
 ### Disk board-census diagnostic to localize the cross-process-resume data loss
