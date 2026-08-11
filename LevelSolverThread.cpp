@@ -273,7 +273,13 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
         return;
     }
     if (pSt->resumeSkipActive)
+    {
         pSt->resumeSkipActive = false;     /* first real record fed -- skip-decode is complete */
+        /* DIAGNOSTIC (v1.0.13): census the boards on disk the moment we reach
+        ** the resume position, before any new GPU output -- compare to the
+        ** CHECKPOINT-DONE census to localize where lost boards go. */
+        LogDiskBoardCensus(st->pCtx, "RESUME-AT-POSITION");
+    }
 
     st->slots[st->slotIdx][st->count].hi = key.ullCellsInUse;
     st->slots[st->slotIdx][st->count].lo = key.ullCellColors;

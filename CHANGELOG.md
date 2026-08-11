@@ -4,6 +4,25 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.13] - 2026-08-11  (diagnostic)
+
+### Disk board-census diagnostic to localize the cross-process-resume data loss
+
+v1.0.11 did not fix the resume data loss (a resumed L15 came back 17,044,074,617 vs the correct
+19,794,510,189, `MrgDups=0`). The evidence says the preserved black-early files aren't reaching
+the end-of-level merge, but static reasoning couldn't pin whether they're lost in the
+checkpoint/resume path or dropped during the resumed solve. Added `LogDiskBoardCensus`
+(Checkpoint.cpp/.h) -- totals the real boards durably on disk (all writer/merge/store-merge dirs,
+all compression tiers) per player + grand total, plus per-drive nextFileIdx and the checkpoint
+position -- logged at three points: **CHECKPOINT-DONE** (quiescent, before consolidation
+restarts), **RESUME-AT-POSITION** (after skip-decode, before new GPU work), and **PRE-END-MERGE**
+(start of DoEndOfLevelMerge). Comparing the three localizes the loss: a drop CHECKPOINT-DONE ->
+RESUME-AT-POSITION implicates the checkpoint/resume path; intact there but black-early absent at
+PRE-END-MERGE implicates the resumed-solve consolidation / relief. Diagnostic only; no behavior
+change.
+
+---
+
 ## [1.0.12] - 2026-08-11
 
 ### STATUS shows an explicit resume/relocation banner during skip-decode

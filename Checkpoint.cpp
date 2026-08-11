@@ -29,6 +29,7 @@
 #include "IMergePool.h"
 #include "ConsolidationMaster.h"
 #include "RSFFileName.h"
+#include "RingStoreFile.h"
 #include "Logger.h"
 #include "Error.h"
 #include <windows.h>
@@ -36,6 +37,97 @@
 #include "Mem.h"
 
 /* Functions */
+
+/*
+** Function: censusSumPattern
+** @brief    DIAGNOSTIC (v1.0.13). Enumerates every file matching one full
+**           pattern, opens each to read its trailer, and accumulates the real
+**           record (board) count, file count, and byte total. Used by
+**           LogDiskBoardCensus to total the boards durably on disk.
+*/
+static void censusSumPattern(const char* dir, const char* pattern,
+                             int64_t* pFiles, int64_t* pBoards, int64_t* pBytes)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        char path[MAX_FULL_PATH_NAME];
+        snprintf(path, sizeof(path), "%s\\%s", dir, fd.cFileName);
+        RSFReader* r = RSFOpen(path);
+        if (r) { *pBoards += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+        /* r==NULL means no readable trailer yet (a file mid-write, e.g. an
+        ** in-flight consolidation output) -- skip its board count; it's counted
+        ** via its still-present inputs. Its bytes are still tallied below. */
+        ULARGE_INTEGER sz; sz.LowPart = fd.nFileSizeLow; sz.HighPart = (DWORD)fd.nFileSizeHigh;
+        *pBytes += (int64_t)sz.QuadPart;
+        (*pFiles)++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+/*
+** Function: LogDiskBoardCensus
+** @brief    See Checkpoint.h. DIAGNOSTIC (v1.0.13): totals the real boards
+**           durably on disk right now (every writer dir, merge dir, and the
+**           store-merge dir, in every compression tier), per player and grand
+**           total, plus per-drive nextFileIdx and the checkpoint record
+**           position. Logged at CHECKPOINT-DONE and again at RESUME-AT-POSITION
+**           (after skip-decode, before any new GPU work) so the two can be
+**           compared: if the total board count already dropped by then, the
+**           loss is in the checkpoint-capture or resume path; if it's intact
+**           there but short at level end, the loss is later (resumed-solve
+**           consolidation / end-of-level merge).
+*/
+void LogDiskBoardCensus(PSolveContext pCtx, const char* label)
+{
+    POthelloRingMasterState  pSt  = pCtx->pState;
+    POthelloRingMasterConfig pCfg = pCtx->pConfig;
+    int  level = (int)pSt->playLevel;
+    bool comp  = (pCfg->compressMode == COMPRESS_ALL);
+    bool lz4   = comp && pCfg->lz4Drives[0];
+    char pat[MAX_FULL_PATH_NAME];
+
+    LoggerLog("==== DISK BOARD CENSUS [%s] level %d  (resumeCkptRecords=%llu, subPass=%d) ====\n",
+              label, level, (unsigned long long)pSt->resumeCheckpointRecords, pSt->resumeCheckpointSubPass);
+
+    int64_t grandFiles = 0, grandBoards = 0, grandBytes = 0;
+    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    {
+        int64_t f = 0, b = 0, by = 0;
+        for (int i = 0; i < pSt->numMergeWriters; i++)
+        {
+            RSFPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);  censusSumPattern(pSt->mwDirectory[i], pat, &f, &b, &by);
+            if (comp) { RSFZPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);  censusSumPattern(pSt->mwDirectory[i], pat, &f, &b, &by); }
+            if (lz4)  { RSFZLPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player); censusSumPattern(pSt->mwDirectory[i], pat, &f, &b, &by); }
+        }
+        for (int i = 0; i < pSt->numMergeDirs; i++)
+        {
+            RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);  censusSumPattern(pSt->mergeDirectory[i], pat, &f, &b, &by);
+            if (comp) { RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);  censusSumPattern(pSt->mergeDirectory[i], pat, &f, &b, &by); }
+            if (lz4)  { RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player); censusSumPattern(pSt->mergeDirectory[i], pat, &f, &b, &by); }
+        }
+        RSFPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);  censusSumPattern(pSt->storeMergeDirectory, pat, &f, &b, &by);
+        if (comp) { RSFZPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);  censusSumPattern(pSt->storeMergeDirectory, pat, &f, &b, &by); }
+        if (lz4)  { RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player); censusSumPattern(pSt->storeMergeDirectory, pat, &f, &b, &by); }
+
+        LoggerLog("  %-5s: %6lld files  %18lld boards  %18lld bytes\n",
+                  RSFPlayerStr(player), (long long)f, (long long)b, (long long)by);
+        grandFiles += f; grandBoards += b; grandBytes += by;
+    }
+    for (int i = 0; i < pSt->numMergeWriters; i++)
+        LoggerLog("  %c: nextFileIdx=%d\n", pSt->mwDirectory[i][0], pSt->nextFileIdx[i]);
+    LoggerLog("  levelStats: boardsRead=%llu generated=%llu written=%llu gpuDups=%llu mrgDups=%llu\n",
+              (unsigned long long)pSt->levelStats[level].boardsReadFromStore,
+              (unsigned long long)pSt->levelStats[level].boardsGenerated,
+              (unsigned long long)pSt->levelStats[level].boardsWrittenToDisk,
+              (unsigned long long)pSt->levelStats[level].gpuDupsRemoved,
+              (unsigned long long)pSt->levelStats[level].mrgDupsRemoved);
+    LoggerLog("  ==> TOTAL ON DISK: %lld files  %lld boards  %lld bytes\n",
+              (long long)grandFiles, (long long)grandBoards, (long long)grandBytes);
+    LoggerLog("========================================================================\n");
+}
 
 /*
 ** Function: CheckpointDueNow
@@ -163,6 +255,11 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     MemFree(cpPtr);
 
     LoggerLog("Checkpoint: wrote '%s'\n", path);
+
+    /* DIAGNOSTIC (v1.0.13): census the boards durably on disk while everything
+    ** is still quiescent (before consolidation restarts below), to compare
+    ** against the RESUME-AT-POSITION census after a restart. */
+    LogDiskBoardCensus(pCtx, "CHECKPOINT-DONE");
 
     /* Resume for the rest of the level. Deliberately NOT a full per-level
     ** reset (see OthelloRingMaster.cpp's own per-level loop for comparison)

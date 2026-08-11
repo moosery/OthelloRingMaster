@@ -49,6 +49,7 @@
 #include "DriveLedger.h"
 #include "Registry.h"
 #include "FlusherPool.h"
+#include "Checkpoint.h"   /* LogDiskBoardCensus diagnostic (v1.0.13) */
 #include "OthelloBasics.h"
 #include "RingNestedIndex.h"
 #include "Logger.h"
@@ -1299,6 +1300,12 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     int                      level          = (int)pSt->playLevel;
     int                      boardSize      = (int)pCfg->boardSize;
     bool                     compressOutput = (pCfg->compressMode != COMPRESS_NONE);
+
+    /* DIAGNOSTIC (v1.0.13): census exactly what's on disk as this merge begins,
+    ** so a resumed level's total can be checked against the CHECKPOINT-DONE /
+    ** RESUME-AT-POSITION censuses -- if black-early boards are absent here, they
+    ** were dropped somewhere in the resumed solve before the final merge. */
+    LogDiskBoardCensus(pCtx, "PRE-END-MERGE");
 
     /* Clear stale merge-progress fields from the previous level right away.
     ** The main loop flips currentPhase to "Merging to store" before calling
