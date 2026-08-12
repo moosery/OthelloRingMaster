@@ -164,10 +164,11 @@ available bytes from the OS plus outstanding registry reservations every pass, c
 the drive ledger if it disagrees -- immediately if real space is lower than expected,
 after 2 passes if higher).
 
-Mid-level checkpoints now capture a full integrity manifest (`{filename, color, size}`
-per real file) at checkpoint time; on restart the registry is rebuilt from a real
-directory scan and cross-checked against that manifest with three independent hard-Fatal
-rules (missing file, untracked file, size mismatch) -- see
+Mid-level checkpoints record only a tiny payload (feeder position + a last-record
+cross-check + the level's cumulative counters -- no file list). On restart, every data
+file across all drives is validated for an intact trailer (crash-partials are removed with
+`--forcerestart`, else listed and Fatal), and every work dir's next-file index is seeded
+from a disk scan so resumed writes never overwrite a pre-checkpoint file -- see
 [Mid-level checkpointing](#mid-level-checkpointing) below.
 
 ## Requirements
@@ -235,6 +236,9 @@ OthelloRingMaster.exe [options]
                     Override the interval for both background auditors (registry-vs-
                     disk, drive-space reconciliation) -- testing/validation only, to
                     observe them fire within a short run. [default: 120]
+  --forcerestart    On a mid-level checkpoint restart, delete any crash-partial
+                    (no-trailer) data files instead of Fatal-ing with the list.
+                    Use after inspecting the listed files from a prior aborted run.
   --help            Show this help
 ```
 
@@ -256,31 +260,44 @@ OthelloRingMasterStatus.exe --stop      # graceful shutdown
 
 Every level's solve is periodically checkpointed (`--checkpoint-interval-hours`, default 5)
 so a crash or restart mid-level resumes from the last checkpoint instead of re-solving the
-whole level from board 0. A checkpoint pauses the GPU feeder, then fully drains every
-writer-drive-touching pool in order (merge-writer/D2H pool, flusher pool, iMerge pool,
-then the consolidation master and its worker pool) so nothing is left mid-write -- at that
-point every real writer-drive file is finished and unreserved. It then captures, straight
-from the now-quiescent file registry, the per-drive naming counter plus a full integrity
-manifest (`{filename, color, size}` for every real file) and writes a small
-`Level_NNNN_WxH_checkpoint` file recording exactly where the input stream had gotten to,
-before restarting the consolidation master (the level isn't ending, only pausing). The
-pause is taken **in place**, synchronously, from inside the GPU feeder's own read callback --
-the store-side read stream (a separate, disjoint set of files from everything the checkpoint
-drain touches) is never closed or unwound for this, so resuming costs nothing regardless of
-how many billions of records into the current sub-pass the checkpoint lands (v1.0.8; a real
-process restart is the only case that still needs to skip-decode back to the checkpointed
-position, since there's no live stream left to resume in that case).
+whole level from board 0. The design rests on three ideas that keep it both cheap to take
+and safe to resume:
 
-On the next startup, if that level's checkpoint validates (previous level's `_complete`
-sentinel present) the writer directories are preserved instead of wiped, the registry is
-rebuilt from a real directory scan, and that scan is cross-checked against the checkpoint's
-own manifest with three independent hard-Fatal rules: a manifest file missing on disk, a
-real file on disk the manifest never mentioned, or a size mismatch between the two. Any of
-these Fatals with a clear diagnostic rather than silently trusting stale state -- otherwise
-the input stream resumes from the checkpointed position. If the checkpoint doesn't validate,
-the solver falls back to today's behavior (full writer-dir wipe, level restarts from board 0)
-with no partial recovery attempted. `--checkpt` requests a checkpoint immediately rather than
-waiting for the next scheduled interval.
+**Durability, not immutability.** A checkpoint only needs all output produced so far to be
+in *complete* files on disk, wherever they sit (fast writer drives, medium/iMerge drives,
+or the store-drive fallback). It pauses the GPU feeder, drains the GPU->pool handoff,
+force-flushes the in-memory pool buffers out to real files, and waits for any in-flight
+flush/iMerge to finish -- then records position. No files are moved or swept, so a checkpoint
+costs about what a normal flush costs. The pause is taken **in place**, synchronously, from
+inside the GPU feeder's own read callback, so the store-side read stream is never closed
+(v1.0.8); a real process restart is the only case that skip-decodes back to the checkpointed
+position. The written `Level_NNNN_WxH_checkpoint` file is tiny: just the feeder position, a
+last-record cross-check value, and the level's cumulative counters -- no file list.
+
+**Trailer-completeness, not a file manifest.** The fast drives are a live work area
+(consolidation continuously merges and deletes writer files), so pinning exact file
+names/sizes is futile. On restart, every data file across all drives is validated for an
+intact trailer instead (the trailer magic is written last, so its absence marks a
+crash-partial write). A file with no valid trailer is crash debris: `--forcerestart` deletes
+such files and resumes; without it, the run lists them and Fatals so they can be inspected
+first. Only files matching this solver's own `writer_*` / `imerge_L*` naming are ever
+examined -- foreign files on those drives are never touched.
+
+**Disk-scan file indices, never a recorded value.** Because consolidation keeps running
+after a checkpoint and can move pre-checkpoint boards into higher-indexed files, restart
+seeds every work dir's next-file index from a scan of what's actually on disk (highest index
++ 1). Resumed writes therefore always land above every existing file and can never overwrite
+a pre-checkpoint file. On restart the writer/medium/store dirs are preserved (not wiped), the
+registry is rebuilt from a directory scan, and the last skip-decoded record is verified
+against the checkpoint's recorded value (Fatal if the supposedly-immutable input stream
+changed). A resumed level reprocesses the records between the last checkpoint and the crash,
+so its running generated/written/dup counts read high, but end-of-level dedup makes the final
+unique board count exact.
+
+A checkpoint is only accepted if the level's solve step is genuinely still in progress
+(this step's `_complete`/`_merging` output sentinels absent, its input `_complete` present);
+otherwise the solver falls back to a full writer-dir wipe and restarts the level from board 0.
+`--checkpt` requests a checkpoint immediately rather than waiting for the next interval.
 
 ### Retrograde calculator
 

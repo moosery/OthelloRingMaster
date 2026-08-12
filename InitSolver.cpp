@@ -580,7 +580,14 @@ static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineI
         }
     }
 
-    if (GetFileAttributesA(pState->storeMergeDirectory) != INVALID_FILE_ATTRIBUTES)
+    /* The store-drive fallback merge dir must be preserved on a valid-checkpoint
+    ** restart too: space-relief iMerges spill here when the medium drives are
+    ** full, so it can legitimately hold recorded checkpoint output. Wiping it
+    ** unconditionally (as this did before) was a real data-loss path. On a
+    ** fresh/non-checkpoint start it is always purged, same as the writer/merge
+    ** dirs above. */
+    if (!preserveWriterAndMergeDirs &&
+        GetFileAttributesA(pState->storeMergeDirectory) != INVALID_FILE_ATTRIBUTES)
     {
         LoggerLog("  Deleting store merge dir: %s\n", pState->storeMergeDirectory);
         DeleteDirRecursive(pState->storeMergeDirectory);
@@ -661,15 +668,11 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     ** so a later attempt at this same level can never pick it up by mistake.
     */
     SolveContext tempCtx = { pConfig, pState, pMachineInfo };
-    /* Heap, never stack: CheckpointStats is ~30 MB (its per-drive integrity
-    ** manifest arrays), which overflows the 1 MB default stack the instant
-    ** this function is entered (MSVC's __chkstk prologue probe) -- a real
-    ** crash caught on the first v1.0.0 run. MemMalloc zero-initializes, same
-    ** as the old `= {}`; freed below once the checkpoint decision is made.
-    */
+    /* CheckpointStats is small now (no file manifest) -- MemMalloc is retained
+    ** out of habit/consistency and zero-initializes; freed below once the
+    ** checkpoint decision is made. */
     CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
     CheckpointStats& cp    = *cpPtr;
-    int savedNextFileIdx[MAX_WRITERS] = {0};
     bool haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
     if (haveValidCheckpoint)
     {
@@ -682,23 +685,18 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         ** Written/solve%) and the _complete sentinel's numbers correct, not just
         ** the post-resume slice. Copied out before MemFree(cpPtr) below. */
         pState->resumeLevelStats        = cp.levelStatsSnapshot;
-        /* Stash each drive's naming counter to re-apply AFTER the RegistryInit
-        ** loop below -- naming, never logic (see OthelloTypes.h's
-        ** CheckpointStats comment). CRITICAL (fixed v1.0.10): RegistryInit
-        ** resets nextFileIdx to 0, so restoring straight into
-        ** pState->nextFileIdx HERE gets clobbered by that loop, and new
-        ** post-resume flushes then REUSE indices 0,1,2... -- overwriting
-        ** (truncating) the very writer files the checkpoint preserved,
-        ** corrupting them (a resume crashed on exactly this: an LZ4 decode
-        ** error reading a file a new flush had just truncated). So stash here,
-        ** re-apply after RegistryInit. The registry ITSELF is deliberately not
-        ** restored from the checkpoint -- it gets rebuilt below from a fresh
-        ** directory scan, already cross-checked against cp.manifest by
-        ** ReadValidCheckpoint's three hard-Fatal rules, so rebuilding by scan
-        ** is strictly safer than trusting persisted state that could go stale.
-        */
-        for (int wi = 0; wi < cp.numMergeWriters; wi++)
-            savedNextFileIdx[wi] = cp.nextFileIdx[wi];
+        /* Last-record cross-check: after skip-decoding resumeCheckpointRecords,
+        ** the feeder must land on exactly this record (FeedBoardIntoBatch), else
+        ** the input stream changed under us. */
+        pState->resumeLastRecordHi      = cp.lastRecordHi;
+        pState->resumeLastRecordLo      = cp.lastRecordLo;
+        pState->resumeHaveLastRecord    = cp.haveLastRecord;
+        /* Deliberately NOT restoring any file-index counter from the checkpoint
+        ** -- CheckpointSeedCountersFromDisk (below) seeds every one from a fresh
+        ** disk scan (max-on-disk + 1). That is the crux of the design: post-
+        ** checkpoint consolidation can move pre-checkpoint boards into higher-
+        ** indexed files, so trusting a recorded lower index would let resumed
+        ** writes overwrite them. The registry is likewise rebuilt from a scan. */
     }
     else
     {
@@ -709,28 +707,38 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     cleanUpDrives(pState, pMachineInfo, haveValidCheckpoint);
     createDirectories(pState);
 
+    /* Resuming from a valid checkpoint: trust the disk (see Checkpoint.h).
+    ** (1) Validate every preserved data file has an intact trailer; crash-
+    **     partial files (a run that continued past the checkpoint then died
+    **     mid-write) are removed with --forcerestart, else this Fatals with the
+    **     list. Must run BEFORE the registry rebuild so partials never enter
+    **     the registry or skew the index scan.
+    */
+    if (haveValidCheckpoint)
+        ValidateCheckpointFilesOnDisk(&tempCtx, pState->resumeLevel, pConfig->forceRestart);
+
     /* Registry init: one per writer drive. On a fresh/non-checkpoint start
     ** each drive's registry is simply empty (RegistryInit alone). Resuming
-    ** from a valid checkpoint is the one case where real files already sit
-    ** on disk (cleanUpDrives preserved them above) -- rebuild each drive's
-    ** registry from a real scan of what's actually there rather than
-    ** trusting anything persisted; ReadValidCheckpoint already Fatal'd above
-    ** if that scan disagreed with the checkpoint's own integrity manifest,
-    ** so by this point scanning is known-safe, not just convenient.
+    ** from a valid checkpoint is the one case where real files already sit on
+    ** disk (cleanUpDrives preserved them) -- rebuild each drive's registry from
+    ** a real scan of what's actually there rather than trusting anything
+    ** persisted.
     */
     for (int i = 0; i < pState->numMergeWriters; i++)
     {
         RegistryInit(pState, i);   /* resets nextFileIdx[i] to 0 */
         if (haveValidCheckpoint)
-        {
             RegistryRebuildFromDisk(pState, i, pState->mwDirectory[i]);
-            /* Re-apply the checkpoint's naming counter AFTER RegistryInit's
-            ** reset, so new post-resume files never reuse (and overwrite) a
-            ** preserved writer file's index -- see the stash above.
-            */
-            pState->nextFileIdx[i] = savedNextFileIdx[i];
-        }
     }
+
+    /* (2) Seed every work dir's next-file index from a disk scan (max-on-disk
+    **     + 1), so resumed writes always land above every existing file and can
+    **     never overwrite a pre-checkpoint file -- even one post-checkpoint
+    **     consolidation moved to a higher index. This runs AFTER RegistryInit
+    **     (which zeroed nextFileIdx) so it is authoritative.
+    */
+    if (haveValidCheckpoint)
+        CheckpointSeedCountersFromDisk(&tempCtx, pState->resumeLevel);
 
     /* Initialize drive space ledgers after cleanup so we start from clean
     ** free space. Each ledger is seeded with (OS free bytes - safety buffer).

@@ -4,6 +4,51 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.15] - 2026-08-11
+
+### Checkpoint/restart rewrite -- fixes the cross-process resume data loss at the root
+
+v1.0.14 confirmed a real ~23% data loss on a resumed level (StoreStats level 17 came back
+50,491,378,934 vs pristine 65,853,364,246): resumed space-relief iMerges reset their F: file-index
+counter to 0 and `CREATE_ALWAYS`-overwrote the original run's `imerge_L{level}_*` files, which held
+pre-checkpoint output the skip-decode never regenerates. The old checkpoint pinned a manifest of
+D:/E: file names+sizes, but the fast drives are a live work area (consolidation continuously merges
+and deletes writer files), so a manifest is stale almost immediately -- the source of every past
+restart bug in this feature.
+
+Replaced the whole approach with a design built on three principles:
+
+- **Durability, not immutability.** The checkpoint only requires all output for input[0..P] to be
+  in COMPLETE files on disk, wherever they sit. It's taken after a normal flush/drain (no data
+  movement), so it costs about what a flush costs -- cheap enough to take often. The payload shrank
+  from ~30 MB (the file manifest) to a few KB: position + a last-record cross-check value + the
+  level's cumulative counters. No file names, sizes, or index counters are stored.
+- **Trailer-completeness, not a manifest.** On restart, every data file across all drives (D:/E:
+  writer files, F: iMerge files, and the Y: store-merge fallback) is checked for an intact trailer
+  (the trailer magic is written last, so its absence = a crash-partial write). Partial files are
+  crash debris: with `--forcerestart` they're deleted and the run resumes; without it the run lists
+  them and Fatals so they can be inspected first. Only files matching our own `writer_*` /
+  `imerge_L*` patterns are ever examined -- foreign files are never touched.
+- **Disk-scan file indices, never a recorded value.** Restart seeds every work dir's next-file
+  index from a scan of what's actually on disk (max index + 1), so resumed writes always land above
+  every existing file and can never overwrite a pre-checkpoint file -- even one that post-checkpoint
+  consolidation moved to a higher index. This is the crux of the fix (`CheckpointSeedCountersFromDisk`).
+
+Also fixed a latent related hole: `cleanUpDrives` wiped the store-drive merge dir (Y:)
+unconditionally, even on a valid-checkpoint restart -- now preserved (relief can spill recorded
+iMerge output there). The fast drives are no longer wiped on a checkpoint restart; files are kept,
+validated, and rebuilt into the registry from a scan. New `--forcerestart` CLI flag. Checkpoint
+magic bumped ("OTSPCHK2") so any leftover old-format checkpoint is cleanly rejected. A resume also
+verifies the last skip-decoded record matches the checkpoint's recorded value (Fatal if the input
+stream changed). The v1.0.14 counter-restore (correct reported stats on resume) is unchanged.
+
+Files: OthelloTypes.h (CheckpointStats, config, state, magic), Checkpoint.h/.cpp (rewrite),
+InitSolver.cpp (validate + seed on restart, preserve Y:), OthelloRingMaster.cpp (guard the
+per-level merge-counter reset for the resume level; `--forcerestart`), LevelSolverThread.cpp
+(pass/verify the last record).
+
+---
+
 ## [1.0.14] - 2026-08-11
 
 ### Resumed levels now report the FULL level's work (the "resume data loss" was a stat bug)

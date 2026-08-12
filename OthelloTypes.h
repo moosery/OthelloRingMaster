@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.14"
+#define VERSION "1.0.15"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -203,76 +203,69 @@ typedef struct __LevelStats
 
 /* Magic value embedded at the start of a mid-level checkpoint file, distinct
 ** from RSF_SENTINEL_STATS_MAGIC (RSFFileName.h) so the two file kinds can
-** never be confused if one is accidentally opened as the other.
+** never be confused if one is accidentally opened as the other. Bumped to
+** "OTSPCHK2" when the payload dropped the file manifest (2026-08) so any
+** leftover old-format checkpoint is cleanly rejected instead of misread.
 */
-#define CHECKPOINT_STATS_MAGIC 0x504B48435053544FULL   /* "OTSPCHKP" in ASCII byte order */
+#define CHECKPOINT_STATS_MAGIC 0x324B48435053544FULL   /* "OTSPCHK2" in ASCII byte order */
 
 /*
-** Bound on how many real files one drive's checkpoint integrity manifest can
-** record. Real per-drive file counts never approach this in practice (2-20
-** confirmed repeatedly against live production data) -- generous headroom,
-** same bounded-array style already used elsewhere in this project (e.g.
-** the old ConsolidationSlotStats.batchIndices).
+** Generic bound on how many real files one drive can hold, used to size a few
+** fixed per-drive scratch arrays. Real per-drive file counts never approach
+** this in practice (2-20 confirmed repeatedly against live production data) --
+** generous headroom, same bounded-array style used elsewhere in this project.
+** (The checkpoint no longer records a file manifest -- see CheckpointStats --
+** but this bound is still handy for the STATUS listener's registry snapshot.)
 */
 #define CHECKPOINT_MANIFEST_MAX_FILES 256
-
-/*
-** Type:    CheckpointManifestEntry
-** @brief   One real file's identity+size, as recorded at checkpoint time,
-**          for the restart-time integrity cross-check (see
-**          Checkpoint.h/.cpp's three hard-Fatal rules: missing on disk,
-**          untracked on disk, size mismatch).
-*/
-typedef struct __CheckpointManifestEntry
-{
-    char     filename[MAX_FULL_PATH_NAME];
-    uint8_t  color;       /* RSF_PLAYER_BLACK / RSF_PLAYER_WHITE */
-    int64_t  size;         /* real on-disk size at checkpoint time -- every file is
-                            ** finished by the time the manifest is captured (full
-                            ** drain happens first), so this is never a partial size */
-} CheckpointManifestEntry, * PCheckpointManifestEntry;
 
 /*
 ** Type:    CheckpointStats
 ** @brief   Mid-level checkpoint payload -- exactly enough to resume the GPU
 **          feeder from a specific point in a level's input stream instead of
-**          from record 0, plus a full integrity manifest of every real
-**          writer-drive file at checkpoint time. Written only once the
-**          feeder is fully paused, its accumulator drained, and every flush/
-**          iMerge in flight has completed and consolidation has stopped, so
-**          every field here is guaranteed consistent with the writer-dirs'
-**          actual on-disk state at write time -- no file is mid-write when
-**          the manifest is captured.
-** @details activeSubPass + recordsConsumedInSubPass together describe
-**          exactly where RunGpuFeederJob's two sequential sub-passes
-**          (black-turn boards, then white-turn boards -- see
-**          LevelSolverThread.cpp) had gotten to. recordsConsumedInSubPass
-**          is always relative to activeSubPass's OWN stream, never a
-**          combined black+white count, since the two sub-passes run
-**          strictly one after the other, not interleaved. A checkpoint
-**          taken exactly between the two sub-passes (black already fully
-**          done, white not yet started) is naturally represented as
-**          activeSubPass=RSF_PLAYER_WHITE, recordsConsumedInSubPass=0 --
-**          no separate "between passes" state is needed.
-**          nextFileIdx is a snapshot of every drive's naming counter at
-**          checkpoint time -- restored on resume purely so new files never
-**          collide with real files already on disk; it is NEVER consulted
-**          for any backlog/trigger decision (the registry, rebuilt from a
-**          fresh directory scan on restart, is the sole source of truth for
-**          that). manifest/manifestCount is the real cross-check: restart
-**          re-scans every writer drive and Fatals on any disagreement with
-**          what's recorded here (see Checkpoint.h).
+**          from record 0. Deliberately TINY: it records only the feeder
+**          position, a cross-check value, and the level's cumulative counters.
+**          It does NOT record any file names, sizes, or index counters.
+** @details The checkpoint design (2026-08, replacing the earlier
+**          file-manifest approach) is built on three principles that make it
+**          both cheap to take and robust to restart:
+**            (1) DURABILITY, not immutability -- a checkpoint only needs all
+**                output for input[0..P] to be in COMPLETE files on disk,
+**                wherever they sit (writer drives, medium drives, store). It
+**                is taken after a normal flush/drain (no expensive "sweep"),
+**                so it costs about what a flush costs.
+**            (2) TRAILER-COMPLETENESS, not a file manifest -- the fast drives
+**                are a live work area (consolidation continuously merges and
+**                deletes writer files), so pinning exact file names/sizes is
+**                futile. Restart instead validates that every data file has an
+**                intact trailer (Utility/RingStoreFile.h: the trailer magic is
+**                written last, so its absence = a crash-partial file). Partial
+**                files are crash debris (removed via --forcerestart, else the
+**                run Fatals with the list). See Checkpoint.cpp.
+**            (3) DISK-SCAN file indices, never a recorded value -- because
+**                consolidation keeps running after the checkpoint and moves
+**                pre-checkpoint boards up into higher-indexed files, restart
+**                seeds every work dir's next-file index from a scan of what's
+**                actually on disk (max index + 1), so resumed writes always
+**                land above everything already there and can never overwrite a
+**                pre-checkpoint file. That is why no index is stored here.
+**          activeSubPass + recordsConsumedInSubPass describe where
+**          RunGpuFeederJob's two sequential sub-passes (black-turn boards,
+**          then white-turn boards) had gotten to; recordsConsumedInSubPass is
+**          relative to activeSubPass's OWN stream. lastRecord{Hi,Lo} is the
+**          value of the last input record consumed, re-checked on restart
+**          after skip-decode (Fatal on mismatch -- the input stream changed).
 */
 typedef struct __CheckpointStats
 {
     uint8_t  boardSize;                      /* sanity check against the running config */
     uint8_t  level;                          /* which level this checkpoint belongs to */
     uint8_t  activeSubPass;                  /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE */
-    uint8_t  numMergeWriters;                /* must match the running config; else nextFileIdx/manifest below are meaningless */
+    uint8_t  numMergeWriters;                /* must match the running config */
+    bool     haveLastRecord;                 /* false only if checkpoint taken before any record was read this sub-pass */
     uint64_t recordsConsumedInSubPass;       /* position within activeSubPass's own input stream */
-    int      nextFileIdx[MAX_WRITERS];       /* per-drive naming-counter snapshot -- naming only, never logic */
-    int      manifestCount[MAX_WRITERS];     /* how many of manifest[wi][*] are valid */
-    CheckpointManifestEntry manifest[MAX_WRITERS][CHECKPOINT_MANIFEST_MAX_FILES];
+    uint64_t lastRecordHi;                   /* BOARD_KEY.ullCellsInUse of the last record consumed (cross-check) */
+    uint64_t lastRecordLo;                   /* BOARD_KEY.ullCellColors of the last record consumed (cross-check) */
     /*
     ** Full snapshot of this level's live cumulative counters at checkpoint
     ** time. On a cross-process restart the per-level reset zeroes
@@ -283,7 +276,9 @@ typedef struct __CheckpointStats
     ** sentinel's numbers would be wrong even though the stored board data is
     ** correct. Restored into levelStats[level] on resume (counters only, not
     ** timing/merge/snapshot fields -- see RunGpuFeederJob) so a resumed level's
-    ** reported totals match a straight-through solve exactly.
+    ** reported totals match a straight-through solve exactly. (On resume the
+    ** reprocessed input[P..crash] does inflate the running generated/written/
+    ** dup counts, but end-of-level dedup makes the final UniqueOut correct.)
     */
     LevelStats levelStatsSnapshot;
     char     timestamp[24];                  /* "YYYY-MM-DD HH:MM:SS", informational only */
@@ -557,6 +552,7 @@ typedef struct __OthelloRingMasterConfig
     uint64_t  driveSpaceLowGBOverride;    /* --drive-space-low-gb; overrides DRIVE_SPACE_LOW_GB */
     uint64_t  maxFileSizeGBOverride;      /* --max-file-size-gb; overrides CONSOLIDATION_SIZE_CAP_GB */
     uint32_t  auditIntervalSecondsOverride; /* --audit-interval-seconds; overrides AUDIT_INTERVAL_SECONDS_DEFAULT */
+    bool      forceRestart;               /* --forcerestart; on checkpoint restart, delete crash-partial (no-trailer) files instead of Fatal-ing with the list */
 } OthelloRingMasterConfig, * POthelloRingMasterConfig;
 
 /*
@@ -633,6 +629,15 @@ typedef struct __OthelloRingMasterState
     int      resumeCheckpointSubPass;      /* RSF_PLAYER_BLACK or RSF_PLAYER_WHITE, valid only if resumeFromCheckpoint */
     uint64_t resumeCheckpointRecords;      /* records already consumed in that sub-pass, valid only if resumeFromCheckpoint */
     LevelStats resumeLevelStats;           /* cumulative counter snapshot from the checkpoint, valid only if resumeFromCheckpoint -- restored into levelStats[resumeLevel] by RunGpuFeederJob so the resumed level reports full work, not just post-resume work */
+    /* Cross-check for the resumed sub-pass: after skip-decoding
+    ** resumeCheckpointRecords records, the feeder must land on exactly this
+    ** record value, else the input stream changed under us (Fatal). Set by
+    ** InitSolver from the checkpoint; the one-shot check + clear is in
+    ** FeedBoardIntoBatch's skip branch. resumeHaveLastRecord is false if the
+    ** checkpoint was taken before any record was read. */
+    uint64_t resumeLastRecordHi;
+    uint64_t resumeLastRecordLo;
+    bool     resumeHaveLastRecord;
 
     /* Live resume-skip progress for the STATUS display (v1.0.12). While a
     ** resumed sub-pass re-decodes its already-consumed records from disk

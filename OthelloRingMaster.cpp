@@ -89,6 +89,9 @@ static void PrintUsage(const char* prog)
     printf("                    Override the interval for both background auditors (registry-vs-\n");
     printf("                    disk, drive-space reconciliation) -- testing/validation only, to\n");
     printf("                    observe them fire within a short run. [default: 120]\n");
+    printf("  --forcerestart    On a mid-level checkpoint restart, delete any crash-partial\n");
+    printf("                    (no-trailer) data files instead of Fatal-ing with the list.\n");
+    printf("                    Use after inspecting the listed files from a prior aborted run.\n");
     printf("  --help            Show this help\n\n");
     printf("Auto-resume: if storeDir already contains level files from a previous run,\n");
     printf("  the solver automatically resumes from the first missing level.\n");
@@ -117,6 +120,7 @@ static void ParseArgs(int argc, char* argv[])
     g_config.driveSpaceLowGBOverride      = 0;   /* 0 = use DRIVE_SPACE_LOW_GB */
     g_config.maxFileSizeGBOverride        = 0;   /* 0 = use CONSOLIDATION_SIZE_CAP_GB */
     g_config.auditIntervalSecondsOverride = 0;   /* 0 = use AUDIT_INTERVAL_SECONDS_DEFAULT */
+    g_config.forceRestart                 = false; /* --forcerestart; delete crash-partial files on checkpoint restart */
 
     for (int i = 1; i < argc; i++)
     {
@@ -215,6 +219,10 @@ static void ParseArgs(int argc, char* argv[])
         {
             REQUIRE_NEXT("--audit-interval-seconds")
             g_config.auditIntervalSecondsOverride = (uint32_t)atoi(argv[i]);
+        }
+        else if (strcmp(argv[i], "--forcerestart") == 0)
+        {
+            g_config.forceRestart = true;
         }
         else
         {
@@ -515,15 +523,27 @@ int main(int argc, char* argv[])
             }
         for (int i = 0; i < g_state.numMergeDirs; i++)
         {
-            g_state.mergeFileBlackCount[i]  = 0;
-            g_state.mergeFileWhiteCount[i]  = 0;
+            /* The imerge file-index COUNTS are seeded from a disk scan by
+            ** InitSolver (CheckpointSeedCountersFromDisk) when this level is
+            ** resuming from a checkpoint -- zeroing them here would clobber that
+            ** seed and let resumed iMerges overwrite preserved F: files. Only
+            ** reset the counts on a fresh (non-resume) level start; the byte
+            ** display metrics are always safe to reset. */
+            if (!resumingThisLevelFromCheckpoint)
+            {
+                g_state.mergeFileBlackCount[i]  = 0;
+                g_state.mergeFileWhiteCount[i]  = 0;
+            }
             g_state.mergeFileBytesBlack[i]  = 0;
             g_state.mergeFileBytesWhite[i]  = 0;
             g_state.mergeFileUncompBlack[i] = 0;
             g_state.mergeFileUncompWhite[i] = 0;
         }
-        g_state.storeMergeBlackFileCount    = 0;
-        g_state.storeMergeWhiteFileCount    = 0;
+        if (!resumingThisLevelFromCheckpoint)
+        {
+            g_state.storeMergeBlackFileCount = 0;
+            g_state.storeMergeWhiteFileCount = 0;
+        }
         g_state.storeMergeBytesWritten      = 0;
         g_state.storeMergeBytesUncompressed = 0;
         g_state.currentLevelTotalBoards     = 0;

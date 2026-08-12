@@ -270,6 +270,22 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
         st->skipRemaining--;
         st->recordsThisSubPass++;
         pSt->resumeSkipDone++;              /* STATUS: "% relocated" progress */
+        /* When the last already-consumed record is re-decoded, confirm it
+        ** matches the value the checkpoint recorded. A mismatch means the input
+        ** stream (a completed, supposedly immutable prior level) changed since
+        ** the checkpoint -- resuming would silently process a different stream,
+        ** so hard-stop. One-shot: cleared after the check. */
+        if (st->skipRemaining == 0 && pSt->resumeHaveLastRecord)
+        {
+            if (key.ullCellsInUse != pSt->resumeLastRecordHi ||
+                key.ullCellColors != pSt->resumeLastRecordLo)
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "Checkpoint resume: last skipped record (%llu,%llu) != checkpoint's recorded "
+                      "last record (%llu,%llu) -- the input stream changed since the checkpoint, refusing to resume",
+                      (unsigned long long)key.ullCellsInUse, (unsigned long long)key.ullCellColors,
+                      (unsigned long long)pSt->resumeLastRecordHi, (unsigned long long)pSt->resumeLastRecordLo);
+            pSt->resumeHaveLastRecord = false;
+        }
         return;
     }
     if (pSt->resumeSkipActive)
@@ -316,7 +332,10 @@ static void FeedBoardIntoBatch(FeedBatchState* st, const BOARD_KEY& key)
             st->count   = 0;
         }
         FlushAccumulator(st->pAccum, st->pCtx);
-        PerformMidLevelCheckpoint(st->pCtx, st->playerBit, st->recordsThisSubPass);
+        /* `key` is the record just consumed -- record it as the checkpoint's
+        ** last-record cross-check (verified after skip-decode on restart). */
+        PerformMidLevelCheckpoint(st->pCtx, st->playerBit, st->recordsThisSubPass,
+                                  key.ullCellsInUse, key.ullCellColors, true);
     }
 }
 
