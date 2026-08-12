@@ -4,7 +4,19 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
-## [1.0.17] - 2026-08-11
+## [1.0.18] - 2026-08-12
+
+### Fix double-free crash introduced in v1.0.17 (merge-resume)
+
+v1.0.17 moved end-of-level merge input-file freeing out of `mergePlayer` into a shared post-join
+block that frees both colors uniformly -- but `mergePlayer`'s "no files" early-return path still
+freed that color's (zero-length) `inputPaths`/`inputSizes` arrays too. Any color with no merge
+inputs (e.g. black at level 0) therefore had its arrays freed twice, crashing the process during
+level 0's merge (right after the white merge logged its result, before the level completed). Fresh
+runs died immediately at level 0; levels 1+ have inputs for both colors so they never hit it.
+
+Fix: the "no files" path no longer frees -- the shared post-join block is the single owner of that
+memory. No other behavior change.
 
 ### Merge-resume: a crash during the end-of-level merge re-runs only the merge, not the whole solve
 

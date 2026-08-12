@@ -1623,8 +1623,10 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         {
             LoggerLog("EndOfLevelMerge: level %d %s -- no files\n",
                       level, RSFPlayerStr(player));
-            MemFree(pd.inputPaths);
-            MemFree(pd.inputSizes);
+            /* Do NOT free inputPaths/inputSizes here -- the shared post-join
+            ** block in DoEndOfLevelMerge frees them uniformly for both colors
+            ** now (input deletion is deferred until the merge commits). Freeing
+            ** here too would double-free this color's (0-length) arrays. */
             return;
         }
 
