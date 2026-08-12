@@ -567,13 +567,13 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
 **           itself is never purged -- it holds the permanent level output archive.
 ** @param    pState       - solver state (directories to purge, resumeLevel for logging)
 ** @param    pMachineInfo - refreshed in place after the purge frees space
-** @param    preserveWriterAndMergeDirs - true when a validated mid-level
-**           checkpoint exists for resumeLevel (Checkpoint.h) -- skips
-**           wiping mwDirectory/mergeDirectory so real, already-flushed
-**           writer/imerge files survive to be resumed from. storeMergeDirectory
-**           is always purged regardless -- irrelevant this early (real merge
-**           output staging only begins once the solve phase actually
-**           finishes), so there's nothing there worth preserving.
+** @param    preserveWriterAndMergeDirs - true when resuming this level from
+**           disk: either a validated mid-level checkpoint OR an interrupted
+**           end-of-level merge being re-run (merge-resume) -- see Checkpoint.h
+**           and InitSolver's resumeFromDisk. Skips wiping mwDirectory/
+**           mergeDirectory (and, for a merge-resume, storeMergeDirectory) so
+**           real, already-flushed writer/imerge files survive to be resumed
+**           from. On a fresh (non-resume) start everything is wiped.
 */
 static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineInfo,
                           bool preserveWriterAndMergeDirs)
@@ -582,7 +582,9 @@ static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineI
 
     if (preserveWriterAndMergeDirs)
     {
-        LoggerLog("  Preserving merge-writer/merge dirs -- valid mid-level checkpoint found for level %d.\n",
+        LoggerLog("  Preserving merge-writer/merge dirs -- %s for level %d.\n",
+                  pState->resumeIntoMerge ? "interrupted merge to re-run (merge-resume)"
+                                          : "valid mid-level checkpoint found",
                   pState->resumeLevel);
     }
     else

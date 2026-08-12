@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.19] - 2026-08-12  (cosmetic)
+
+### Accurate restart log wording for merge-resume
+
+`cleanUpDrives` logged "Preserving merge-writer/merge dirs -- valid mid-level checkpoint found for
+level N" even when the restart was a merge-resume (an interrupted end-of-level merge being re-run),
+not a checkpoint. It now says "interrupted merge to re-run (merge-resume)" in that case. Log text
+only; no behavior change. (Both restart paths -- checkpoint-resume, merge-resume -- and the
+`--forcerestart` partial-file handling were validated end-to-end on v1.0.18.)
+
+---
+
 ## [1.0.18] - 2026-08-12
 
 ### Fix double-free crash introduced in v1.0.17 (merge-resume)
