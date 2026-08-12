@@ -1313,43 +1313,28 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     pSt->mergeInputFileCount[0]         = pSt->mergeInputFileCount[1]         = 0;
     pSt->mergeInputPoolReaderCount[0]   = pSt->mergeInputPoolReaderCount[1]   = 0;
 
-    /* Any leftover in-memory pool data merges directly alongside on-disk
-    ** files below (see CollectPoolReadersForPlayer) -- no NVMe round-trip
-    ** needed. The one exception: CascadingMerge's grouped/temp-file mode
-    ** (needed only when a color's on-disk file count exceeds
-    ** MAX_MERGE_INPUT_FILES) bounds the number of simultaneously-open OS file
-    ** handles, a constraint that doesn't apply to in-memory readers, so it
-    ** can't accept pool data directly. That's a scale this project hasn't
-    ** reached yet (imerge/Option C keep file counts low), but as a
-    ** conservative guard: if either color's on-disk *writer* file count
-    ** already exceeds the fan-in limit (a lower bound on the eventual
-    ** enumerated count, since intermediate merges only ever consolidate
-    ** writer files down), flush all leftover pool data to NVMe up front
-    ** exactly as before, so it becomes ordinary files for the grouped path
-    ** to consume.
+    /* Flush every writer's leftover in-memory pool to real disk files BEFORE
+    ** merging, so ALL merge inputs are durable on disk. This is what makes a
+    ** mid-merge crash recoverable by re-merge (merge-resume): a restart reads
+    ** the inputs from disk, and any boards that lived only in the RAM pool
+    ** would otherwise be lost. (Previously these pool segments were read
+    ** directly from RAM to save a round-trip -- fine for correctness of a
+    ** straight-through merge, but not crash-recoverable, and it also left the
+    ** cascade/grouped path unable to accept them once file counts got large.)
+    **
+    ** This bumps boardsWrittenToDisk (and therefore mrgDupsRemoved) by the
+    ** pool-tail count, but that is invisible in the store's reported stats:
+    ** StoreStats derives DupsRemoved from boardsReceivedFromGpu and totalUnique
+    ** with boardsWrittenToDisk canceling out, and UniqueOut == totalUnique
+    ** regardless -- so every stored/reported figure is unchanged, only the
+    ** inputs are now all on disk. FlushMergeWriterBuffer dispatches both colors
+    ** to the flusher pool and waits internally; call it per writer.
     */
+    for (int i = 0; i < pSt->numMergeWriters; i++)
     {
-        int totalBlackFiles = 0, totalWhiteFiles = 0;
-        for (int i = 0; i < pSt->numMergeWriters; i++)
-        {
-            totalBlackFiles += RegistryCount(pSt, i, RSF_PLAYER_BLACK);
-            totalWhiteFiles += RegistryCount(pSt, i, RSF_PLAYER_WHITE);
-        }
-        if (totalBlackFiles > MAX_MERGE_INPUT_FILES || totalWhiteFiles > MAX_MERGE_INPUT_FILES)
-        {
-            /* FlushMergeWriterBuffer (FlusherPool.h) already dispatches both
-            ** colors to the flusher pool and waits internally -- no need for
-            ** an outer std::thread-per-writer fan-out here too, just call it
-            ** per writer sequentially (each call's own internal wait is
-            ** short relative to this being a rare, end-of-level-only path).
-            */
-            for (int i = 0; i < pSt->numMergeWriters; i++)
-            {
-                if (pSt->mwBlackSegCount[i] > 0 || pSt->mwBlackStagingCount[i] > 0 ||
-                    pSt->mwWhiteSegCount[i] > 0 || pSt->mwWhiteStagingCount[i] > 0)
-                    FlushMergeWriterBuffer(i, pCtx);
-            }
-        }
+        if (pSt->mwBlackSegCount[i] > 0 || pSt->mwBlackStagingCount[i] > 0 ||
+            pSt->mwWhiteSegCount[i] > 0 || pSt->mwWhiteStagingCount[i] > 0)
+            FlushMergeWriterBuffer(i, pCtx);
     }
 
     /* -- Phase 1: enumerate files for both players (sequential, fast) --
@@ -1744,30 +1729,12 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         }
         pd.uncompBytes = uncompBytes;
 
-        /* Reclaim source-file drive space as each input is deleted.
-        ** Skip store-drive inputs that were pre-reclaimed in Phase 1b.
-        */
-        for (int i = 0; i < pd.numFiles; i++)
-        {
-            if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
-                DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
-            DeleteFileA(pd.inputPaths[i]);
-
-            /* If this input lived on a writer drive, drop its registry node
-            ** too, so the registry stays truthful the instant the file leaves
-            ** disk -- otherwise the registry-vs-disk auditor flags the stale
-            ** node until the next level's RegistryResetForLevel. Inputs on the
-            ** medium/store drives have no registry node; the loop simply finds
-            ** no match for them.
-            */
-            for (int w = 0; w < pSt->numMergeWriters; w++)
-                if (pSt->mwDirectory[w][0] == pd.inputPaths[i][0])
-                {
-                    RegistryRemoveByFilename(pSt, w, pd.inputPaths[i]);
-                    break;
-                }
-        }
-
+        /* NOTE: input files are NOT deleted here anymore. Deletion is deferred
+        ** to after BOTH colors' merges finish and the "merging" sentinel is
+        ** removed (see below), so that if the merge is interrupted the full
+        ** input set survives on disk and a restart can re-run ONLY the merge
+        ** (merge-resume) instead of re-solving the whole level. pd.inputPaths/
+        ** inputSizes stay allocated until then. */
         pd.actualBytes = actual;
 
         if (pd.unique > 0)
@@ -1776,11 +1743,6 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         LoggerLog("EndOfLevelMerge: level %d %s -> nested index under '%s'  (%llu unique boards, %.2f GB)\n",
                   level, RSFPlayerStr(player), pSt->storeDirectory, pd.unique,
                   actual / (1024.0 * 1024.0 * 1024.0));
-
-        for (int i = 0; i < pd.numFiles; i++)
-            MemFree(pd.inputPaths[i]);
-        MemFree(pd.inputPaths);
-        MemFree(pd.inputSizes);
 
         /* Reset this color's pool/staging state for the next level. Safe to
         ** do now -- the merge above (and any RSFReaderOpenZMem segments it
@@ -1806,16 +1768,28 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     };
 
     /* Write "merging" sentinel before launching threads. If the process is
-    ** interrupted while either player merge is running, this file will
-    ** remain on disk and the resume scan will know the level's output is
-    ** incomplete.
+    ** interrupted while either player merge is running, this file remains on
+    ** disk so the restart scan knows the level's output is incomplete AND can
+    ** re-run ONLY the merge. It carries this level's solve counters (same
+    ** magic+LevelStats payload the _complete sentinel uses): the solve is
+    ** fully drained by now, so every solve counter is final, and a merge-resume
+    ** restores them so MrgDups and the eventual _complete are correct without a
+    ** re-solve. The merge-phase fields are still zero here; they fill in when
+    ** the merge completes.
     */
     char sentMerging[MAX_FULL_PATH_NAME];
     SentinelNameMerging(sentMerging, sizeof(sentMerging), pSt->storeDirectory, boardSize, level + 1);
     {
         HANDLE hs = CreateFileA(sentMerging, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                                 FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hs != INVALID_HANDLE_VALUE) CloseHandle(hs);
+        if (hs != INVALID_HANDLE_VALUE)
+        {
+            uint64_t magic = RSF_SENTINEL_STATS_MAGIC;
+            DWORD    nw;
+            WriteFile(hs, &magic, (DWORD)sizeof(magic), &nw, NULL);
+            WriteFile(hs, &pSt->levelStats[level], (DWORD)sizeof(LevelStats), &nw, NULL);
+            CloseHandle(hs);
+        }
     }
 
     std::thread blackThread([&] { mergePlayer(RSF_PLAYER_BLACK); pSt->mergeEndTickMs[RSF_PLAYER_BLACK] = GetTickCount64(); });
@@ -1823,15 +1797,54 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     blackThread.join();
     whiteThread.join();
 
-    /* Delete "merging" sentinel on clean finish. The "complete" sentinel
-    ** (with full LevelStats payload) is written by the main loop after all
-    ** stats fields are populated; that way the persisted stats include
-    ** totalNanos, driveSnapshot, storeFreeBytes, and completedAt which are
-    ** only known after this function returns. If terminateThreads is set,
-    ** leave "merging" in place so resume scan re-runs.
+    /* Both merges are done -- the store output is complete. On a clean finish,
+    ** COMMIT the merge: remove the "merging" sentinel FIRST (after this a crash
+    ** leaves valid output + no _merging, which the restart scan treats as a
+    ** finished level), THEN delete the now-consumed input files. This ordering
+    ** is what makes merge-resume safe: while the merge runs (or if it's
+    ** interrupted), _merging is present AND every input is still on disk, so a
+    ** restart re-merges from the full input set. Deletion was deferred out of
+    ** mergePlayer for exactly this reason. If terminateThreads is set, leave
+    ** _merging AND the inputs in place so the restart re-runs the merge.
+    ** (Input space lives on the writer/medium drives; the merge output goes to
+    ** the store drive, so deferring deletion doesn't starve the merge.)
     */
     if (!pSt->terminateThreads)
+    {
         DeleteFileA(sentMerging);
+        for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+        {
+            PlayerData& pd = data[player];
+            for (int i = 0; i < pd.numFiles; i++)
+            {
+                if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
+                    DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
+                DeleteFileA(pd.inputPaths[i]);
+                for (int w = 0; w < pSt->numMergeWriters; w++)
+                    if (pSt->mwDirectory[w][0] == pd.inputPaths[i][0])
+                    {
+                        RegistryRemoveByFilename(pSt, w, pd.inputPaths[i]);
+                        break;
+                    }
+            }
+        }
+    }
+
+    /* Free the in-memory input path/size arrays for both colors regardless of
+    ** how we exited (on terminate the on-disk inputs stay, but the RAM arrays
+    ** are done with). */
+    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    {
+        PlayerData& pd = data[player];
+        if (pd.inputPaths)
+        {
+            for (int i = 0; i < pd.numFiles; i++)
+                MemFree(pd.inputPaths[i]);
+            MemFree(pd.inputPaths);
+        }
+        if (pd.inputSizes)
+            MemFree(pd.inputSizes);
+    }
 
     /* -- Finalize stats -- */
     uint64_t blackUnique = data[RSF_PLAYER_BLACK].unique;

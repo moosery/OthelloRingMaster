@@ -535,6 +535,39 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
     const size_t totalGpuMem = pMI->g_gpuInfo.totalGlobalMemBytes;
     const int    boardSize   = (int)pCfg->boardSize;
 
+    /* Merge-resume: this level's solve is already durably complete; a restart
+    ** found its end-of-level merge interrupted (ScanForResumeLevel), so skip
+    ** solving entirely -- no GPU accumulator, no input stream. The caller then
+    ** re-runs only DoEndOfLevelMerge from the preserved on-disk inputs. Restore
+    ** the level's solve counters (from the _merging sentinel's payload, carried
+    ** in resumeLevelStats) so the re-merge computes MrgDups and writes the
+    ** _complete sentinel with the same numbers a straight-through solve would.
+    ** Consumed once, then cleared. */
+    if (pSt->resumeIntoMerge && level == (int)pSt->resumeLevel)
+    {
+        const LevelStats& src = pSt->resumeLevelStats;
+        LevelStats&       dst = pSt->levelStats[level];
+        dst.boardsReadFromStore       = src.boardsReadFromStore;
+        dst.boardsGenerated           = src.boardsGenerated;
+        dst.gpuDupsRemoved            = src.gpuDupsRemoved;
+        dst.gpuFlushes                = src.gpuFlushes;
+        dst.boardsReceivedFromGpu     = src.boardsReceivedFromGpu;
+        dst.boardsWrittenToDisk       = src.boardsWrittenToDisk;
+        dst.mwFilesCreated            = src.mwFilesCreated;
+        dst.mwBytes                   = src.mwBytes;
+        dst.consolidationFilesCreated = src.consolidationFilesCreated;
+        dst.consolidationFilesRemoved = src.consolidationFilesRemoved;
+        dst.consolidationBytesWritten = src.consolidationBytesWritten;
+        dst.passBoards                = src.passBoards;
+        dst.terminalBoards            = src.terminalBoards;
+        if (src.maxMovesInLevel > dst.maxMovesInLevel)
+            dst.maxMovesInLevel = src.maxMovesInLevel;
+        pSt->resumeIntoMerge = false;
+        LoggerLog("RunGpuFeederJob: level %d merge-resume -- skipping solve, re-running only the merge from preserved inputs\n",
+                  level);
+        return;
+    }
+
     UINT64_PAIR* pingPong = (UINT64_PAIR*)pSt->pPingPongBuffer;
     UINT64_PAIR* slots[PING_PONG_SLOTS];
     for (int i = 0; i < PING_PONG_SLOTS; i++)

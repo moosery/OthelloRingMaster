@@ -4,6 +4,46 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.17] - 2026-08-11
+
+### Merge-resume: a crash during the end-of-level merge re-runs only the merge, not the whole solve
+
+Previously, if the process died during a level's end-of-level merge, restart re-solved the entire
+level from scratch (`ScanForResumeLevel` purged the partial output and fed the level back through
+the normal solve loop). That's correct but ruinous for a large level -- a mid-merge crash of an
+L22-scale level would throw away days of completed GPU solving just because the merge was
+interrupted. This adds **merge-resume**: on such a crash, restart re-runs *only* the merge, from
+the preserved inputs, in minutes/hours instead of re-solving.
+
+How it works:
+
+- **The merge inputs are made durable and preserved.** At merge start, every writer's in-memory
+  pool buffer is flushed to real files first, so all merge inputs live on disk (nothing merge-
+  critical is left only in RAM to be lost on a crash). Input files are no longer deleted piecemeal
+  during the merge -- deletion is deferred until the merge fully commits (both colors done and the
+  `_merging` sentinel removed), so an interrupted merge always leaves the complete input set intact.
+- **The `_merging` sentinel now carries the level's solve counters** (same magic+`LevelStats`
+  payload as `_complete`). A restart restores them, so the re-merge computes `MrgDups` and writes a
+  correct `_complete` without a re-solve. (An old zero-byte `_merging` sentinel with no payload
+  falls back to the previous full-re-solve behavior.)
+- **On restart, merge-resume trusts the disk** exactly like the checkpoint restart: the work dirs
+  are preserved, every preserved input is trailer-validated (crash-partials removed via
+  `--forcerestart`, else Fatal-listed), the registry is rebuilt from a scan, and file indices are
+  seeded from disk (max-on-disk + 1). The GPU solve is skipped entirely (`RunGpuFeederJob` restores
+  the counters and returns); the main loop then re-runs just `DoEndOfLevelMerge`.
+
+Reported figures are unaffected: flushing the pool bumps `boardsWrittenToDisk` (and `MrgDups`)
+by the pool tail, but StoreStats derives `DupsRemoved` from `boardsReceivedFromGpu`/`totalUnique`
+with `boardsWrittenToDisk` canceling out, and `UniqueOut == totalUnique` regardless -- so every
+stored/reported number is identical to a straight-through solve.
+
+Files: OthelloTypes.h (`resumeIntoMerge`), MergeFiles.cpp (pre-merge pool flush, `_merging`
+payload, deferred input deletion), InitSolver.cpp (`ScanForResumeLevel` signal + shared
+resume-from-disk setup), LevelSolverThread.cpp (`RunGpuFeederJob` merge-resume skip), and the
+per-level reset guard in OthelloRingMaster.cpp.
+
+---
+
 ## [1.0.16] - 2026-08-11
 
 ### STATUS display cleanup (cosmetic)

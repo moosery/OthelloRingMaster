@@ -508,11 +508,33 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
             continue;
         }
 
-        /* Merging sentinel -> interrupted mid-merge; purge partial output and re-run. */
+        /* Merging sentinel -> the end-of-level merge was interrupted. The solve
+        ** is durably complete and every merge input was preserved on disk (see
+        ** DoEndOfLevelMerge), so re-run ONLY the merge (merge-resume) instead of
+        ** re-solving the whole level: restore this level's solve counters from
+        ** the sentinel's payload and flag it. Purge the partial store output so
+        ** the re-merge writes fresh; the _merging sentinel is rewritten when the
+        ** re-merge starts. (`level` is the STORE level being written; the
+        ** iteration that produces it is level-1, which becomes resumeLevel via
+        ** the firstMissing-1 mapping in the caller.)
+        */
         SentinelNameMerging(sentPath, sizeof(sentPath), pState->storeDirectory, boardSize, level);
         if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
         {
-            LoggerLog("ScanForResumeLevel: level %d merge was interrupted; purging partial output\n", level);
+            LevelStats restored = {};
+            if (level > 0 && ReadSentinelLevelStats(sentPath, &restored))
+            {
+                pState->resumeLevelStats = restored;
+                pState->resumeIntoMerge  = true;
+                LoggerLog("ScanForResumeLevel: level %d merge was interrupted; will re-run ONLY the merge (merge-resume), no re-solve\n", level);
+            }
+            else
+            {
+                /* No usable stats payload (e.g. a pre-this-version zero-byte
+                ** _merging sentinel) -- fall back to the old behavior: full
+                ** re-solve of the level. */
+                LoggerLog("ScanForResumeLevel: level %d merge was interrupted but _merging carries no stats payload -- falling back to a full re-solve\n", level);
+            }
             DeleteFileA(sentPath);
             deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "black");
             deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "white");
@@ -668,76 +690,101 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
     ** so a later attempt at this same level can never pick it up by mistake.
     */
     SolveContext tempCtx = { pConfig, pState, pMachineInfo };
-    /* CheckpointStats is small now (no file manifest) -- MemMalloc is retained
-    ** out of habit/consistency and zero-initializes; freed below once the
-    ** checkpoint decision is made. */
-    CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
-    CheckpointStats& cp    = *cpPtr;
-    bool haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
-    if (haveValidCheckpoint)
+
+    /* Merge-resume (flagged by ScanForResumeLevel when this level's end-of-level
+    ** merge was interrupted): the level's SOLVE is already durably complete and
+    ** every merge input was preserved on disk, so we re-run only the merge. The
+    ** mid-solve checkpoint path is skipped entirely -- any leftover checkpoint
+    ** for this level is obsolete (the solve finished) and must not be mistaken
+    ** for a solve to resume, so delete it. resumeLevelStats was already restored
+    ** from the _merging sentinel's payload in ScanForResumeLevel. Both a valid
+    ** checkpoint and a merge-resume preserve the work dirs and rebuild the
+    ** registry/counters from disk below (via `resumeFromDisk`). */
+    bool mergeResume         = pState->resumeIntoMerge;
+    bool haveValidCheckpoint = false;
+
+    if (mergeResume)
     {
-        pState->resumeFromCheckpoint    = true;
-        pState->resumeCheckpointSubPass = cp.activeSubPass;
-        pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
-        /* Carry the checkpoint's cumulative-counter snapshot into live state so
-        ** RunGpuFeederJob can restore it after the per-level reset -- makes the
-        ** resumed level report the FULL level's work (UniqueOut/Generated/
-        ** Written/solve%) and the _complete sentinel's numbers correct, not just
-        ** the post-resume slice. Copied out before MemFree(cpPtr) below. */
-        pState->resumeLevelStats        = cp.levelStatsSnapshot;
-        /* Last-record cross-check: after skip-decoding resumeCheckpointRecords,
-        ** the feeder must land on exactly this record (FeedBoardIntoBatch), else
-        ** the input stream changed under us. */
-        pState->resumeLastRecordHi      = cp.lastRecordHi;
-        pState->resumeLastRecordLo      = cp.lastRecordLo;
-        pState->resumeHaveLastRecord    = cp.haveLastRecord;
-        /* Deliberately NOT restoring any file-index counter from the checkpoint
-        ** -- CheckpointSeedCountersFromDisk (below) seeds every one from a fresh
-        ** disk scan (max-on-disk + 1). That is the crux of the design: post-
-        ** checkpoint consolidation can move pre-checkpoint boards into higher-
-        ** indexed files, so trusting a recorded lower index would let resumed
-        ** writes overwrite them. The registry is likewise rebuilt from a scan. */
+        DeleteLevelCheckpoint(&tempCtx, pState->resumeLevel);
     }
     else
     {
-        pState->resumeFromCheckpoint = false;
-        DeleteLevelCheckpoint(&tempCtx, pState->resumeLevel);
+        /* Mid-level checkpoint check (Checkpoint.h): if resumeLevel has a valid,
+        ** validated checkpoint, preserve the writer/merge dirs and remember
+        ** where to resume the input stream; else delete any stale checkpoint.
+        ** CheckpointStats is small now (no manifest); MemMalloc/free kept for
+        ** consistency. */
+        CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+        CheckpointStats& cp    = *cpPtr;
+        haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
+        if (haveValidCheckpoint)
+        {
+            pState->resumeFromCheckpoint    = true;
+            pState->resumeCheckpointSubPass = cp.activeSubPass;
+            pState->resumeCheckpointRecords = cp.recordsConsumedInSubPass;
+            /* Carry the checkpoint's cumulative-counter snapshot into live state so
+            ** RunGpuFeederJob can restore it after the per-level reset -- makes the
+            ** resumed level report the FULL level's work (UniqueOut/Generated/
+            ** Written/solve%) and the _complete sentinel's numbers correct, not just
+            ** the post-resume slice. Copied out before MemFree(cpPtr) below. */
+            pState->resumeLevelStats        = cp.levelStatsSnapshot;
+            /* Last-record cross-check: after skip-decoding resumeCheckpointRecords,
+            ** the feeder must land on exactly this record (FeedBoardIntoBatch), else
+            ** the input stream changed under us. */
+            pState->resumeLastRecordHi      = cp.lastRecordHi;
+            pState->resumeLastRecordLo      = cp.lastRecordLo;
+            pState->resumeHaveLastRecord    = cp.haveLastRecord;
+            /* Deliberately NOT restoring any file-index counter from the checkpoint
+            ** -- CheckpointSeedCountersFromDisk (below) seeds every one from a fresh
+            ** disk scan (max-on-disk + 1). That is the crux of the design: post-
+            ** checkpoint consolidation can move pre-checkpoint boards into higher-
+            ** indexed files, so trusting a recorded lower index would let resumed
+            ** writes overwrite them. The registry is likewise rebuilt from a scan. */
+        }
+        else
+        {
+            pState->resumeFromCheckpoint = false;
+            DeleteLevelCheckpoint(&tempCtx, pState->resumeLevel);
+        }
+        MemFree(cpPtr);
     }
-    MemFree(cpPtr);
-    cleanUpDrives(pState, pMachineInfo, haveValidCheckpoint);
+
+    /* Both a valid mid-level checkpoint and a merge-resume keep the on-disk work
+    ** files and rebuild the registry/counters from a fresh scan of them. */
+    bool resumeFromDisk = haveValidCheckpoint || mergeResume;
+
+    cleanUpDrives(pState, pMachineInfo, resumeFromDisk);
     createDirectories(pState);
 
-    /* Resuming from a valid checkpoint: trust the disk (see Checkpoint.h).
+    /* Resuming from disk: trust it (see Checkpoint.h).
     ** (1) Validate every preserved data file has an intact trailer; crash-
-    **     partial files (a run that continued past the checkpoint then died
-    **     mid-write) are removed with --forcerestart, else this Fatals with the
-    **     list. Must run BEFORE the registry rebuild so partials never enter
-    **     the registry or skew the index scan.
+    **     partial files are removed with --forcerestart, else this Fatals with
+    **     the list. Must run BEFORE the registry rebuild so partials never enter
+    **     the registry or skew the index scan. For merge-resume this validates
+    **     the preserved merge inputs before they're re-merged.
     */
-    if (haveValidCheckpoint)
+    if (resumeFromDisk)
         ValidateCheckpointFilesOnDisk(&tempCtx, pState->resumeLevel, pConfig->forceRestart);
 
-    /* Registry init: one per writer drive. On a fresh/non-checkpoint start
-    ** each drive's registry is simply empty (RegistryInit alone). Resuming
-    ** from a valid checkpoint is the one case where real files already sit on
+    /* Registry init: one per writer drive. On a fresh start each drive's
+    ** registry is simply empty (RegistryInit alone). Resuming from disk (valid
+    ** checkpoint or merge-resume) is the case where real files already sit on
     ** disk (cleanUpDrives preserved them) -- rebuild each drive's registry from
-    ** a real scan of what's actually there rather than trusting anything
-    ** persisted.
+    ** a real scan rather than trusting anything persisted.
     */
     for (int i = 0; i < pState->numMergeWriters; i++)
     {
         RegistryInit(pState, i);   /* resets nextFileIdx[i] to 0 */
-        if (haveValidCheckpoint)
+        if (resumeFromDisk)
             RegistryRebuildFromDisk(pState, i, pState->mwDirectory[i]);
     }
 
     /* (2) Seed every work dir's next-file index from a disk scan (max-on-disk
     **     + 1), so resumed writes always land above every existing file and can
-    **     never overwrite a pre-checkpoint file -- even one post-checkpoint
-    **     consolidation moved to a higher index. This runs AFTER RegistryInit
-    **     (which zeroed nextFileIdx) so it is authoritative.
+    **     never overwrite a preserved file. This runs AFTER RegistryInit (which
+    **     zeroed nextFileIdx) so it is authoritative.
     */
-    if (haveValidCheckpoint)
+    if (resumeFromDisk)
         CheckpointSeedCountersFromDisk(&tempCtx, pState->resumeLevel);
 
     /* Initialize drive space ledgers after cleanup so we start from clean

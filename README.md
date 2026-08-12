@@ -299,6 +299,16 @@ A checkpoint is only accepted if the level's solve step is genuinely still in pr
 otherwise the solver falls back to a full writer-dir wipe and restarts the level from board 0.
 `--checkpt` requests a checkpoint immediately rather than waiting for the next interval.
 
+**Merge-resume.** The end-of-level merge is itself crash-recoverable, and cheaply so. When the
+merge starts it writes a `_merging` sentinel carrying the level's solve counters, and — crucially —
+all merge inputs are made durable first (each writer's in-memory pool is flushed to real files) and
+are not deleted until the whole merge commits. So if the process dies mid-merge, a restart re-runs
+*only* the merge from those preserved inputs (trailer-validated, registry rebuilt from a disk scan,
+solve skipped entirely) rather than re-solving the level from board 0 — turning a days-long redo of
+a large level into a minutes/hours re-merge. Every stored and reported figure is identical to a
+straight-through solve. (A pre-this-version zero-byte `_merging` sentinel with no stats payload
+falls back to the old full re-solve.)
+
 ### Retrograde calculator
 
 ```

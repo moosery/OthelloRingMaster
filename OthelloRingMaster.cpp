@@ -476,19 +476,19 @@ int main(int argc, char* argv[])
         g_state.resumeSkipTotal               = 0;
         g_state.resumeSkipDone                = 0;
 
-        /* Reset per-level per-thread state -- EXCEPT the registry/naming
-        ** counter when this exact level is resuming from a validated
-        ** mid-level checkpoint (Checkpoint.h): InitSolver already rebuilt
-        ** the registry from a real disk scan and restored nextFileIdx from
-        ** the checkpoint's own snapshot, and clearing either here would
-        ** make RegistryNextFileIdx hand out index 0 again, colliding with
-        ** (and silently overwriting) the real writer files already sitting
-        ** on disk from before the pause. Every other per-level counter here
-        ** is purely a display metric, harmless to reset.
+        /* Reset per-level per-thread state -- EXCEPT the registry and file-index
+        ** counters when this exact level is resuming from disk: either a
+        ** validated mid-level checkpoint OR a merge-resume (its interrupted
+        ** end-of-level merge is being re-run). In both cases InitSolver already
+        ** rebuilt the registry from a real disk scan and seeded every file-index
+        ** counter to max-on-disk+1; clearing either here would hand out index 0
+        ** again and silently overwrite the real files already on disk. Every
+        ** other per-level counter here is a display metric, harmless to reset.
         */
-        bool resumingThisLevelFromCheckpoint = g_state.resumeFromCheckpoint && level == g_state.resumeLevel;
+        bool resumingThisLevelFromDisk = (g_state.resumeFromCheckpoint || g_state.resumeIntoMerge)
+                                         && level == g_state.resumeLevel;
         g_state.consolidationBytesInput = 0;
-        if (!resumingThisLevelFromCheckpoint)
+        if (!resumingThisLevelFromDisk)
             for (int i = 0; i < g_state.numMergeWriters; i++)
                 RegistryResetForLevel(&g_state, i);
 
@@ -529,7 +529,7 @@ int main(int argc, char* argv[])
             ** seed and let resumed iMerges overwrite preserved F: files. Only
             ** reset the counts on a fresh (non-resume) level start; the byte
             ** display metrics are always safe to reset. */
-            if (!resumingThisLevelFromCheckpoint)
+            if (!resumingThisLevelFromDisk)
             {
                 g_state.mergeFileBlackCount[i]  = 0;
                 g_state.mergeFileWhiteCount[i]  = 0;
@@ -539,7 +539,7 @@ int main(int argc, char* argv[])
             g_state.mergeFileUncompBlack[i] = 0;
             g_state.mergeFileUncompWhite[i] = 0;
         }
-        if (!resumingThisLevelFromCheckpoint)
+        if (!resumingThisLevelFromDisk)
         {
             g_state.storeMergeBlackFileCount = 0;
             g_state.storeMergeWhiteFileCount = 0;

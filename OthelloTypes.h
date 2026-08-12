@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.0.16"
+#define VERSION "1.0.17"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -638,6 +638,13 @@ typedef struct __OthelloRingMasterState
     uint64_t resumeLastRecordHi;
     uint64_t resumeLastRecordLo;
     bool     resumeHaveLastRecord;
+    /* Merge-resume: set when a restart finds this level's end-of-level merge was
+    ** interrupted (Level_(resumeLevel+1)_merging present). The solve is already
+    ** durable, so RunGpuFeederJob skips solving entirely and just restores the
+    ** counters from resumeLevelStats (the _merging sentinel's payload); the main
+    ** loop then re-runs only DoEndOfLevelMerge from the preserved inputs, instead
+    ** of re-solving the whole level. Consumed once by RunGpuFeederJob, then cleared. */
+    bool     resumeIntoMerge;
 
     /* Live resume-skip progress for the STATUS display (v1.0.12). While a
     ** resumed sub-pass re-decodes its already-consumed records from disk
