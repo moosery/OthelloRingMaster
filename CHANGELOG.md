@@ -4,6 +4,28 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.16] - 2026-08-11
+
+### STATUS display cleanup (cosmetic)
+
+Two small status-display fixes, no behavior change:
+
+- **Per-drive segment high-water moved into the drive table.** The two standalone
+  `Segs D/E: black N (hi M/1024) ...` lines are gone; each drive's MW compressed-pool segment
+  lifetime high-water is now `LTHighSegB` / `LTHighSegW` columns in the drive table, right next to
+  `Blk`/`Wht`. (It's a lifetime-global capacity watch vs. MAX_MW_SEGS, never reset per level.)
+- **Flush progress lines stop recomputing a rate at 100%.** A flush that had finished writing but
+  whose descriptor hadn't been torn down yet kept showing an ever-updating average MB/s·brd/s past
+  100%; it now shows `-- MB/s  -- brd/s  ETA: done` once `done >= total`.
+
+(Context: this release follows the v1.0.15 checkpoint rewrite, which was validated end-to-end --
+a cross-process checkpoint/kill/restart produced a resumed level byte-for-byte identical to a
+pristine straight-through solve. Separately noted for a future change, NOT in this release: a
+mid-merge crash currently re-solves the whole level from scratch, which is correct but expensive
+for very large levels; a "re-merge from preserved inputs" optimization would skip the re-solve.)
+
+---
+
 ## [1.0.15] - 2026-08-11
 
 ### Checkpoint/restart rewrite -- fixes the cross-process resume data loss at the root

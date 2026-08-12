@@ -251,9 +251,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
     /* Current-level drive breakdown (cumulative since level start) */
     n += snprintf(buf + n, bufSize - n,
-                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht\n");
+                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht  LTHighSegB  LTHighSegW\n");
     n += snprintf(buf + n, bufSize - n,
-                  "  ---  -----  ------------  ------------  ------------  ----  ----\n");
+                  "  ---  -----  ------------  ------------  ------------  ----  ----  ----------  ----------\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
@@ -271,36 +271,36 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
         bool showUncomp = (d->levelBytesUncompressed > 0
                            && d->levelBytesUncompressed != d->levelBytesWritten);
+        /* LTHighSegB/W: this drive's MW compressed-pool segment lifetime
+        ** high-water per color (never reset per level -- a capacity watch vs.
+        ** MAX_MW_SEGS). Replaces the old per-drive "Segs" lines. */
+        int hiSegB = pSt->mwBlackSegCountHighWater[i];
+        int hiSegW = pSt->mwWhiteSegCountHighWater[i];
+
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
+                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d  %10d  %10d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten      / (1024.0 * 1024.0 * 1024.0),
                           d->levelBytesUncompressed / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          blackFiles, whiteFiles);
+                          blackFiles, whiteFiles, hiSegB, hiSegW);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d\n",
+                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d  %10d  %10d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten / (1024.0 * 1024.0 * 1024.0),
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
-                          blackFiles, whiteFiles);
+                          blackFiles, whiteFiles, hiSegB, hiSegW);
     }
 
-    /* MW compressed-pool segment counts: live vs. lifetime high-water (never
-    ** reset), so it's visible whether MAX_MW_SEGS has real headroom left.
+    /* (The per-drive "Segs" lines that used to print here were folded into the
+    ** drive table above as the LTHighSegB/LTHighSegW columns -- each drive's MW
+    ** compressed-pool segment lifetime high-water, so it stays visible whether
+    ** MAX_MW_SEGS has real headroom left.)
     */
-    for (int ti = 0; ti < pSt->numMergeWriters; ti++)
-    {
-        n += snprintf(buf + n, bufSize - n,
-                      "  Segs %c: black %3d (hi %3d/%d)   white %3d (hi %3d/%d)\n",
-                      pSt->mwDirectory[ti][0],
-                      pSt->mwBlackSegCount[ti], pSt->mwBlackSegCountHighWater[ti], MAX_MW_SEGS,
-                      pSt->mwWhiteSegCount[ti], pSt->mwWhiteSegCountHighWater[ti], MAX_MW_SEGS);
-    }
 
     /* Merge drives (medium speed) -- imerge file counts, bytes written, free space */
     for (int i = 0; i < pSt->numMergeDirs; i++)
@@ -409,19 +409,34 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                                    ? 100.0 * (double)pSt->mwFlushDoneBytes[ti][p]
                                            / (double)pSt->mwFlushTotalBytes[ti][p]
                                    : 0.0;
-                uint64_t elapsedMs = nowMs - pSt->mwFlushStartTickMs[ti][p];
-                double   mbps      = (elapsedMs > 200 && pSt->mwFlushDoneBytes[ti][p] > 0)
-                                   ? (double)pSt->mwFlushDoneBytes[ti][p] / (1024.0 * 1024.0)
-                                     / (elapsedMs / 1000.0)
-                                   : 0.0;
+                bool     done    = (pSt->mwFlushTotalBytes[ti][p] > 0 &&
+                                    pSt->mwFlushDoneBytes[ti][p] >= pSt->mwFlushTotalBytes[ti][p]);
                 char detail[24];
                 snprintf(detail, sizeof(detail), "%c: %s->disk", pSt->mwDirectory[ti][0], kFlushPlayerNames[p]);
-                char etaStr[16];
-                FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-                n += snprintf(buf + n, bufSize - n,
-                              "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
-                              "Flush", detail, doneGB, totalGB, pct, mbps,
-                              MbpsToBoardsPerSec(mbps), etaStr);
+                if (done)
+                {
+                    /* Bytes are all written; the flush descriptor just hasn't
+                    ** been torn down yet. Don't keep recomputing a "current"
+                    ** rate/ETA -- that average rate ticking on past 100% was
+                    ** misleading. Show dashes + "done" until the line clears. */
+                    n += snprintf(buf + n, bufSize - n,
+                                  "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5s MB/s  %9s brd/s   ETA: %s\n",
+                                  "Flush", detail, doneGB, totalGB, pct, "--", "--", "done");
+                }
+                else
+                {
+                    uint64_t elapsedMs = nowMs - pSt->mwFlushStartTickMs[ti][p];
+                    double   mbps      = (elapsedMs > 200 && pSt->mwFlushDoneBytes[ti][p] > 0)
+                                       ? (double)pSt->mwFlushDoneBytes[ti][p] / (1024.0 * 1024.0)
+                                         / (elapsedMs / 1000.0)
+                                       : 0.0;
+                    char etaStr[16];
+                    FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
+                    n += snprintf(buf + n, bufSize - n,
+                                  "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
+                                  "Flush", detail, doneGB, totalGB, pct, mbps,
+                                  MbpsToBoardsPerSec(mbps), etaStr);
+                }
             }
         }
     }
