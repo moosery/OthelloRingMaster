@@ -720,6 +720,23 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
                 char status[64];
                 if (!snap[i].isReserved)
                     strcpy(status, "available");
+                else if (snap[i].reservedBy == REGISTRY_RESERVED_CONSOL)
+                {
+                    /* Resolve exactly which consolidator worker holds this file:
+                    ** RegistryLinkProgress points a reserved node's pProgressBytes
+                    ** at that worker's own consolSlot[w].doneBytes
+                    ** (ConsolidationMaster.cpp), so matching the pointer back
+                    ** against every slot recovers the worker index -- the same
+                    ** linkage RegistryAuditor already uses to tell "stalled" from
+                    ** "still moving," just surfaced here instead. */
+                    int w = -1;
+                    for (int wk = 0; wk < CONSOLIDATOR_POOL_THREADS; wk++)
+                        if (snap[i].pProgressBytes == &pSt->consolSlot[wk].doneBytes) { w = wk; break; }
+                    if (w >= 0)
+                        snprintf(status, sizeof(status), "reserved (consol w%d)", w);
+                    else
+                        strcpy(status, "reserved (consol)");   /* between reserve and job dispatch -- not linked yet */
+                }
                 else
                     snprintf(status, sizeof(status), "reserved (%s)",
                              kReservedByNames[snap[i].reservedBy]);

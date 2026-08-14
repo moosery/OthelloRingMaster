@@ -4,6 +4,19 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.20] - 2026-08-14  (cosmetic)
+
+### --consol shows which consolidator worker holds each reserved file
+
+The `--consol` per-file dump showed "reserved (consol)" for every file a consolidator worker was
+using, with no way to tell which of the (up to 8) workers held which file. The data was already
+there -- `RegistryLinkProgress` points a reserved node's `pProgressBytes` at that exact worker's own
+`consolSlot[w].doneBytes` (the same linkage `RegistryAuditor` uses to tell "stalled" from "still
+moving") -- it just wasn't surfaced in this display. Now shows "reserved (consol wN)". Display only;
+no behavior change.
+
+---
+
 ## [1.0.19] - 2026-08-12  (cosmetic)
 
 ### Accurate restart log wording for merge-resume
