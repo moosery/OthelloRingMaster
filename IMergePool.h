@@ -65,13 +65,18 @@ PRegistryFileNode RelieveSpacePressure(PSolveContext pCtx, int ti, int player,
 
 /*
 ** Function: IMergeRunSession
-** @brief    The actual cross-drive merge work for ONE color: reserve every
+** @brief    The actual cross-drive merge work for ONE color: gather every
 **           currently-unreserved file for that color across all NVMe drives,
-**           move (single file) or k-way merge (multiple) to the medium drive
-**           (fallback: store drive if medium is full), delete + deregister the
-**           sources. Run on a pIMergePool worker thread by the relief
-**           coordinator (both colors dispatched together); not a standalone
-**           trigger.
+**           capped to what a medium drive currently has room for (so one
+**           sweep can never balloon into a multi-hour merge that stalls
+**           every later flush -- see the cap comment in the .cpp), move
+**           (single file) or k-way merge (multiple) to that medium drive
+**           (fallback: store drive if no medium drive has room even for the
+**           first file), delete + deregister the sources. Anything left
+**           ungathered because of the cap stays on disk, unreserved, for a
+**           future relief round. Run on a pIMergePool worker thread by the
+**           relief coordinator (both colors dispatched together); not a
+**           standalone trigger.
 ** @param    pCtx   - solve context
 ** @param    player - which color this session handles
 */

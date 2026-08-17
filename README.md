@@ -134,10 +134,13 @@ polling pool:
 - **Flusher pool** -- one job per color per GPU-buffer-full event; reserves a new
   registry node before writing. If it can't reserve, it drives a coordinated **space-relief
   event** (below) and retries.
-- **iMerge pool** -- the cross-drive sweep: gathers every unreserved file for a color across
-  all NVMe drives and k-way-merges (deduping across drives) to the medium drive, falling
-  back to the store drive if the medium is full. Runs as part of a space-relief event, not
-  on a standalone per-color trigger.
+- **iMerge pool** -- the cross-drive sweep: gathers unreserved files for a color across all
+  NVMe drives, capped to what a medium drive currently has room for (so one sweep can't
+  balloon into a many-hour merge that stalls every later flush behind the relief gate;
+  anything left uncapped stays on disk for a future round), and k-way-merges (deduping
+  across drives) to the medium drive, falling back to the store drive if no medium drive
+  has room even for the first file. Runs as part of a space-relief event, not on a
+  standalone per-color trigger.
 - **Consolidator worker pool** -- runs the actual bounded merges the master thread below
   dispatches to it.
 - **Consolidation master thread** -- a single event-driven thread (not a poller) that

@@ -4,6 +4,31 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.21] - 2026-08-17
+
+### iMerge sweeps now capped to what a medium drive can hold
+
+`IMergeRunSession` used to gather *every* currently-unreserved file for a color across all NVMe
+drives with no size cap, then try to reserve the whole pile on a medium drive (F:), falling back to
+the slow store drive (Y:) only if that single all-or-nothing reservation failed. Two real problems
+with that, both confirmed live on the real 6x6 run at level 23: (1) D:+E:'s combined footprint can
+easily exceed any single medium drive's total capacity, so part of a sweep would spill onto Y: even
+though F: had genuine room for most of it; (2) worse, an uncapped sweep can merge dozens of files
+totalling many TB in ONE `KWayMergeFiles` call, and that call's cost scales with total volume merged
+-- a real sweep was observed with ~53h/~64h ETAs. Since every later flush blocks behind
+`SpaceReliefGateWait` until the *entire* relief event finishes, a sweep that large would have stalled
+the whole GPU pipeline for the better part of three days, not just delayed the relief.
+
+`IMergeRunSession` now snapshots the best currently-available medium drive (`DriveAvailable`) before
+gathering and stops adding files once the running total would exceed it -- except the very first file
+gathered is always taken regardless of size, so a session can never come away empty just because the
+cap is small or zero (that first-file-only case still falls through to the store drive exactly as
+before). Anything left ungathered because of the cap simply stays on disk, unreserved, for a future
+relief round -- correctness is unaffected (the triggering flush only ever needs a small fraction of a
+full sweep's worth of space back), this only bounds how much any single sweep takes on at once.
+
+---
+
 ## [1.0.20] - 2026-08-14  (cosmetic)
 
 ### --consol shows which consolidator worker holds each reserved file

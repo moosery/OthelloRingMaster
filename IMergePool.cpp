@@ -7,8 +7,8 @@
 **   that header and project_writer_drive_registry_redesign memory for the
 **   full design: two dedicated threads (one per color) so black/white
 **   sessions run genuinely concurrently, triggered only by real space
-**   pressure, gathering every currently-unreserved file for a color across
-**   ALL NVMe drives via the registry (no ticket-range scanning).
+**   pressure, gathering currently-unreserved files for a color across ALL
+**   NVMe drives via the registry (no ticket-range scanning).
 **
 ** Notes:
 **   Adapted from the retired DoCrossDriveIntermediateMerge -- the real
@@ -17,6 +17,15 @@
 **   (instead of a ticket-snapshot-then-claim-range scan) and per-color
 **   concurrency (instead of one imergeCS lock serializing both colors
 **   through one function call).
+**
+**   2026-08: gathering is capped to what a medium drive currently has room
+**   for (IMergeRunSession) -- an uncapped gather routinely exceeded every
+**   medium drive's total capacity, both forcing part of a sweep onto the
+**   slow store drive and, worse, turning one merge into a many-hour
+**   operation that blocked every later flush (behind SpaceReliefGateWait)
+**   for the entire duration, confirmed live on the real 6x6 run at level 23
+**   (a two-color sweep with ~53h/~64h ETAs). Anything left ungathered by the
+**   cap simply stays on disk, unreserved, for a future relief round.
 */
 
 /* Includes */
@@ -223,11 +232,30 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     pSt->imergeStartTickMs[player]     = GetTickCount64();
     pSt->imergeFileCount[player]       = 0;
 
-    /* Gather every currently-unreserved, real file for this color across
-    ** ALL writer drives -- no size cap (unlike consolidation), since
-    ** iMerge's whole point is clearing space regardless of how big
-    ** individual files already are.
+    /* Gather every currently-unreserved, real file for this color across ALL
+    ** writer drives, capped to what a medium drive can actually hold. An
+    ** uncapped gather routinely exceeds every medium drive's total capacity
+    ** (D:+E:'s combined footprint can be, and regularly is, larger than any
+    ** single medium drive) -- not only does that force part of the sweep onto
+    ** the slow store drive, it turns ONE merge into an enormous multi-hour
+    ** operation (KWayMergeFiles' cost scales with total volume merged), which
+    ** blocks every later flush behind SpaceReliefGateWait for that whole
+    ** duration -- a multi-hour sweep can stall the entire GPU pipeline, not
+    ** just the relief itself. mediumCapBytes is a snapshot (informational --
+    ** the real reservation is still made below, same as always); the first
+    ** file gathered is always taken regardless of size so a session can never
+    ** come away empty just because the cap is small or zero -- if that first
+    ** file alone doesn't fit, the destination-selection step below falls
+    ** through to the store drive for it exactly as it always has.
     */
+    int64_t mediumCapBytes = 0;
+    for (int d = 0; d < pSt->numMergeDirs; d++)
+    {
+        int64_t avail = DriveAvailable(pSt, pSt->mergeDirectory[d][0]);
+        if (avail > mediumCapBytes)
+            mediumCapBytes = avail;
+    }
+
     const int kMaxFiles = 4096;
     char**    paths      = (char**)MemMalloc("imergePaths", (size_t)kMaxFiles * sizeof(char*));
     int64_t*  sizes      = (int64_t*)MemMalloc("imergeSizes", (size_t)kMaxFiles * sizeof(int64_t));
@@ -238,6 +266,7 @@ void IMergeRunSession(PSolveContext pCtx, int player)
 
     int     numFiles   = 0;
     int64_t totalBytes = 0;
+    bool    wasCapped  = false;
     PRegistryFileNode scanBuf[512];
 
     for (int wi = 0; wi < pSt->numMergeWriters && numFiles < kMaxFiles; wi++)
@@ -246,6 +275,17 @@ void IMergeRunSession(PSolveContext pCtx, int player)
                                             (int)(sizeof(scanBuf) / sizeof(scanBuf[0])));
         for (int f = 0; f < found && numFiles < kMaxFiles; f++)
         {
+            /* Leave it on disk, unreserved, for a future relief round once
+            ** the cap is reached -- but never for the very first file (see
+            ** comment above the cap computation).
+            */
+            if (numFiles > 0 && mediumCapBytes > 0 &&
+                totalBytes + scanBuf[f]->physfilesize > mediumCapBytes)
+            {
+                wasCapped = true;
+                continue;
+            }
+
             if (!RegistryReserveOne(pSt, wi, scanBuf[f], REGISTRY_RESERVED_IMERGE))
                 continue;   /* lost a race to another scanner -- normal, just skip it */
 
@@ -269,8 +309,9 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     }
 
     pSt->imergeFileCount[player] = numFiles;
-    LoggerLog("IMergeRunSession: %s gathered %d files (%.2f GB)\n",
-              RSFPlayerStr(player), numFiles, totalBytes / (1024.0 * 1024.0 * 1024.0));
+    LoggerLog("IMergeRunSession: %s gathered %d files (%.2f GB)%s\n",
+              RSFPlayerStr(player), numFiles, totalBytes / (1024.0 * 1024.0 * 1024.0),
+              wasCapped ? " [capped to fit a medium drive; remainder left for a later round]" : "");
 
     /* Display total in the same uncompressed-equivalent (recordCount*16) unit
     ** KWayMergeFiles increments imergeDoneInputBytes in below -- physfilesize
