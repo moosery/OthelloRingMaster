@@ -75,12 +75,13 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 
     /* Drain, honoring the hard rule (v1.0.11): a flush or an iMerge has
     ** PRIORITY and must FINISH -- it is never interrupted by a checkpoint.
-    ** Consolidation is the ONLY thing that may be stopped. This makes the
-    ** checkpoint's core guarantee true: all output for input[0..P] is in
-    ** COMPLETE (trailer'd) files on disk before we record position P. Barging
-    ** through an in-flight flush/iMerge would leave half-written output that
-    ** the resume can't account for. So the order is: let everything
-    ** flush/iMerge-related go fully quiescent first, then snapshot.
+    ** Consolidation is NOT stopped here at all (v1.0.22 -- see below for why
+    ** that's safe). This makes the checkpoint's core guarantee true: all
+    ** output for input[0..P] is in COMPLETE (trailer'd) files on disk before
+    ** we record position P. Barging through an in-flight flush/iMerge would
+    ** leave half-written output that the resume can't account for. So the
+    ** order is: let everything flush/iMerge-related go fully quiescent first,
+    ** then snapshot.
     **
     ** (1) Let any in-flight space relief run to completion -- it drives the
     **     iMerges and its own consolidation stop/restart cycle; never barge in.
@@ -88,9 +89,27 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     ** (3) Force-flush leftover in-memory pool data to disk. This is a flush;
     **     it must fully complete, and if it hits space pressure it drives its
     **     own relief (iMerge), which must also complete -- (4) waits for that.
-    ** (4) Confirm every flush/iMerge/relief is genuinely idle.
-    ** (5) NOW stop consolidation -- the one interruptible thing -- and (6, below)
-    **     snapshot a fully quiescent, flush/iMerge-complete state.
+    ** (4) Confirm every flush/iMerge/relief is genuinely idle, then snapshot.
+    **
+    ** v1.0.22: no longer stops consolidation. Real production data (level 24)
+    ** showed a single consolidation job can legitimately take 17+ hours once
+    ** enough small files back up -- far longer than the ~5h checkpoint
+    ** interval -- so stopping it here meant that job got killed mid-merge
+    ** every single checkpoint, forever, never once completing (confirmed live:
+    ** zero consolidation jobs above 9 files ever finished across the whole
+    ** level). Turns out the stop was never required for correctness: the
+    ** checkpoint's own guarantee only depends on trailer-completeness of
+    ** whatever's on disk (no manifest is recorded), and that's already true
+    ** regardless of what consolidation is doing -- its inputs stay complete
+    ** and untouched until a merge succeeds, and an in-flight output with no
+    ** trailer is handled the same as any other crash-partial file by
+    ** ValidateCheckpointFilesOnDisk on restart. Consolidation genuinely NEEDS
+    ** to be stopped for iMerge and the final merge (both need a stable,
+    ** gatherable file set to operate on) -- that's untouched: RelieveSpacePressure
+    ** stops/restarts it independently whenever this checkpoint's own forced
+    ** flush (3) triggers real relief, and DoEndOfLevelMerge still stops it at
+    ** the level boundary. This checkpoint just no longer adds a second,
+    ** redundant stop on top of those.
     */
     SpaceReliefGateWait(pCtx);                                   /* (1) */
     WaitForPoolIdle(pSt->pMergeWriterPool);                      /* (2) */
@@ -99,14 +118,13 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     SpaceReliefGateWait(pCtx);                                   /* (4) any relief (3) kicked off */
     WaitForPoolIdle(pSt->pFlusherPool);
     WaitForPoolIdle(pSt->pIMergePool);
-    ConsolidationMasterStop(pCtx);                              /* (5) */
-    WaitForPoolIdle(pSt->pConsolidatorPool);
 
-    /* Every flush/iMerge is done and consolidation is stopped: all output for
-    ** input[0..P] is now in complete, trailer'd files on disk. Capture the tiny
-    ** checkpoint payload -- position + last-record cross-check + cumulative
-    ** counters. No file names/sizes/indices are recorded: restart trusts the
-    ** disk (trailer completeness + disk-scan index seeding, see Checkpoint.h).
+    /* Every flush/iMerge is done: all output for input[0..P] is now in
+    ** complete, trailer'd files on disk (consolidation may still be running
+    ** concurrently -- harmless, see above). Capture the tiny checkpoint
+    ** payload -- position + last-record cross-check + cumulative counters.
+    ** No file names/sizes/indices are recorded: restart trusts the disk
+    ** (trailer completeness + disk-scan index seeding, see Checkpoint.h).
     ** MemMalloc (not stack) is retained out of caution though CheckpointStats
     ** is small now; it zero-fills and is freed after the file is written below.
     */
@@ -153,15 +171,11 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 
     LoggerLog("Checkpoint: wrote '%s'\n", path);
 
-    /* Resume for the rest of the level. Deliberately NOT a full per-level
-    ** reset (see OthelloRingMaster.cpp's own per-level loop for comparison)
-    ** -- only the consolidation master/workers need respawning here; the
-    ** registry and every naming counter are left exactly as they were,
-    ** since this is a pause, not a level boundary.
+    /* Nothing to respawn here (v1.0.22) -- consolidation was never stopped
+    ** above, so it's still running. The registry and every naming counter
+    ** are also left exactly as they were, since this is a pause, not a
+    ** level boundary.
     */
-    pSt->terminateConsolidation = false;
-    pSt->consolidationMasterThread = std::thread(ConsolidationMasterLoop, pCtx);
-
     pSt->checkpointRequestedNow        = false;
     pSt->checkpointIntervalStartTickMs = GetTickCount64();
 }

@@ -4,11 +4,10 @@
 ** Purpose:
 **   Declares the mid-level checkpoint API: deciding when a checkpoint is
 **   due, performing the pause-time NVMe-side sequence (drain the merge-
-**   writer/flusher/iMerge pools and the consolidation master, capture the
-**   registry's naming counter + a full file integrity manifest, write the
-**   checkpoint file, restart the consolidation master), and validating/
+**   writer/flusher/iMerge pools, write the checkpoint file), and validating/
 **   reading a checkpoint back at resume time (v1.0.0: registry-based --
-**   see Registry.h).
+**   see Registry.h). Consolidation is deliberately NOT part of this drain
+**   (v1.0.22) -- see PerformMidLevelCheckpoint below.
 **
 ** Notes:
 **   Deliberately does not know about the GPU accumulator or ping-pong
@@ -54,14 +53,19 @@ bool CheckpointDueNow(PSolveContext pCtx);
 ** Function: PerformMidLevelCheckpoint
 ** @brief    Runs the full pause-time checkpoint sequence: drains the merge-
 **           writer/D2H pool, force-flushes every writer's leftover pool
-**           data, drains the flusher pool and the iMerge pool, stops the
-**           consolidation master (waits for its worker pool to idle too) --
-**           at that point every real writer-drive file is finished and
-**           unreserved -- captures the registry's per-drive naming counter
-**           and a full integrity manifest directly from that now-quiescent
-**           state, writes the checkpoint file, then restarts the
-**           consolidation master for the remainder of the level (the level
-**           isn't ending, only pausing). Clears checkpointRequestedNow and
+**           data, drains the flusher pool and the iMerge pool -- at that
+**           point every real writer-drive file involved in this level's
+**           input[0..P] is finished and durable on disk -- then writes the
+**           checkpoint file. Consolidation is deliberately left running
+**           throughout (v1.0.22 -- previously stopped here, which meant any
+**           consolidation job bigger than a checkpoint interval could never
+**           complete, confirmed live on a real run). This is safe because the
+**           checkpoint's guarantee only depends on trailer-completeness of
+**           what's on disk, not on any file list this function would have
+**           needed consolidation to hold still for -- an in-flight
+**           consolidation output with no trailer at restart time is handled
+**           exactly like any other crash-partial file by
+**           ValidateCheckpointFilesOnDisk. Clears checkpointRequestedNow and
 **           resets the interval timer before returning. Called synchronously
 **           from inside the GPU feeder's own read callback
 **           (FeedBoardIntoBatch, LevelSolverThread.cpp) -- the read stream

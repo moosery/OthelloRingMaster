@@ -236,11 +236,14 @@ void ConsolidationMasterLoop(PSolveContext pCtx)
         }
 
         /* Both flags mean "this thread function should exit now" -- the two
-        ** cases (real shutdown vs. a level ending/a checkpoint pause) are
-        ** distinguished entirely by what the CALLER does next:
-        ** CleanupSolver never restarts it; PerformMidLevelCheckpoint starts
-        ** a brand-new std::thread right after ConsolidationMasterStop's
-        ** join returns. The loop itself doesn't need to know which case
+        ** cases (real shutdown/level-ending final merge vs. an iMerge relief
+        ** sweep) are distinguished entirely by what the CALLER does next:
+        ** CleanupSolver and DoEndOfLevelMerge never restart it;
+        ** RelieveSpacePressure starts a brand-new std::thread right after
+        ** ConsolidationMasterStop's join returns, once its sweep is done.
+        ** (PerformMidLevelCheckpoint no longer calls ConsolidationMasterStop
+        ** at all as of v1.0.22 -- consolidation now runs straight through a
+        ** checkpoint pause.) The loop itself doesn't need to know which case
         ** it's in -- it just needs to actually return so join() doesn't
         ** hang forever (a real bug caught here: terminateConsolidation
         ** alone used to just `continue` back to waiting, which meant

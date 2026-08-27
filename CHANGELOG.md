@@ -4,6 +4,33 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.22] - 2026-08-26
+
+### Checkpoints no longer stop consolidation -- a job bigger than the checkpoint interval could never complete
+
+Found live on the real production run at level 24: a real log analysis showed **zero consolidation
+jobs above 9 files ever completed** across the whole level, despite one job visibly growing across
+repeated status checks (38 files -> 44 files, 21.2 TB -> 24.6 TB target). Root cause: `PerformMidLevelCheckpoint`
+stopped consolidation on every checkpoint (every ~5 hours by default) same as it always had, but once
+enough small files backed up, a single consolidation job could legitimately take 17+ hours to finish --
+so every checkpoint killed it mid-merge before it ever got there. The abandon path is safe (inputs are
+released untouched, only the incomplete output is deleted -- confirmed no data loss, only wasted repeated
+work), but the job could never actually complete, and the backlog it left behind only got swept into an
+even bigger job next time, compounding.
+
+Traced why the stop was even there: unlike a flush or an iMerge, consolidation was never load-bearing for
+the checkpoint's own guarantee. The checkpoint records no file manifest -- its guarantee is purely
+"everything on disk has an intact trailer," and that's already true regardless of what consolidation is
+doing (its inputs stay complete and untouched until a merge succeeds; an in-flight output with no trailer
+at restart time is handled the same as any other crash-partial file by `ValidateCheckpointFilesOnDisk`).
+`PerformMidLevelCheckpoint` no longer calls `ConsolidationMasterStop`/waits on the consolidator pool, and
+no longer restarts the consolidation master thread afterward -- it just keeps running straight through.
+Consolidation is still correctly stopped for the two cases that actually need it: an iMerge relief sweep
+(via `RelieveSpacePressure`, independently of the checkpoint code -- still fires if the checkpoint's own
+forced flush happens to trigger real space pressure) and the final end-of-level merge.
+
+---
+
 ## [1.0.21] - 2026-08-17
 
 ### iMerge sweeps now capped to what a medium drive can hold
