@@ -313,26 +313,9 @@ void IMergeRunSession(PSolveContext pCtx, int player)
               RSFPlayerStr(player), numFiles, totalBytes / (1024.0 * 1024.0 * 1024.0),
               wasCapped ? " [capped to fit a medium drive; remainder left for a later round]" : "");
 
-    /* Display total in the same uncompressed-equivalent (recordCount*16) unit
-    ** KWayMergeFiles increments imergeDoneInputBytes in below -- physfilesize
-    ** is the COMPRESSED on-disk size (~3-4x smaller), which made the STATUS
-    ** percentage blow past 100% (done was uncompressed-equiv, total was
-    ** compressed). Read each input's trailer for its record count (cheap --
-    ** trailer only). Set before the merge starts feeding doneBytes.
-    */
-    {
-        int64_t totalRecs = 0;
-        for (int i = 0; i < numFiles; i++)
-        {
-            RSFReader* r = RSFOpen(paths[i]);
-            if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
-        }
-        pSt->imergeTotalInputBytes[player] = totalRecs * (int64_t)sizeof(UINT64_PAIR);
-    }
-
-    /* Try each medium drive in turn; fall back to the store drive (a "total
-    ** flush") if none has room. Reservation worst-case = sum of real input
-    ** sizes (dedup can only shrink the real output from there).
+    /* Try each medium drive in turn for the FULL gathered set. Reservation
+    ** worst-case = sum of real input sizes (dedup can only shrink the real
+    ** output from there).
     */
     int  destDirIdx = -1;
     for (int d = 0; d < pSt->numMergeDirs; d++)
@@ -342,6 +325,85 @@ void IMergeRunSession(PSolveContext pCtx, int player)
             destDirIdx = d;
             break;
         }
+    }
+
+    /* Lost a race against the OTHER color's concurrent session. Both colors
+    ** snapshot medium-drive availability independently at gather time (see
+    ** the cap comment above), so together they can ask for more than a
+    ** medium drive actually has even though NEITHER one alone looked over
+    ** budget -- confirmed live: black and white each gathered a sane,
+    ** individually-uncapped amount, but combined they exceeded F:'s real
+    ** capacity, and whichever lost the reservation race fell through to the
+    ** slow store drive for its ENTIRE gathered set. Before giving up on the
+    ** medium drive, shrink to whatever's REALLY available right now (a
+    ** fresh read, not the stale gather-time snapshot) and retry once --
+    ** much better than sending everything to the store drive over a race
+    ** that's usually already resolved a moment later. Anything trimmed off
+    ** goes back to the registry unreserved, same as an ordinary gather-time
+    ** cap -- real, untouched data waiting for a future relief round, not
+    ** lost.
+    */
+    if (destDirIdx < 0)
+    {
+        int64_t realAvail  = 0;
+        int     retryDirIdx = -1;
+        for (int d = 0; d < pSt->numMergeDirs; d++)
+        {
+            int64_t avail = DriveAvailable(pSt, pSt->mergeDirectory[d][0]);
+            if (avail > realAvail) { realAvail = avail; retryDirIdx = d; }
+        }
+
+        if (realAvail > 0)
+        {
+            int     keep      = 0;
+            int64_t keepBytes = 0;
+            for (int i = 0; i < numFiles; i++)
+            {
+                if (keep > 0 && keepBytes + sizes[i] > realAvail)
+                    break;
+                keepBytes += sizes[i];
+                keep++;
+            }
+
+            for (int i = keep; i < numFiles; i++)
+            {
+                RegistryUnreserveOne(pSt, writerOf[i], nodes[i]);
+                MemFree(paths[i]);
+            }
+            numFiles   = keep;
+            totalBytes = keepBytes;
+            pSt->imergeFileCount[player] = numFiles;
+
+            if (DriveReserve(pSt, pSt->mergeDirectory[retryDirIdx][0], totalBytes))
+            {
+                destDirIdx = retryDirIdx;
+                LoggerLog("IMergeRunSession: %s shrank to %d files (%.2f GB) to fit %c: after losing a "
+                          "space race -- remainder left for a later round\n",
+                          RSFPlayerStr(player), numFiles, totalBytes / (1024.0 * 1024.0 * 1024.0),
+                          pSt->mergeDirectory[retryDirIdx][0]);
+            }
+            /* Retry still failed (space contested yet again) -- fall through
+            ** to the store drive below with whatever we're now holding.
+            */
+        }
+    }
+
+    /* Display total in the same uncompressed-equivalent (recordCount*16) unit
+    ** KWayMergeFiles increments imergeDoneInputBytes in below -- physfilesize
+    ** is the COMPRESSED on-disk size (~3-4x smaller), which made the STATUS
+    ** percentage blow past 100% (done was uncompressed-equiv, total was
+    ** compressed). Read each input's trailer for its record count (cheap --
+    ** trailer only). Computed against the FINAL file set (post-shrink, if
+    ** any), so it always matches what's actually about to be merged.
+    */
+    {
+        int64_t totalRecs = 0;
+        for (int i = 0; i < numFiles; i++)
+        {
+            RSFReader* r = RSFOpen(paths[i]);
+            if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+        }
+        pSt->imergeTotalInputBytes[player] = totalRecs * (int64_t)sizeof(UINT64_PAIR);
     }
 
     char outPath[MAX_FULL_PATH_NAME];

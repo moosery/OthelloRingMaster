@@ -249,11 +249,19 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     }
     n += snprintf(buf + n, bufSize - n, "\n");
 
-    /* Current-level drive breakdown (cumulative since level start) */
+    /* Current-level drive breakdown (cumulative since level start).
+    ** BlkFls/WhtFls: real, current PHYSICAL FILE COUNT on this drive for
+    ** that color right now (registry-based ground truth, not a lifetime
+    ** counter) -- e.g. if this is 3, there are exactly 3 real files of that
+    ** color sitting on this drive at this instant, no more no less.
+    ** MWSegHiB/W: this drive's in-memory MW compressed-pool segment count's
+    ** LIFETIME HIGH-WATER per color (never reset per level) -- a capacity
+    ** watch against MAX_MW_SEGS, not a file count at all.
+    */
     n += snprintf(buf + n, bufSize - n,
-                  "  Drv  Files       Disk GB     Uncomp GB       Free GB   Blk   Wht  LTHighSegB  LTHighSegW\n");
+                  "  Drv  Files       Disk GB     Uncomp GB       Free GB  BlkFls  WhtFls  MWSegHiB  MWSegHiW\n");
     n += snprintf(buf + n, bufSize - n,
-                  "  ---  -----  ------------  ------------  ------------  ----  ----  ----------  ----------\n");
+                  "  ---  -----  ------------  ------------  ------------  ------  ------  --------  --------\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
         const WriterDriveStats* d = &pSt->writerDriveStats[i];
@@ -271,15 +279,12 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
 
         bool showUncomp = (d->levelBytesUncompressed > 0
                            && d->levelBytesUncompressed != d->levelBytesWritten);
-        /* LTHighSegB/W: this drive's MW compressed-pool segment lifetime
-        ** high-water per color (never reset per level -- a capacity watch vs.
-        ** MAX_MW_SEGS). Replaces the old per-drive "Segs" lines. */
         int hiSegB = pSt->mwBlackSegCountHighWater[i];
         int hiSegW = pSt->mwWhiteSegCountHighWater[i];
 
         if (showUncomp)
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d  %10d  %10d\n",
+                          "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %6d  %6d  %8d  %8d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten      / (1024.0 * 1024.0 * 1024.0),
@@ -288,7 +293,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                           blackFiles, whiteFiles, hiSegB, hiSegW);
         else
             n += snprintf(buf + n, bufSize - n,
-                          "    %c  %5llu  %9.2f GB                %9.2f GB  %4d  %4d  %10d  %10d\n",
+                          "    %c  %5llu  %9.2f GB                %9.2f GB  %6d  %6d  %8d  %8d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
                           d->levelBytesWritten / (1024.0 * 1024.0 * 1024.0),
@@ -475,11 +480,18 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                      pSt->mwDirectory[cs->writerIdx][0], kConsolPlayerNames[cs->player], w);
             char etaStr[16];
             FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
+            /* A normal job is 3-9 files (MAX_CONSOLIDATION_BATCH is 64, but
+            ** that's never been the reason one grows -- a real backlog is).
+            ** >=15 is comfortably above anything seen from ordinary
+            ** worker-pool saturation; flag it so a reader doesn't have to
+            ** already know that history to recognize something unusual.
+            */
             n += snprintf(buf + n, bufSize - n,
                           "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
-                          "   files: %d\n",
+                          "   files: %d%s\n",
                           "Consol", detail, doneGB, totalGB, pct, mbps,
-                          MbpsToBoardsPerSec(mbps), etaStr, cs->fileCount);
+                          MbpsToBoardsPerSec(mbps), etaStr, cs->fileCount,
+                          (cs->fileCount >= 15) ? "  (large backlog)" : "");
         }
     }
 
@@ -567,12 +579,20 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         }
     }
 
-    /* --- Level history table (completed levels + current in-progress row) --- */
+    /* --- Level history table (completed levels + current in-progress row) ---
+    ** GpuDup% is the GPU stage's own dedup rate only (GpuDups/Generated) --
+    ** always meaningful, even mid-level. MrgDups/UniqueOut are pipeline-final
+    ** numbers that don't exist until this level's real end-of-level merge has
+    ** actually run; they print as "--" on the current row until then instead
+    ** of the old 0/=Written placeholders, which looked like real (and very
+    ** different) numbers -- confirmed live confusion. See
+    ** project_status_display_cleanup_backlog memory for the full rationale.
+    */
     n += snprintf(buf + n, bufSize - n, "\n");
     n += snprintf(buf + n, bufSize - n,
-                  "Lvl        BoardsIn        Generated         GpuDups         MrgDups         Written       UniqueOut       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
+                  "Lvl        BoardsIn        Generated         GpuDups GpuDup%%   MrgDups(final)   Written(gross)  UniqueOut(final)       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
     n += snprintf(buf + n, bufSize - n,
-                  "---  --------------  ---------------  --------------  --------------  --------------  --------------  ----------  ----------  ------  ------  ----------\n");
+                  "---  --------------  ---------------  --------------  ------  ---------------  ---------------  ----------------  ----------  ----------  ------  ------  ----------\n");
     for (int lvl = 0; lvl < curLevel; lvl++)
     {
         if (n >= (int)bufSize - 512) break;   /* safety guard -- buffer nearly full */
@@ -581,21 +601,26 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         FormatDuration(ls->totalNanos, dur, sizeof(dur));
         uint64_t ns = (ls->boardsReadFromStore > 0)
                       ? (uint64_t)(ls->totalNanos / (int64_t)ls->boardsReadFromStore) : 0;
+        double gpuDupPct = (ls->boardsGenerated > 0)
+                          ? 100.0 * (double)ls->gpuDupsRemoved / (double)ls->boardsGenerated : 0.0;
         /* Written is a gross running total (every flush's own within-flush-
         ** deduped count, summed across the whole level) -- it still double
         ** counts any board that appears again in a later flush. UniqueOut
         ** is the true final unique-boards-stored count (what the NEXT
         ** level's BoardsIn actually reads back), matching the plain-text
-        ** log file's own UniqueOut column (see LogLevelSummary).
+        ** log file's own UniqueOut column (see LogLevelSummary). A completed
+        ** level's mrgDupsRemoved is always the real, final value -- only the
+        ** in-progress current row needs the "--" placeholder treatment below.
         */
         uint64_t uniqueOut = (ls->boardsWrittenToDisk >= ls->mrgDupsRemoved)
                              ? ls->boardsWrittenToDisk - ls->mrgDupsRemoved : 0;
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
+                      "%3d  %14llu  %15llu  %14llu  %6.2f  %15llu  %15llu  %16llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
                       lvl,
                       (unsigned long long)ls->boardsReadFromStore,
                       (unsigned long long)ls->boardsGenerated,
                       (unsigned long long)ls->gpuDupsRemoved,
+                      gpuDupPct,
                       (unsigned long long)ls->mrgDupsRemoved,
                       (unsigned long long)ls->boardsWrittenToDisk,
                       (unsigned long long)uniqueOut,
@@ -633,17 +658,35 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             snprintf(phaseStr, sizeof(phaseStr), "[solve%8.3f%%]",
                      100.0 * (double)cur->boardsReadFromStore
                            / (double)pSt->currentLevelTotalBoards);
-        uint64_t curUniqueOut = (cur->boardsWrittenToDisk >= cur->mrgDupsRemoved)
-                               ? cur->boardsWrittenToDisk - cur->mrgDupsRemoved : 0;
+        double curGpuDupPct = (cur->boardsGenerated > 0)
+                             ? 100.0 * (double)cur->gpuDupsRemoved / (double)cur->boardsGenerated : 0.0;
+        /* MrgDups/UniqueOut don't exist yet until curDone -- show "--"
+        ** rather than the misleading 0/=Written placeholders the raw
+        ** counters would otherwise produce.
+        */
+        char mrgDupsStr[16], uniqueOutStr[17];
+        if (curDone)
+        {
+            snprintf(mrgDupsStr, sizeof(mrgDupsStr), "%llu", (unsigned long long)cur->mrgDupsRemoved);
+            uint64_t curUniqueOut = (cur->boardsWrittenToDisk >= cur->mrgDupsRemoved)
+                                   ? cur->boardsWrittenToDisk - cur->mrgDupsRemoved : 0;
+            snprintf(uniqueOutStr, sizeof(uniqueOutStr), "%llu", (unsigned long long)curUniqueOut);
+        }
+        else
+        {
+            snprintf(mrgDupsStr, sizeof(mrgDupsStr), "--");
+            snprintf(uniqueOutStr, sizeof(uniqueOutStr), "--");
+        }
         n += snprintf(buf + n, bufSize - n,
-                      "%3d  %14llu  %15llu  %14llu  %14llu  %14llu  %14llu  %10.2f  %10s  %6llu  %6llu  %s\n",
+                      "%3d  %14llu  %15llu  %14llu  %6.2f  %15s  %15llu  %16s  %10.2f  %10s  %6llu  %6llu  %s\n",
                       curLevel,
                       (unsigned long long)cur->boardsReadFromStore,
                       (unsigned long long)cur->boardsGenerated,
                       (unsigned long long)cur->gpuDupsRemoved,
-                      (unsigned long long)cur->mrgDupsRemoved,
+                      curGpuDupPct,
+                      mrgDupsStr,
                       (unsigned long long)cur->boardsWrittenToDisk,
-                      (unsigned long long)curUniqueOut,
+                      uniqueOutStr,
                       cur->mwBytes / (1024.0 * 1024.0 * 1024.0),
                       curDur,
                       (unsigned long long)cur->consolidationFilesCreated,

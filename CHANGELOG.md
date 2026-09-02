@@ -4,6 +4,49 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.0.23] - 2026-09-02
+
+### iMerge: fixed a real race between the two concurrent color sweeps spilling to the store drive
+
+Confirmed live on level 24 (real production run): despite the v1.0.21 cap fix, white's entire
+gathered set (3718.81 GB, 39 files) still spilled to the slow store drive during a real relief
+event, instead of landing on the medium drive alongside black's. Root cause: white and black each
+independently snapshot the medium drive's available space at the *start* of their own gather (both
+run concurrently), so both can see the same "available" figure before either has actually reserved
+anything -- individually, each color's gathered total looked like it fit, but combined they
+exceeded the medium drive's real capacity. Whichever color's real `DriveReserve` call lost that
+race fell through to the store drive for its *entire* gathered set, same failure mode as before
+v1.0.21, just now bounded to one color's capped total instead of an uncapped one.
+
+`IMergeRunSession` now retries once before giving up on the medium drive: if the full-set
+reservation fails, it re-reads the drive's *real, current* availability (not the stale gather-time
+snapshot), trims the gathered file list down to fit that, releases the trimmed files back to the
+registry unreserved (same as an ordinary gather-time cap -- untouched, real data waiting for a
+future relief round, not lost), and retries the reservation for the smaller total. Only falls
+through to the store drive if even the shrunk set still doesn't fit. `imergeTotalInputBytes` is
+now computed once, after the destination is finally settled, so the live STATUS progress always
+matches what's actually being merged.
+
+### STATUS display: clearer columns, per user request after repeated real confusion this session
+
+- Per-level table: `MrgDups`/`UniqueOut` now print `--` for the in-progress current level instead
+  of the old 0/`=Written` placeholders, which looked like real (and very different) final numbers
+  until the level actually completes.
+- Added a `GpuDup%` column (GpuDups/Generated, computed) to the per-level table -- previously had
+  to be worked out by hand every time.
+- Drive table: renamed the unlabeled `Blk`/`Wht` columns to `BlkFls`/`WhtFls` and added an inline
+  comment clarifying they're real, current physical file counts (registry ground truth), not a
+  lifetime counter -- had to be reverse-engineered via arithmetic earlier this session.
+- `--consol`/STATUS's per-worker consolidation line now flags `(large backlog)` when a job's file
+  count is unusually high (>=15, well above the normal 3-9 range), rather than requiring the reader
+  to already know that range is unusual.
+
+See `project_status_display_cleanup_backlog` memory for the full list of ideas discussed (a couple
+of lower-priority ones -- explicit dup-rate scope labels everywhere, a full column legend -- not
+done this pass).
+
+---
+
 ## [1.0.22] - 2026-08-26
 
 ### Checkpoints no longer stop consolidation -- a job bigger than the checkpoint interval could never complete
