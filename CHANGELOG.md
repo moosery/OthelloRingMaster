@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.0] - 2026-09-08
+
+### New tool: OthelloRingMasterCalculatorCountsStats
+
+Read-only CLI that reports real per-level storage stats for the retrograde calculator's `.counts`
+output, mirroring what `OthelloRingMasterStoreStats` already does for the board store. For each
+completed level, prints board counts (split by color, plus their sum), the confirmed counter-tier
+width, real on-disk compressed bytes, real decompressed bytes, compression ratio, percent
+reduction, and bits/board. Board counts and tier width are read straight from the level's own
+`calc_complete` sentinel (ground truth the calculator already recorded, not re-derived); the
+decompressed byte count comes from actually decompressing each color's LZ4 stream to end-of-stream
+via `Utility/Lz4Stream.h`, never from record-count*width math.
+
+Deliberately built as a standalone project rather than folded into `OthelloRingMasterStoreStats`,
+to avoid a dependency on the CUDA-heavy `OthelloRingMasterCalculator` project -- it reuses only
+that project's small header-only pieces (`CalculatorFileName.h`, `CalculatorTypes.h`,
+`CounterWidthConfig.h`) via include-path, with no `ProjectReference` to it and no CUDA toolkit
+dependency.
+
+CLI: `--board-size N` (4/6/8, default 6), `--counts-drive L` (default Y), `--counts-dir PATH`
+(default `\OthelloRingMasterCalculator\Counts`, matching the calculator's own default exactly),
+`--output PATH` (default stdout).
+
 ## [1.0.23] - 2026-09-02
 
 ### iMerge: fixed a real race between the two concurrent color sweeps spilling to the store drive

@@ -196,6 +196,7 @@ Outputs:
 - `x64/Release/OthelloRingMasterCalculator.exe` -- retrograde win/tie/loss calculator
 - `x64/Release/OthelloRingMasterCalculatorStatus.exe` -- calculator's live status client (TCP)
 - `x64/Release/OthelloRingMasterStoreStats.exe` -- per-level CSV store statistics (read-only)
+- `x64/Release/OthelloRingMasterCalculatorCountsStats.exe` -- per-level CSV calculator counts statistics (read-only)
 
 ## Usage
 
@@ -397,6 +398,28 @@ can only be decoded sequentially from the start, a bounded `--limit` reads a *le
 whole level -- for a fully unbiased answer, run with `--limit 0` on a level cheap enough to afford
 a full decode.
 
+### Calculator counts stats
+
+```
+OthelloRingMasterCalculatorCountsStats.exe [options]
+
+  --board-size N     Board size: 4, 6, or 8                      [default: 6]
+  --counts-drive L   Drive letter the counts live on             [default: Y]
+  --counts-dir PATH  Sub-path on counts drive (no drive letter)  [default: \OthelloRingMasterCalculator\Counts]
+  --output PATH      Write CSV to PATH instead of stdout
+  --help             Show this help
+```
+
+The calculator's own counterpart to Store stats above. For each level with a completed
+`calc_complete` sentinel, prints one CSV row: `Level,TotalBoards,BlackBoards,WhiteBoards,
+CounterTier,CompressedBytes,DecompressedBytes,Ratio,ReductionPercent,BitsPerBoard`. Board
+counts and `CounterTier` (`nibble` or a byte width) come straight from the level's own
+sentinel -- ground truth the calculator already recorded, not re-derived. `CompressedBytes`
+is each color's real on-disk `.counts` file size; `DecompressedBytes` comes from actually
+decompressing each color's LZ4 stream to end-of-stream (never derived from record-count*width
+math). Safe to run against a counts directory while the calculator is actively writing to it --
+only levels with a completed sentinel are read.
+
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
 Press **Ctrl+C** on the solver for a graceful shutdown -- merge loops check the terminate
@@ -533,6 +556,7 @@ OthelloRingMaster/
   OthelloRingMasterCalculator/   Retrograde win/tie/loss calculator (see its own --help)
   OthelloRingMasterCalculatorStatus/  Calculator's status client project
   OthelloRingMasterStoreStats/   Per-level CSV store statistics tool (read-only, see its own --help)
+  OthelloRingMasterCalculatorCountsStats/  Per-level CSV calculator counts statistics tool (read-only, see its own --help)
 ```
 
 ## Related
