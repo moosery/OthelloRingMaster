@@ -470,6 +470,36 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
 */
 
 /*
+** Function: VerifyStoreDriveReachable
+** @brief    Confirms the store drive's root is actually accessible before any
+**           resume scan or cleanup runs. A disconnected/unauthenticated mapped
+**           network drive (e.g. Y: needing Windows credentials re-entered after
+**           a reboot) makes every GetFileAttributesA call under it return
+**           INVALID_FILE_ATTRIBUTES -- indistinguishable, to ScanForResumeLevel,
+**           from a genuinely empty/fresh store. Left unchecked that misreading
+**           makes InitSolver conclude dozens of already-completed levels never
+**           existed and wipe the working drives as part of a "fresh start" --
+**           a real incident this guards against, not a hypothetical: it happened
+**           on 2026-09-13 and cost a full level 24 re-solve. Only the drive
+**           ROOT is checked (not storeDirectory itself), since a genuinely
+**           fresh run's storeDir subfolder not existing yet is normal and must
+**           not trip this.
+** @param    storeDrive - the configured store drive letter
+*/
+static void VerifyStoreDriveReachable(char storeDrive)
+{
+    char root[4] = { storeDrive, ':', '\\', '\0' };
+    DWORD attrs = GetFileAttributesA(root);
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        Fatal(FATAL_STORE_DRIVE_UNREACHABLE,
+              "Store drive %c: is not accessible (disconnected network drive? "
+              "needs Windows credentials re-entered after a reboot?). Refusing "
+              "to proceed -- treating an unreachable store drive as an empty/"
+              "fresh store would silently wipe real in-progress work on the "
+              "other drives. Reconnect %c: and restart.", storeDrive, storeDrive);
+}
+
+/*
 ** Function: ScanForResumeLevel
 ** @brief    Sentinel-aware scan for the first level not yet fully written,
 **           purging any interrupted level's partial output along the way.
@@ -676,6 +706,8 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
 
     GetMachineInfo(pConfig->cacheDirName, pConfig->useDrives, pConfig->memoryLimitBytes, pMachineInfo);
     computeState(pConfig, pState, pMachineInfo);
+
+    VerifyStoreDriveReachable(pConfig->storeDrive);
 
     /* ScanForResumeLevel returns the index of the first missing store file.
     ** Iteration N reads Level_N and writes Level_N+1, so if Level_N+1 is the

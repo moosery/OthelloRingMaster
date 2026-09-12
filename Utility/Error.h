@@ -78,6 +78,7 @@ constexpr auto FATAL_DRIVE_SPACE                      = RC_FATAL_BASE + 35;
 constexpr auto FATAL_GPU_ERROR                        = RC_FATAL_BASE + 36;
 constexpr auto FATAL_MERGE_LOGIC_ERROR                = RC_FATAL_BASE + 37;
 constexpr auto FATAL_COUNTER_WIDTH_CONFIG_WRITE_FAILED = RC_FATAL_BASE + 38;
+constexpr auto FATAL_STORE_DRIVE_UNREACHABLE           = RC_FATAL_BASE + 39;
 
 /* Utility Implementation errors */
 constexpr auto UTIL_RC_Success                    = RC_SUCCESS;

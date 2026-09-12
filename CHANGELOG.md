@@ -4,6 +4,34 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.1] - 2026-09-13
+
+### Fixed a real data-loss bug: an unreachable store drive was silently treated as an empty one
+
+Real incident: Y: is a mapped network drive that needed Windows credentials re-entered after a
+reboot. The solver was started before that happened, so Y: was unreachable at startup.
+`ScanForResumeLevel` walks `storeDirectory` looking for level sentinels via
+`GetFileAttributesA` -- against an unreachable network path, every one of those calls returns
+`INVALID_FILE_ATTRIBUTES`, indistinguishable from "this level was never written." With not even
+level 0's sentinel found, `InitSolver` concluded this was a genuine fresh run (`resumeLevel = 0`)
+and `cleanUpDrives` wiped the merge-writer/merge/store-merge working directories as it always
+does for a real fresh start -- including F:'s `mergeDir`, which held ~3.7TB of already-
+consolidated iMerge output for the in-progress level 24->25 merge that had crashed for lack of
+space on 2026-09-05 (see the 28TB-drive saga in project memory). That in-progress level's work
+has to be re-solved from scratch as a result.
+
+**The 24 real completed levels on Y: (0 through 24) were never touched** -- `cleanUpDrives`
+only ever wipes ephemeral working directories, never `storeDirectory` itself, confirmed via the
+original files' untouched, months-old timestamps after the incident. The loss is scoped to one
+in-progress level's GPU-solve/merge work, not the run's history.
+
+**Fix**: new `VerifyStoreDriveReachable()` in `InitSolver.cpp`, called immediately after
+`computeState()`, before any resume scan or cleanup runs. Confirms the store drive's ROOT
+(e.g. `Y:\`) is a real, accessible directory -- deliberately not `storeDirectory` itself, since
+a fresh run's store subfolder not existing yet is normal and must not trip this. An unreachable
+store drive now `Fatal()`s immediately (new `FATAL_STORE_DRIVE_UNREACHABLE`) with a clear
+message, instead of silently proceeding as if there were nothing to lose.
+
 ## [1.1.0] - 2026-09-08
 
 ### New tool: OthelloRingMasterCalculatorCountsStats
