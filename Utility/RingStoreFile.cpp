@@ -341,14 +341,16 @@ RSFWriter* RSFWriterOpenZLShaped(const char* path, RSFRecordShape shape)
 }
 
 /*
-** Function: RSFWriterOpenZMem
-** @brief    Opens a memory-backed writer producing delta+varint+LZ4
-**           compressed output directly into buf, instead of a file.
+** Function: RSFWriterOpenZMemImpl
+** @brief    Shared implementation for RSFWriterOpenZMem/RSFWriterOpenZMemShaped
+**           -- same relationship RSFWriterOpenZImpl has to RSFWriterOpenZ/
+**           RSFWriterOpenZL/RSFWriterOpenZLShaped, just memory-backed.
 ** @param    buf      - destination buffer for compressed output
-** @param    maxBytes - capacity of buf; RSFWriterRecord/Close fatal if exceeded
+** @param    maxBytes - capacity of buf; RSFWriterRecord(Shaped)/Close fatal if exceeded
+** @param    shape    - record layout this writer will accept (default RSF_SHAPE_PAIR64, matching every pre-existing caller)
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
+static RSFWriter* RSFWriterOpenZMemImpl(uint8_t* buf, size_t maxBytes, RSFRecordShape shape = RSF_SHAPE_PAIR64)
 {
     RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriterZMem", sizeof(RSFWriter));
     if (!pw) Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZMem: cannot allocate writer");
@@ -358,7 +360,8 @@ RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
     pw->memOut     = buf;
     pw->memOutMax  = maxBytes;
     strncpy(pw->path, "(memory)", sizeof(pw->path) - 1);
-    RSFShapeMeta(RSF_SHAPE_PAIR64, &pw->numFields, pw->fieldBytes, &pw->recordBytes);
+    pw->shape = shape;
+    RSFShapeMeta(shape, &pw->numFields, pw->fieldBytes, &pw->recordBytes);
 
     pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZMemVarBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
@@ -400,6 +403,33 @@ RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
     pw->compBytesTotal += headerSize;
 
     return pw;
+}
+
+/*
+** Function: RSFWriterOpenZMem
+** @brief    Opens a memory-backed writer producing delta+varint+LZ4
+**           compressed output directly into buf, instead of a file.
+** @param    buf      - destination buffer for compressed output
+** @param    maxBytes - capacity of buf; RSFWriterRecord/Close fatal if exceeded
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes)
+{
+    return RSFWriterOpenZMemImpl(buf, maxBytes);
+}
+
+/*
+** Function: RSFWriterOpenZMemShaped
+** @brief    Opens a memory-backed writer producing delta+varint+LZ4
+**           compressed output of shape-typed records directly into buf.
+** @param    buf      - destination buffer for compressed output
+** @param    maxBytes - capacity of buf; RSFWriterRecordShaped/Close fatal if exceeded
+** @param    shape    - the record layout this writer will accept
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZMemShaped(uint8_t* buf, size_t maxBytes, RSFRecordShape shape)
+{
+    return RSFWriterOpenZMemImpl(buf, maxBytes, shape);
 }
 
 /*

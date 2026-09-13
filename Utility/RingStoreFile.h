@@ -168,6 +168,19 @@ RSFWriter* RSFWriterOpenZL(const char* path);
 RSFWriter* RSFWriterOpenZMem(uint8_t* buf, size_t maxBytes);
 
 /*
+** Function: RSFWriterOpenZMemShaped
+** @brief    Opens a memory-backed writer producing delta+varint+LZ4
+**           compressed output of shape-typed records directly into buf,
+**           instead of a file. Same relationship to RSFWriterOpenZMem that
+**           RSFWriterOpenZLShaped has to RSFWriterOpenZL.
+** @param    buf      - destination buffer for compressed output
+** @param    maxBytes - capacity of buf; RSFWriterRecordShaped/Close fatal if exceeded
+** @param    shape    - the record layout this writer will accept
+** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
+*/
+RSFWriter* RSFWriterOpenZMemShaped(uint8_t* buf, size_t maxBytes, RSFRecordShape shape);
+
+/*
 ** Function: RSFWriterRecord
 ** @brief    Appends one record to a streaming writer.
 ** @param    pw  - the writer to append to

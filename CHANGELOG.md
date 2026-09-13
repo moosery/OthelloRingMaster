@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.2] - 2026-09-13
+
+### New disposable tool: Ring34SegmentSizeCheck, plus a small Utility addition it needed
+
+Measures the real compression-ratio cost of splitting an already-completed level's Ring_3_4
+file into independent segments at various candidate sizes -- the empirical groundwork for the
+segmented-ring-file lookup design (see project memory: physically segmented ring files, group-
+boundary-aligned, superseding the earlier seek-table idea). Reads a real Ring_3_4 file once and,
+for each candidate segment size, buffers records up to an estimated record-count target and
+independently re-compresses each chunk via the real delta+varint+LZ4 encoding, entirely in
+memory (no temp files, never competes with a live solve's own drive I/O). Reports real
+compressed segment sizes, resulting segment counts, and the compression-ratio cost versus the
+original single-stream file.
+
+Needed one small addition to `Utility/RingStoreFile.h`/`.cpp`: `RSFWriterOpenZMemShaped`, a
+memory-backed writer for shape-typed records (only the plain `UINT64_PAIR` shape had a
+memory-backed writer before -- `RSFWriterOpenZMem`). Same relationship to `RSFWriterOpenZMem`
+that `RSFWriterOpenZLShaped` already has to `RSFWriterOpenZL`; shares its implementation via a
+new `RSFWriterOpenZMemImpl` helper, mirroring the existing `RSFWriterOpenZImpl` pattern.
+
+Disposable, same convention as `Ring34PopcountBandCheck`/the earlier (deleted) `Ring34SplitCheck`
+-- may be removed once segment sizing is settled.
+
 ## [1.1.1] - 2026-09-13
 
 ### Fixed a real data-loss bug: an unreachable store drive was silently treated as an empty one
