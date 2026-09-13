@@ -294,7 +294,7 @@ int main(int argc, char* argv[])
         processed += (uint64_t)n;
         if (totalRecords > 0)
         {
-            int bucket = (int)(processed * 100 / totalRecords / 5);
+            int bucket = (int)(processed * 100 / totalRecords);   /* 1% granularity */
             /* Skip bucket 0 entirely -- on a file with billions of records,
             ** the very first read batch already rounds down to "0%" while
             ** representing an almost-zero real fraction of the file (e.g.
@@ -302,7 +302,7 @@ int main(int argc, char* argv[])
             ** from that tiny a sample amplifies any cold-start timing noise
             ** (first network read, file-open latency) by a factor in the
             ** millions -- a real, observed bug, not a hypothetical one.
-            ** Waiting for the first genuine 5% milestone gives ETA a real
+            ** Waiting for the first genuine 1% milestone gives ETA a real
             ** amount of elapsed, representative throughput to extrapolate from.
             */
             if (bucket > lastPercentBucket && bucket >= 1)
@@ -311,7 +311,7 @@ int main(int argc, char* argv[])
                 double pctDone   = (double)processed / (double)totalRecords * 100.0;
                 double elapsedS  = (double)(GetTickCount64() - startTickMs) / 1000.0;
                 double etaS      = (pctDone > 0.0) ? elapsedS * (100.0 - pctDone) / pctDone : 0.0;
-                printf("  %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n", bucket * 5,
+                printf("  %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n", bucket,
                        (unsigned long long)processed, (unsigned long long)totalRecords, elapsedS, etaS);
                 fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
             }

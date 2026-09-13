@@ -4,6 +4,13 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.7] - 2026-09-13
+
+### Ring34SegmentSizeCheck: progress now prints every 1%, not every 5%
+
+User request, for more reassuring live feedback on a long run. Bucket-0 skip logic (v1.1.6)
+carries over unchanged -- still needed at 1% granularity for the same reason.
+
 ## [1.1.6] - 2026-09-13
 
 ### Ring34SegmentSizeCheck: fixed a wildly wrong first-progress-line ETA
