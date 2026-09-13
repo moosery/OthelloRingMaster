@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.9] - 2026-09-13
+
+### Ring34SegmentSizeCheck: redesigned for one pass per candidate, memory bounded by target size
+
+User raised a real concern: raising the old record-count-based safety cap enough to test 1GB-4GB
+candidates could need up to ~25-28GB concurrently (all candidates accumulated in one shared pass)
+-- real risk of memory pressure against the live solver's own ~51GB budget on this 64GB machine.
+Also found while designing the fix: the old per-chunk output buffer sizing (`records * 5 bytes`)
+was itself a bigger cost than the raw record buffer at large record counts, an oversight in the
+original estimate.
+
+Redesigned: no more raw record buffer or record-count-derived output sizing at all. Records now
+stream directly into `RSFWriterRecordShaped` one at a time (closing and reopening the writer at
+each chunk boundary), and each candidate's real output buffer is sized directly from its own
+`--segment-sizes` target (1.5x margin + 1MB slop) -- bounded, predictable, and tied to what was
+actually asked for, not to how many records happen to fit in it. Combined with running one full
+source-file pass per DISTINCT candidate (not all candidates accumulated concurrently), peak
+memory for even a 4GB candidate is now ~6GB, not ~24-28GB -- safe to run alongside a live solve.
+Trade-off: re-reads/re-decompresses the source file once per distinct candidate size instead of
+once total, so this now costs more wall-clock time for more real memory safety. The existing
+dedup logic (candidates sharing the same estimated records/chunk) now skips a whole redundant
+pass, not just redundant compression, so it matters even more under this design.
+
 ## [1.1.8] - 2026-09-13
 
 ### Ring34SegmentSizeCheck: deduplicate candidates that collapse to the same chunk size

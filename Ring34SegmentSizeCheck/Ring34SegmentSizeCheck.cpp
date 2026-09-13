@@ -10,13 +10,26 @@
 **   the one thing that can't be predicted analytically, since it depends on
 **   how much cross-record compression benefit real board data actually has.
 **
-**   Reads a real, already-complete Ring_3_4 file ONCE (read-only, never
-**   touches the live store or its working drives) and, for each candidate
-**   segment size given, buffers records up to an estimated record-count
-**   target and independently re-compresses each buffered chunk via a real
-**   RSFWriterOpenZMemShaped writer -- the exact same delta+varint+LZ4
-**   encoding a real segment file would use -- entirely in memory. No temp
-**   files, so this never competes with a live solve's own drive I/O.
+**   Reads a real, already-complete Ring_3_4 file, once per DISTINCT candidate
+**   size (read-only, never touches the live store or its working drives),
+**   and streams records directly into a real RSFWriterOpenZMemShaped writer
+**   -- the exact same delta+varint+LZ4 encoding a real segment file would
+**   use -- closing and reopening it at each chunk boundary. No temp files,
+**   entirely in memory, so this never competes with a live solve's own
+**   drive I/O.
+**
+**   Deliberately one full pass PER distinct candidate size, not all
+**   candidates accumulated concurrently in a single pass: this bounds peak
+**   memory to roughly ONE candidate's own target size at a time (the output
+**   buffer is sized directly from --segment-sizes, not derived from a
+**   record-count estimate), instead of needing all candidates' buffers
+**   resident simultaneously. Chosen deliberately to stay safe running
+**   alongside a live solve that already budgets the bulk of this machine's
+**   RAM for itself -- trades some extra wall-clock time (re-reading the
+**   source file once per distinct candidate) for a much smaller, bounded
+**   memory footprint. Candidates that estimate to the same records/chunk as
+**   an earlier one still skip their own pass entirely and copy that
+**   candidate's results, since the outcome is guaranteed identical.
 **
 **   See project_othello_web_ui_design memory (2026-09-13 section) for the
 **   design this measures: segments named by starting record ordinal in hex,
@@ -40,16 +53,14 @@
 
 /* Constants */
 
-/* Hard safety cap on any one candidate's in-memory record buffer, regardless
-** of what the byte-target math suggests -- real Ring_3_4 compression ratios
-** vary enough (real per-level numbers swing 50%-78% reduction just across
-** levels 14-24) that trusting the estimate unconditionally could balloon
-** memory for a highly-compressible file. Records are 2 bytes each, so this
-** caps any one candidate's buffer at 1GB; several candidates run
-** concurrently in one pass, so total peak stays a low single-digit number
-** of GB -- trivial against this machine's real RAM.
+/* Defensive sanity cap on the estimated records/chunk, well beyond anything
+** a real --segment-sizes target should ever produce -- guards against a
+** degenerate bytes/record estimate (e.g. a corrupt/empty source) rather
+** than acting as the memory-safety mechanism it used to be. Peak memory is
+** now bounded by each candidate's own targetBytes (the output buffer),
+** not by record count, so this can afford to be generous.
 */
-static constexpr uint64_t MAX_RECORDS_PER_CHUNK = 500000000ULL;
+static constexpr uint64_t MAX_RECORDS_PER_CHUNK = 50000000000ULL;
 
 /* Structures and Types */
 
@@ -61,21 +72,21 @@ struct SegmentSizeCandidate
 {
     char     label[16] = {};        /* as given on the command line, e.g. "2GB" */
     uint64_t targetBytes = 0;       /* parsed byte target                       */
-    uint64_t recordsPerChunk = 0;   /* estimated records to hit targetBytes, capped for safety */
+    uint64_t recordsPerChunk = 0;   /* estimated records to hit targetBytes     */
 
     /* Index into the candidates vector of the earlier candidate that shares
-    ** this exact recordsPerChunk value, or -1 if this candidate is its own
-    ** representative. Two candidates with the same recordsPerChunk would
-    ** hit the identical chunk boundaries against the identical data and
-    ** produce byte-for-byte identical results -- real, observed waste on a
-    ** billion-record file (three candidates all capping to the same 500M
-    ** records/segment tripled the CPU-bound recompression cost for zero new
-    ** information). Only the representative does real accumulation/
-    ** compression; the rest just copy its results once processing is done.
+    ** this exact recordsPerChunk value, or -1 if this candidate needs its
+    ** own real pass. Two candidates with the same recordsPerChunk would hit
+    ** identical chunk boundaries against identical data and produce
+    ** byte-for-byte identical results -- real, observed waste on a
+    ** billion-record file (three candidates all landing on the same
+    ** estimate tripled the CPU-bound recompression cost, and under this
+    ** one-pass-per-candidate design would triple a full source re-read too).
+    ** Only the representative gets a real pass; the rest just copy its
+    ** results once processing is done.
     */
     int representativeIndex = -1;
 
-    std::vector<Ring34Rec> buffer;
     uint64_t segmentCount         = 0;
     uint64_t totalCompressedBytes = 0;
     uint64_t minCompressedBytes   = UINT64_MAX;
@@ -120,44 +131,6 @@ static void FormatBytes(uint64_t bytes, char* out, size_t outSize)
 }
 
 /*
-** Function: CompressChunk
-** @brief    Compresses candidate's buffered records as one independent
-**           segment (the exact real encoding a real segment file would
-**           use), entirely in memory, and folds the result into
-**           candidate's running totals. Clears the buffer afterward
-**           (capacity is retained by std::vector::clear, so the next
-**           chunk's fill reuses the same already-reserved memory).
-** @param    candidate - the candidate whose buffer to compress and clear
-*/
-static void CompressChunk(SegmentSizeCandidate* candidate)
-{
-    if (candidate->buffer.empty()) return;
-
-    /* Worst case ~3 bytes/record post-varint (a 16-bit zigzag delta never
-    ** needs more than that), generously padded for LZ4's own small bounded
-    ** worst-case expansion -- comfortably oversized, never tight; if this
-    ** estimate is ever wrong, RSFWriterRecordShaped/Close Fatal cleanly
-    ** rather than overrun anything.
-    */
-    size_t capacity = candidate->buffer.size() * 5 + 65536;
-    std::vector<uint8_t> outBuf(capacity);
-
-    RSFWriter* pw = RSFWriterOpenZMemShaped(outBuf.data(), capacity, RSF_SHAPE_LEAF16);
-    for (const Ring34Rec& rec : candidate->buffer)
-        RSFWriterRecordShaped(pw, &rec);
-
-    uint64_t compressedBytes = 0;
-    RSFWriterClose(pw, &compressedBytes);
-
-    candidate->segmentCount++;
-    candidate->totalCompressedBytes += compressedBytes;
-    if (compressedBytes < candidate->minCompressedBytes) candidate->minCompressedBytes = compressedBytes;
-    if (compressedBytes > candidate->maxCompressedBytes) candidate->maxCompressedBytes = compressedBytes;
-
-    candidate->buffer.clear();
-}
-
-/*
 ** Function: PrintUsage
 ** @brief    Prints command-line usage help.
 */
@@ -171,9 +144,10 @@ static void PrintUsage(const char* prog)
     printf("  --store-dir P        Sub-path on store drive (no drive letter)                [default: \\OthelloRingMaster\\Store]\n");
     printf("  --segment-sizes LIST Comma-separated candidate sizes (e.g. 500MB,1GB,2GB,4GB) [default: 500MB,1GB,2GB,4GB]\n");
     printf("  --help               Show this help\n\n");
-    printf("Read-only against the source store. Every candidate chunk is compressed\n");
-    printf("entirely in memory -- never writes anywhere near the live store or its\n");
-    printf("working drives, so this is safe to run alongside a live solve.\n\n");
+    printf("Read-only against the source store. One full pass per distinct candidate size,\n");
+    printf("each compressed entirely in memory -- never writes anywhere near the live store\n");
+    printf("or its working drives, and peak memory stays bounded to roughly one candidate's\n");
+    printf("own target size at a time, safe to run alongside a live solve.\n\n");
 }
 
 int main(int argc, char* argv[])
@@ -240,22 +214,30 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    RSFReader* pReader = RSFOpenShaped(srcPath, RSF_SHAPE_LEAF16);
-    if (!pReader)
+    /* One quick open just to read the trailer (real record count, real
+    ** on-disk compressed size) -- closed immediately; each candidate's own
+    ** pass below opens its own fresh reader from the start of the file.
+    */
+    uint64_t totalRecords;
+    uint64_t origOnDiskBytes;
     {
-        printf("ERROR: could not open '%s' (corrupt or truncated)\n", srcPath);
-        return 1;
-    }
+        RSFReader* pProbe = RSFOpenShaped(srcPath, RSF_SHAPE_LEAF16);
+        if (!pProbe)
+        {
+            printf("ERROR: could not open '%s' (corrupt or truncated)\n", srcPath);
+            return 1;
+        }
+        totalRecords = RSFReaderTrailer(pProbe)->recordCount;
+        RSFClose(&pProbe);
 
-    uint64_t totalRecords = RSFReaderTrailer(pReader)->recordCount;
-    WIN32_FILE_ATTRIBUTE_DATA fad = {};
-    GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad);
-    uint64_t origOnDiskBytes = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad);
+        origOnDiskBytes = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+    }
 
     if (totalRecords == 0)
     {
         printf("ERROR: source file has zero records, nothing to measure\n");
-        RSFClose(&pReader);
         return 1;
     }
 
@@ -285,81 +267,131 @@ int main(int argc, char* argv[])
         char sizeStr[32];
         FormatBytes(c.targetBytes, sizeStr, sizeof(sizeStr));
         if (c.representativeIndex >= 0)
-        {
-            printf("Candidate %-8s target=%-10s -> estimated %llu records/segment  (identical to %s -- not recomputed)\n",
+            printf("Candidate %-8s target=%-10s -> estimated %llu records/segment  (identical to %s -- no separate pass)\n",
                    c.label, sizeStr, (unsigned long long)c.recordsPerChunk, candidates[c.representativeIndex].label);
-        }
         else
-        {
-            c.buffer.reserve((size_t)c.recordsPerChunk);
             printf("Candidate %-8s target=%-10s -> estimated %llu records/segment%s\n",
                    c.label, sizeStr, (unsigned long long)c.recordsPerChunk,
-                   capped ? "  (capped for memory safety)" : "");
-        }
+                   capped ? "  (sanity-capped, unexpectedly high estimate)" : "");
     }
     printf("\n");
     fflush(stdout);   /* force the banner out now -- stdout is fully buffered, not line-buffered,
                        ** when redirected to a file, so without this nothing appears until either
                        ** the buffer fills or the process exits, even though real work is happening */
 
+    int distinctCount = 0;
+    for (const SegmentSizeCandidate& c : candidates)
+        if (c.representativeIndex < 0) distinctCount++;
+
     const int BATCH = 65536;
     std::vector<Ring34Rec> batch(BATCH);
-    int n;
-    uint64_t processed = 0;
-    int lastPercentBucket = -1;
-    uint64_t startTickMs = GetTickCount64();
+    int passNum = 0;
 
-    while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
+    for (SegmentSizeCandidate& c : candidates)
     {
-        for (int i = 0; i < n; i++)
+        if (c.representativeIndex >= 0) continue;   /* shares an earlier candidate's exact chunk size -- copied at the end, no pass needed */
+        passNum++;
+
+        /* Output buffer sized directly from this candidate's own target
+        ** bytes (a 50% margin plus fixed slop for LZ4/varint overhead),
+        ** NOT derived from record count -- this is the whole point of the
+        ** redesign: peak memory for this pass is bounded by what the user
+        ** actually asked for on the command line, regardless of how many
+        ** billions of records happen to fit in it. If real compression
+        ** ever does worse than the margin allows, RSFWriterRecordShaped/
+        ** Close Fatal cleanly rather than overrun anything.
+        */
+        size_t outBufCapacity = (size_t)(c.targetBytes * 3 / 2) + (1 << 20);
+        std::vector<uint8_t> outBuf(outBufCapacity);
+
+        printf("Pass %d/%d: candidate %s (output buffer %.2fGB)\n", passNum, distinctCount, c.label,
+               (double)outBufCapacity / (1024.0 * 1024.0 * 1024.0));
+        fflush(stdout);
+
+        RSFReader* pReader = RSFOpenShaped(srcPath, RSF_SHAPE_LEAF16);
+        if (!pReader)
         {
-            for (SegmentSizeCandidate& c : candidates)
-            {
-                if (c.representativeIndex >= 0) continue;   /* shares another candidate's exact chunk size -- its results get copied once processing finishes */
-                c.buffer.push_back(batch[i]);
-                if (c.buffer.size() >= c.recordsPerChunk)
-                    CompressChunk(&c);
-            }
+            printf("ERROR: could not open '%s' for pass %d (corrupt or truncated)\n", srcPath, passNum);
+            return 1;
         }
 
-        processed += (uint64_t)n;
-        if (totalRecords > 0)
+        RSFWriter* pw = RSFWriterOpenZMemShaped(outBuf.data(), outBufCapacity, RSF_SHAPE_LEAF16);
+        uint64_t recordsInChunk = 0;
+        uint64_t processed      = 0;
+        int      lastPercentBucket = -1;
+        uint64_t startTickMs    = GetTickCount64();
+        int      n;
+
+        while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
         {
-            int bucket = (int)(processed * 100 / totalRecords);   /* 1% granularity */
-            /* Skip bucket 0 entirely -- on a file with billions of records,
-            ** the very first read batch already rounds down to "0%" while
-            ** representing an almost-zero real fraction of the file (e.g.
-            ** 65536 out of 641 billion records, ~0.00001%). Computing an ETA
-            ** from that tiny a sample amplifies any cold-start timing noise
-            ** (first network read, file-open latency) by a factor in the
-            ** millions -- a real, observed bug, not a hypothetical one.
-            ** Waiting for the first genuine 1% milestone gives ETA a real
-            ** amount of elapsed, representative throughput to extrapolate from.
-            */
-            if (bucket > lastPercentBucket && bucket >= 1)
+            for (int i = 0; i < n; i++)
             {
-                lastPercentBucket = bucket;
-                double pctDone   = (double)processed / (double)totalRecords * 100.0;
-                double elapsedS  = (double)(GetTickCount64() - startTickMs) / 1000.0;
-                double etaS      = (pctDone > 0.0) ? elapsedS * (100.0 - pctDone) / pctDone : 0.0;
-                printf("  %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n", bucket,
-                       (unsigned long long)processed, (unsigned long long)totalRecords, elapsedS, etaS);
-                fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
+                RSFWriterRecordShaped(pw, &batch[i]);
+                recordsInChunk++;
+
+                if (recordsInChunk >= c.recordsPerChunk)
+                {
+                    uint64_t compressedBytes = 0;
+                    RSFWriterClose(pw, &compressedBytes);
+
+                    c.segmentCount++;
+                    c.totalCompressedBytes += compressedBytes;
+                    if (compressedBytes < c.minCompressedBytes) c.minCompressedBytes = compressedBytes;
+                    if (compressedBytes > c.maxCompressedBytes) c.maxCompressedBytes = compressedBytes;
+
+                    recordsInChunk = 0;
+                    pw = RSFWriterOpenZMemShaped(outBuf.data(), outBufCapacity, RSF_SHAPE_LEAF16);
+                }
             }
+
+            processed += (uint64_t)n;
+            if (totalRecords > 0)
+            {
+                int bucket = (int)(processed * 100 / totalRecords);   /* 1% granularity */
+                /* Skip bucket 0 entirely -- on a file with billions of
+                ** records, the very first read batch already rounds down to
+                ** "0%" while representing an almost-zero real fraction of
+                ** the file. Computing an ETA from that tiny a sample
+                ** amplifies any cold-start timing noise (first network
+                ** read, file-open latency) by a factor in the millions --
+                ** a real, observed bug, not a hypothetical one. Waiting for
+                ** the first genuine 1% milestone gives ETA a real amount of
+                ** elapsed, representative throughput to extrapolate from.
+                */
+                if (bucket > lastPercentBucket && bucket >= 1)
+                {
+                    lastPercentBucket = bucket;
+                    double pctDone  = (double)processed / (double)totalRecords * 100.0;
+                    double elapsedS = (double)(GetTickCount64() - startTickMs) / 1000.0;
+                    double etaS     = (pctDone > 0.0) ? elapsedS * (100.0 - pctDone) / pctDone : 0.0;
+                    printf("  [pass %d/%d] %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n",
+                           passNum, distinctCount, bucket,
+                           (unsigned long long)processed, (unsigned long long)totalRecords, elapsedS, etaS);
+                    fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
+                }
+            }
+        }
+        RSFClose(&pReader);
+
+        /* Flush this candidate's final, possibly-partial chunk. */
+        if (recordsInChunk > 0)
+        {
+            uint64_t compressedBytes = 0;
+            RSFWriterClose(pw, &compressedBytes);
+            c.segmentCount++;
+            c.totalCompressedBytes += compressedBytes;
+            if (compressedBytes < c.minCompressedBytes) c.minCompressedBytes = compressedBytes;
+            if (compressedBytes > c.maxCompressedBytes) c.maxCompressedBytes = compressedBytes;
+        }
+        else
+        {
+            RSFWriterClose(pw, nullptr);   /* empty trailing chunk -- discard, nothing to tally */
         }
     }
-    RSFClose(&pReader);
-
-    /* Flush each representative's final, possibly-partial chunk (a no-op for
-    ** non-representatives -- their buffer was never filled, see the skip
-    ** above).
-    */
-    for (SegmentSizeCandidate& c : candidates)
-        CompressChunk(&c);
 
     /* Copy results into every candidate that shared a representative's exact
     ** recordsPerChunk -- same underlying data, same chunk boundaries, so the
-    ** results are guaranteed identical without needing to recompute them.
+    ** results are guaranteed identical without needing a separate pass.
     */
     for (SegmentSizeCandidate& c : candidates)
     {
