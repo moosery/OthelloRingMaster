@@ -127,4 +127,4 @@ void ErrorPrint(FILE* fpOut);
 ** @param    pszReasonFmt - printf-style format string describing the fatal condition
 ** @param    ...         - format arguments for pszReasonFmt
 */
-[[noreturn]] void Fatal(RC rc, const char* pszReasonFmt, ...);
+__declspec(noreturn) void Fatal(RC rc, const char* pszReasonFmt, ...);

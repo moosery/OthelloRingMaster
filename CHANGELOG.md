@@ -4,6 +4,16 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.5] - 2026-09-13
+
+### Fatal(): switched [[noreturn]] to __declspec(noreturn) -- the standard attribute didn't satisfy MSVC's analyzer
+
+User confirmed via a real Rebuild (not stale IntelliSense) that v1.1.4's `[[noreturn]]`
+attribute didn't actually clear the false-positive warnings it was meant to fix. Switched to
+MSVC's own `__declspec(noreturn)` instead, which its static analyzer has historically respected
+more reliably than the standard C++11 attribute. No portability concern -- this codebase is
+MSVC-only throughout already.
+
 ## [1.1.4] - 2026-09-13
 
 ### Marked Fatal() as [[noreturn]] -- fixes a whole class of false-positive static-analysis warnings
