@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.6] - 2026-09-13
+
+### Ring34SegmentSizeCheck: fixed a wildly wrong first-progress-line ETA
+
+Real bug, caught live on a real level-20 run: the first progress line reported `eta=156629s`
+(~43.5 hours) after only 0% shown, against real numbers implying ~40-55 minutes total
+(416.27GB at Y:'s real ~127-160MB/s). Root cause: the very first read batch (65536 records out
+of a 641.5-billion-record file, ~0.00001%) already rounds down to display as "0%," and
+computing an ETA by extrapolating from that near-zero a fraction amplifies any cold-start
+timing noise (first network read, file-open latency) by a factor in the millions. Fixed by
+skipping bucket 0 entirely -- progress (and its ETA) now first prints at the first genuine 5%
+milestone, which has enough real, representative elapsed throughput behind it to extrapolate
+from meaningfully.
+
 ## [1.1.5] - 2026-09-13
 
 ### Fatal(): switched [[noreturn]] to __declspec(noreturn) -- the standard attribute didn't satisfy MSVC's analyzer

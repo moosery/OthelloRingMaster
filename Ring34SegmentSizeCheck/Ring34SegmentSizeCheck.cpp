@@ -295,7 +295,17 @@ int main(int argc, char* argv[])
         if (totalRecords > 0)
         {
             int bucket = (int)(processed * 100 / totalRecords / 5);
-            if (bucket > lastPercentBucket)
+            /* Skip bucket 0 entirely -- on a file with billions of records,
+            ** the very first read batch already rounds down to "0%" while
+            ** representing an almost-zero real fraction of the file (e.g.
+            ** 65536 out of 641 billion records, ~0.00001%). Computing an ETA
+            ** from that tiny a sample amplifies any cold-start timing noise
+            ** (first network read, file-open latency) by a factor in the
+            ** millions -- a real, observed bug, not a hypothetical one.
+            ** Waiting for the first genuine 5% milestone gives ETA a real
+            ** amount of elapsed, representative throughput to extrapolate from.
+            */
+            if (bucket > lastPercentBucket && bucket >= 1)
             {
                 lastPercentBucket = bucket;
                 double pctDone   = (double)processed / (double)totalRecords * 100.0;
