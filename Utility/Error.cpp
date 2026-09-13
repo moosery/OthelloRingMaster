@@ -87,7 +87,7 @@ void ErrorPrint(FILE* fpOut)
 **           gives no way to correlate the failure against other logs
 **           (Windows Event Viewer, network drop times, etc.) after the fact.
 */
-void Fatal(RC rc, const char* pszReasonFmt, ...)
+[[noreturn]] void Fatal(RC rc, const char* pszReasonFmt, ...)
 {
     SYSTEMTIME st = {};
     GetLocalTime(&st);

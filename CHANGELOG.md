@@ -4,6 +4,23 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.4] - 2026-09-13
+
+### Marked Fatal() as [[noreturn]] -- fixes a whole class of false-positive static-analysis warnings
+
+Found while investigating two real analyzer warnings surfaced during a `Ring34SegmentSizeCheck`
+build (`LevelSolverThread.cpp`'s `FlushAccumulator`: "dereferencing NULL pointer 'pDesc'" and
+"'pDesc->hDoneEvent' could be '0'"). Confirmed both are false positives, not real bugs: every
+path through `Fatal()` unconditionally ends in `exit()` (checked directly in `Error.cpp` --
+no path returns), so `if (!pDesc) Fatal(...); pDesc->...` can never actually reach the
+dereference with a null `pDesc`. The doc comment already said "Never returns," but the
+declaration itself had no `[[noreturn]]` attribute, so the analyzer had no way to know that.
+Added `[[noreturn]]` to `Fatal`'s declaration (`Utility/Error.h`) and definition
+(`Utility/Error.cpp`) -- a pure annotation, no behavior change, since `Fatal` already never
+returned in practice. `if (!x) Fatal(...); x->...` is an extremely common pattern throughout
+this codebase, so this should clear out many more of the same false positive elsewhere too,
+not just these two spots.
+
 ## [1.1.3] - 2026-09-13
 
 ### Ring34SegmentSizeCheck: forced output flushes so progress is actually visible live
