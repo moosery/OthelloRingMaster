@@ -4,6 +4,17 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.3] - 2026-09-13
+
+### Ring34SegmentSizeCheck: forced output flushes so progress is actually visible live
+
+Redirected stdout is fully buffered (not line-buffered) on this platform, so without an
+explicit flush, nothing appeared until the process exited even while real work was happening --
+looked indistinguishable from a hang on a real run. Added `fflush(stdout)` right after the
+startup banner and after each 5% progress line, and the progress line now also reports elapsed
+time and a simple linear ETA, so a long run's live output actually shows it's working and about
+how much longer it'll take.
+
 ## [1.1.2] - 2026-09-13
 
 ### New disposable tool: Ring34SegmentSizeCheck, plus a small Utility addition it needed

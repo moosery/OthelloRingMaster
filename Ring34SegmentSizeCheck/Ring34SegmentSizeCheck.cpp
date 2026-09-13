@@ -268,12 +268,16 @@ int main(int argc, char* argv[])
                capped ? "  (capped for memory safety)" : "");
     }
     printf("\n");
+    fflush(stdout);   /* force the banner out now -- stdout is fully buffered, not line-buffered,
+                       ** when redirected to a file, so without this nothing appears until either
+                       ** the buffer fills or the process exits, even though real work is happening */
 
     const int BATCH = 65536;
     std::vector<Ring34Rec> batch(BATCH);
     int n;
     uint64_t processed = 0;
     int lastPercentBucket = -1;
+    uint64_t startTickMs = GetTickCount64();
 
     while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
     {
@@ -294,8 +298,12 @@ int main(int argc, char* argv[])
             if (bucket > lastPercentBucket)
             {
                 lastPercentBucket = bucket;
-                printf("  %d%% (%llu / %llu records)\n", bucket * 5,
-                       (unsigned long long)processed, (unsigned long long)totalRecords);
+                double pctDone   = (double)processed / (double)totalRecords * 100.0;
+                double elapsedS  = (double)(GetTickCount64() - startTickMs) / 1000.0;
+                double etaS      = (pctDone > 0.0) ? elapsedS * (100.0 - pctDone) / pctDone : 0.0;
+                printf("  %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n", bucket * 5,
+                       (unsigned long long)processed, (unsigned long long)totalRecords, elapsedS, etaS);
+                fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
             }
         }
     }
