@@ -63,6 +63,18 @@ struct SegmentSizeCandidate
     uint64_t targetBytes = 0;       /* parsed byte target                       */
     uint64_t recordsPerChunk = 0;   /* estimated records to hit targetBytes, capped for safety */
 
+    /* Index into the candidates vector of the earlier candidate that shares
+    ** this exact recordsPerChunk value, or -1 if this candidate is its own
+    ** representative. Two candidates with the same recordsPerChunk would
+    ** hit the identical chunk boundaries against the identical data and
+    ** produce byte-for-byte identical results -- real, observed waste on a
+    ** billion-record file (three candidates all capping to the same 500M
+    ** records/segment tripled the CPU-bound recompression cost for zero new
+    ** information). Only the representative does real accumulation/
+    ** compression; the rest just copy its results once processing is done.
+    */
+    int representativeIndex = -1;
+
     std::vector<Ring34Rec> buffer;
     uint64_t segmentCount         = 0;
     uint64_t totalCompressedBytes = 0;
@@ -253,19 +265,37 @@ int main(int argc, char* argv[])
     printf("Real records: %llu, real on-disk compressed bytes: %llu (%.6f bytes/record average)\n\n",
            (unsigned long long)totalRecords, (unsigned long long)origOnDiskBytes, bytesPerRecord);
 
-    for (SegmentSizeCandidate& c : candidates)
+    for (size_t idx = 0; idx < candidates.size(); idx++)
     {
+        SegmentSizeCandidate& c = candidates[idx];
         uint64_t estimate = (uint64_t)((double)c.targetBytes / bytesPerRecord);
         if (estimate < 1) estimate = 1;
         bool capped = estimate > MAX_RECORDS_PER_CHUNK;
         c.recordsPerChunk = capped ? MAX_RECORDS_PER_CHUNK : estimate;
-        c.buffer.reserve((size_t)c.recordsPerChunk);
+
+        for (size_t prior = 0; prior < idx; prior++)
+        {
+            if (candidates[prior].recordsPerChunk == c.recordsPerChunk)
+            {
+                c.representativeIndex = (int)prior;
+                break;
+            }
+        }
 
         char sizeStr[32];
         FormatBytes(c.targetBytes, sizeStr, sizeof(sizeStr));
-        printf("Candidate %-8s target=%-10s -> estimated %llu records/segment%s\n",
-               c.label, sizeStr, (unsigned long long)c.recordsPerChunk,
-               capped ? "  (capped for memory safety)" : "");
+        if (c.representativeIndex >= 0)
+        {
+            printf("Candidate %-8s target=%-10s -> estimated %llu records/segment  (identical to %s -- not recomputed)\n",
+                   c.label, sizeStr, (unsigned long long)c.recordsPerChunk, candidates[c.representativeIndex].label);
+        }
+        else
+        {
+            c.buffer.reserve((size_t)c.recordsPerChunk);
+            printf("Candidate %-8s target=%-10s -> estimated %llu records/segment%s\n",
+                   c.label, sizeStr, (unsigned long long)c.recordsPerChunk,
+                   capped ? "  (capped for memory safety)" : "");
+        }
     }
     printf("\n");
     fflush(stdout);   /* force the banner out now -- stdout is fully buffered, not line-buffered,
@@ -285,6 +315,7 @@ int main(int argc, char* argv[])
         {
             for (SegmentSizeCandidate& c : candidates)
             {
+                if (c.representativeIndex >= 0) continue;   /* shares another candidate's exact chunk size -- its results get copied once processing finishes */
                 c.buffer.push_back(batch[i]);
                 if (c.buffer.size() >= c.recordsPerChunk)
                     CompressChunk(&c);
@@ -319,9 +350,26 @@ int main(int argc, char* argv[])
     }
     RSFClose(&pReader);
 
-    /* Flush each candidate's final, possibly-partial chunk. */
+    /* Flush each representative's final, possibly-partial chunk (a no-op for
+    ** non-representatives -- their buffer was never filled, see the skip
+    ** above).
+    */
     for (SegmentSizeCandidate& c : candidates)
         CompressChunk(&c);
+
+    /* Copy results into every candidate that shared a representative's exact
+    ** recordsPerChunk -- same underlying data, same chunk boundaries, so the
+    ** results are guaranteed identical without needing to recompute them.
+    */
+    for (SegmentSizeCandidate& c : candidates)
+    {
+        if (c.representativeIndex < 0) continue;
+        const SegmentSizeCandidate& rep = candidates[c.representativeIndex];
+        c.segmentCount         = rep.segmentCount;
+        c.totalCompressedBytes = rep.totalCompressedBytes;
+        c.minCompressedBytes   = rep.minCompressedBytes;
+        c.maxCompressedBytes   = rep.maxCompressedBytes;
+    }
 
     printf("\nResults (source: %llu records, %llu bytes original single-stream compressed):\n\n",
            (unsigned long long)totalRecords, (unsigned long long)origOnDiskBytes);

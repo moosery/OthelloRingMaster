@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.1.8] - 2026-09-13
+
+### Ring34SegmentSizeCheck: deduplicate candidates that collapse to the same chunk size
+
+Caught live on a real level-20 run: 1GB/2GB/4GB all hit the same 500M-record memory-safety cap
+for that file's real bytes/record ratio, meaning three candidates were independently
+recompressing the exact same chunks of data -- tripling the CPU-bound recompression cost (the
+actual bottleneck, not disk I/O, confirmed by the real-vs-expected timing mismatch this exposed)
+for zero new information, since candidates sharing a `recordsPerChunk` are guaranteed to produce
+identical results against the same source data. Candidates now track a `representativeIndex`:
+only the first candidate at a given `recordsPerChunk` does real accumulation/compression, and
+every other candidate sharing that value copies its results once processing finishes, instead of
+redoing the same work.
+
 ## [1.1.7] - 2026-09-13
 
 ### Ring34SegmentSizeCheck: progress now prints every 1%, not every 5%
