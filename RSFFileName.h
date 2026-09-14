@@ -187,6 +187,37 @@ static inline void RSFNameRing34File(char* out, size_t outSize,
 }
 
 /*
+** Function: RSFNameRing34SegmentFile
+** @brief    Builds one segment's file path for the segmented Ring_3_4 index
+**           (see OthelloRingMasterRing34Indexer) -- named by its own
+**           starting global record ordinal in hex, fixed-width (16 hex
+**           digits) so a plain directory listing sorts lexicographically
+**           the same as ordinal order, with no separate index file needed.
+**           A segment's end is implied by the next segment's own starting
+**           ordinal (or the level's total record count for the last one),
+**           the same "no count field, implied by the next entry"
+**           convention CellsInUseRec/RingLevelRec already use.
+** @param    out          - buffer to receive the built path
+** @param    outSize      - size of out
+** @param    dir          - segment directory (a dedicated area, separate
+**                          from storeDir, so the indexer's own read/write
+**                          activity never collides with a live solver)
+** @param    boardSize    - board size (e.g. 6 for 6x6)
+** @param    level        - level number
+** @param    player       - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    startOrdinal - this segment's own starting global record ordinal
+**                          (0-based, into the source Ring_3_4 file's full record stream)
+*/
+static inline void RSFNameRing34SegmentFile(char* out, size_t outSize,
+                                             const char* dir, int boardSize,
+                                             int level, int player, uint64_t startOrdinal)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_0000.ring34.seg%016llx.rsfzl",
+             dir, level, boardSize, boardSize, RSFPlayerStr(player),
+             (unsigned long long)startOrdinal);
+}
+
+/*
 ** ============================================================
 ** Writer files (NVMe MW buffers)
 ** ============================================================

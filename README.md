@@ -197,6 +197,7 @@ Outputs:
 - `x64/Release/OthelloRingMasterCalculatorStatus.exe` -- calculator's live status client (TCP)
 - `x64/Release/OthelloRingMasterStoreStats.exe` -- per-level CSV store statistics (read-only)
 - `x64/Release/OthelloRingMasterCalculatorCountsStats.exe` -- per-level CSV calculator counts statistics (read-only)
+- `x64/Release/OthelloRingMasterRing34Indexer.exe` -- splits a level's Ring_3_4 file into independently-decodable segments (levels 14+ only)
 
 ## Usage
 
@@ -420,6 +421,43 @@ decompressing each color's LZ4 stream to end-of-stream (never derived from recor
 math). Safe to run against a counts directory while the calculator is actively writing to it --
 only levels with a completed sentinel are read.
 
+### Ring_3_4 indexer
+
+```
+OthelloRingMasterRing34Indexer.exe --level N [options]
+
+  --level N           Level to index (must be >= 14 -- see below)
+  --color C           black or white                                          [default: black]
+  --board-size N      Board size: 4, 6, or 8                                   [default: 6]
+  --store-drive L     Drive letter the source store lives on                   [default: Y]
+  --store-dir P       Sub-path on store drive (no drive letter)                [default: \OthelloRingMaster\Store]
+  --segment-drive L   Drive letter for segment output                         [default: Y]
+  --segment-dir P     Sub-path on segment drive (no drive letter)              [default: \OthelloRingMaster\Store\segmentDir]
+  --target-size SIZE  Nominal segment size trigger (e.g. 500MB)                [default: 500MB]
+  --help              Show this help
+```
+
+Splits an already-completed level's Ring_3_4 file into independent, individually-decodable
+segments -- the real building block for fast random lookups against the store without
+decompressing a whole level. Each segment is named by its own starting record ordinal in hex,
+so a plain directory listing already sorts in ordinal order; no separate index file exists or
+is needed. Segment boundaries are aligned to Ring_2's own group boundaries (found via one cheap
+real pass over Ring_2, not guessed), so a segment never splits one group's children across two
+files. The `--target-size` is a trigger, not a hard cut point -- once crossed, the actual cut
+waits for the next real group boundary.
+
+Only levels 14+ benefit: levels 0-13's whole Ring_3_4 file already decodes in well under 5
+seconds as a single unit at this store's real drive speeds, so the tool refuses to run below
+level 14 rather than doing pointless work. The default 500MB target was chosen from real
+measurements (`Ring34SegmentSizeCheck`) showing ~3.8-3.9s decode time per segment with ~0.00%
+compression-ratio cost, confirmed on real levels 16 and 20.
+
+Read-only against the source store; writes only to `--segment-dir`, which defaults to a
+dedicated area kept separate from `storeDir`/`storeMergeDir`/`writerDir` specifically so this
+never collides with a live solver's own I/O. Verifies its own output before reporting success --
+Fatals if the segments' combined record count doesn't exactly match the source file's real
+record count.
+
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
 Press **Ctrl+C** on the solver for a graceful shutdown -- merge loops check the terminate
@@ -557,6 +595,7 @@ OthelloRingMaster/
   OthelloRingMasterCalculatorStatus/  Calculator's status client project
   OthelloRingMasterStoreStats/   Per-level CSV store statistics tool (read-only, see its own --help)
   OthelloRingMasterCalculatorCountsStats/  Per-level CSV calculator counts statistics tool (read-only, see its own --help)
+  OthelloRingMasterRing34Indexer/  Splits a level's Ring_3_4 file into segments (levels 14+, see its own --help)
 ```
 
 ## Related

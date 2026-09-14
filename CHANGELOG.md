@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.0] - 2026-09-14
+
+### New tool: OthelloRingMasterRing34Indexer -- real segment builder for Ring_3_4
+
+The real (not disposable) indexer this project's whole segment-size experimentation thread was
+building toward. Splits an already-completed level's Ring_3_4 file into independently-decodable
+segments, named by each segment's own starting global record ordinal in hex
+(`RSFNameRing34SegmentFile`, new in `RSFFileName.h`) -- a plain directory listing already sorts
+the same as ordinal order, so no separate index file is needed.
+
+Built on the real, validated numbers from `Ring34SegmentSizeCheck`'s experimentation (see
+project memory): ~500MB segments land at ~3.8-3.9s decode time (comfortably under the ~5s
+lookup budget) with ~0.00% compression-ratio cost, confirmed on real levels 16 and 20. Only
+levels 14+ get indexed -- levels 0-13's whole Ring_3_4 file already decodes under the ~5s
+target as a single unit, so segmenting them would be pure overhead for no benefit; the tool
+refuses to run below level 14 rather than silently doing pointless work.
+
+Segment boundaries are aligned to Ring_2's own group boundaries, never splitting one group's
+Ring_3_4 children across two segments -- this is what lets a later lookup resolve to either one
+whole segment or several complete ones, never a partial straddle. Finding those boundaries is
+cheap and exact, not a guess: Ring_2's own `.offset` field already IS each group's Ring_3_4
+starting ordinal (confirmed via `RingNestedIndexReader::FindBoardPosition`'s own use of that
+field), so one sequential pass over Ring_2 (much smaller than Ring_3_4) gives the real boundary
+list directly. The ~500MB target is a trigger, not a hard cut point: once crossed, the actual
+cut waits for the next real group boundary.
+
+Reads from the live store's `storeDir` (read-only) and writes segments to a dedicated
+`--segment-dir` (`Y:\OthelloRingMaster\Store\segmentDir` by default), kept entirely separate
+from `storeDir`/`storeMergeDir`/`writerDir` so this never collides with a live solver's own
+active I/O. Verifies its own output before reporting success: Fatals if the total records
+written across all segments doesn't exactly match the source file's real record count.
+
 ## [1.1.9] - 2026-09-13
 
 ### Ring34SegmentSizeCheck: redesigned for one pass per candidate, memory bounded by target size
