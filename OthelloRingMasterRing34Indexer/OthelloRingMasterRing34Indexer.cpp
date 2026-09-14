@@ -136,35 +136,79 @@ static void PurgeExistingSegments(const char* levelSegmentDir)
 }
 
 /*
-** Function: LoadRing2GroupBoundaries
-** @brief    Reads a level's Ring_2 file sequentially and collects the
-**           sequence of Ring_3_4 group-start ordinals -- each RingLevelRec's
-**           own .offset field already IS the starting ordinal of that
-**           group's Ring_3_4 children (confirmed via RingNestedIndexReader::
-**           FindBoardPosition's own real usage of this field). Ring_2 is
-**           much smaller than Ring_3_4, so this is a fast, real pass, not
-**           an estimate.
-** @param    ring2Path   - path to the source Ring_2 file
-** @param    pBoundaries - out: group-start ordinals, in the same order
-**                         Ring_2 itself is stored in (already sorted)
+** Type:    Ring2BoundaryStream
+** @brief   Streams a level's Ring_2 group-start ordinals one at a time via
+**          a small, fixed-size (65536-record) rolling buffer -- never holds
+**          the whole level's boundary list in memory. A real level's Ring_2
+**          group count can run into the billions at deep levels (real
+**          numbers: level 21's Ring_2 file is ~72x bigger than level 14's),
+**          so an earlier version of this file that pre-loaded every
+**          boundary into one std::vector was a genuine, if bounded-by-
+**          group-count-not-board-count, wholesale-load violation -- caught
+**          before it was ever run against a level big enough to matter.
 */
-static void LoadRing2GroupBoundaries(const char* ring2Path, std::vector<uint64_t>* pBoundaries)
+struct Ring2BoundaryStream
 {
-    RSFReader* pReader = RSFOpenShaped(ring2Path, RSF_SHAPE_RING_LEVEL);
-    if (!pReader)
-        Fatal(FATAL_FILE_OPEN, "LoadRing2GroupBoundaries: could not open '%s' (corrupt or truncated)", ring2Path);
+    RSFReader*                pReader     = nullptr;
+    std::vector<RingLevelRec> batch;      /* heap-allocated, not a stack-embedded fixed array --
+                                           ** this struct is declared as a plain local in main(),
+                                           ** and a raw RingLevelRec[65536] member (~768KB) would
+                                           ** live on the stack there, real overflow risk against
+                                           ** a typical 1MB default thread stack. Same lesson
+                                           ** already learned once in this codebase (Ring34Popcount
+                                           ** BandCheck's own earlier CheckpointStats-style fix). */
+    int                        batchPos    = 0;
+    int                        batchFilled = 0;
+    bool                       exhausted   = false;
+};
 
-    uint64_t ring2Count = RSFReaderTrailer(pReader)->recordCount;
-    pBoundaries->reserve((size_t)ring2Count);
+/*
+** Function: Ring2BoundaryStreamOpen
+** @brief    Opens a level's Ring_2 file for streaming boundary access.
+** @param    ring2Path - path to the source Ring_2 file
+** @param    s         - out: stream state to initialize
+*/
+static void Ring2BoundaryStreamOpen(const char* ring2Path, Ring2BoundaryStream* s)
+{
+    s->pReader = RSFOpenShaped(ring2Path, RSF_SHAPE_RING_LEVEL);
+    if (!s->pReader)
+        Fatal(FATAL_FILE_OPEN, "Ring2BoundaryStreamOpen: could not open '%s' (corrupt or truncated)", ring2Path);
+    s->batch.resize(65536);
+}
 
-    const int BATCH = 65536;
-    std::vector<RingLevelRec> batch(BATCH);
-    int n;
-    while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
-        for (int i = 0; i < n; i++)
-            pBoundaries->push_back(batch[i].offset);
+/*
+** Function: Ring2BoundaryStreamNext
+** @brief    Advances to and returns the next Ring_2 group's own starting
+**           Ring_3_4 ordinal (its .offset field) -- confirmed via
+**           RingNestedIndexReader::FindBoardPosition's own real usage of
+**           this field. Refills its small internal batch from disk only
+**           when exhausted, so memory stays flat regardless of how many
+**           groups the level actually has.
+** @param    s          - the stream to advance
+** @param    pOutOffset - out: the next boundary ordinal, if returned true
+** @return   true if a boundary was returned; false at end of stream.
+*/
+static bool Ring2BoundaryStreamNext(Ring2BoundaryStream* s, uint64_t* pOutOffset)
+{
+    if (s->exhausted) return false;
+    if (s->batchPos >= s->batchFilled)
+    {
+        s->batchFilled = RSFReadShaped(s->pReader, s->batch.data(), 65536);
+        s->batchPos    = 0;
+        if (s->batchFilled == 0) { s->exhausted = true; return false; }
+    }
+    *pOutOffset = s->batch[s->batchPos].offset;
+    s->batchPos++;
+    return true;
+}
 
-    RSFClose(&pReader);
+/*
+** Function: Ring2BoundaryStreamClose
+** @brief    Closes a boundary stream's underlying reader.
+*/
+static void Ring2BoundaryStreamClose(Ring2BoundaryStream* s)
+{
+    RSFClose(&s->pReader);
 }
 
 /*
@@ -270,12 +314,14 @@ int main(int argc, char* argv[])
         Fatal(FATAL_CREATE_DIR_FAILED, "Cannot create level segment directory '%s'", levelSegmentDir);
     PurgeExistingSegments(levelSegmentDir);
 
-    printf("Loading Ring_2 group boundaries from '%s'...\n", ring2Path);
+    printf("Opening Ring_2 for streaming group-boundary access: '%s'\n\n", ring2Path);
     fflush(stdout);
-    std::vector<uint64_t> boundaries;
-    LoadRing2GroupBoundaries(ring2Path, &boundaries);
-    printf("Loaded %llu group boundaries.\n\n", (unsigned long long)boundaries.size());
-    fflush(stdout);
+    Ring2BoundaryStream ring2Stream;
+    Ring2BoundaryStreamOpen(ring2Path, &ring2Stream);
+    uint64_t nextBoundary     = 0;
+    bool     haveNextBoundary = Ring2BoundaryStreamNext(&ring2Stream, &nextBoundary);
+    if (!haveNextBoundary)
+        Fatal(FATAL_FILE_OPEN, "Ring_2 file '%s' has zero records -- cannot determine group boundaries", ring2Path);
 
     RSFReader* pReader = RSFOpenShaped(ring34Path, RSF_SHAPE_LEAF16);
     if (!pReader)
@@ -306,7 +352,6 @@ int main(int argc, char* argv[])
     uint64_t segmentStartOrdinal = 0;
     uint64_t recordsInSegment    = 0;
     uint64_t currentOrdinal      = 0;
-    size_t   boundaryIdx         = 0;
     bool     cutRequested        = false;
     uint64_t segmentCount        = 0;
     uint64_t totalSegmentBytes   = 0;
@@ -326,8 +371,9 @@ int main(int argc, char* argv[])
     {
         for (int i = 0; i < n; i++)
         {
-            bool atGroupBoundary = (boundaryIdx < boundaries.size() && currentOrdinal == boundaries[boundaryIdx]);
-            if (atGroupBoundary) boundaryIdx++;
+            bool atGroupBoundary = (haveNextBoundary && currentOrdinal == nextBoundary);
+            if (atGroupBoundary)
+                haveNextBoundary = Ring2BoundaryStreamNext(&ring2Stream, &nextBoundary);
 
             /* Only cut once BOTH the size trigger has fired AND we're
             ** exactly at a real Ring_2 group boundary -- never mid-group,
@@ -382,6 +428,7 @@ int main(int argc, char* argv[])
         }
     }
     RSFClose(&pReader);
+    Ring2BoundaryStreamClose(&ring2Stream);
 
     /* Close the final segment. */
     {

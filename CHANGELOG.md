@@ -4,6 +4,28 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.5] - 2026-09-14
+
+### Fixed a real wholesale-load risk in Ring34Indexer, caught before it was ever run at real scale
+
+User asked directly whether the indexer loads data into memory -- it did, more than it should
+have. `LoadRing2GroupBoundaries` pre-loaded every one of a level's Ring_2 group-start ordinals
+into one `std::vector<uint64_t>` for the whole run. Fine at level 14 (38.6M groups, ~309MB), but
+real numbers show level 21's Ring_2 file is ~72x bigger than level 14's -- extrapolating group
+count similarly implies billions of groups, potentially 20+GB just for this one vector, a real
+risk alongside the live solver's own ~51GB budget on this machine. This was heading toward the
+exact kind of violation [[feedback_never_load_level_wholesale]] exists to prevent, just for
+group-boundary data rather than board/counts data.
+
+Replaced with `Ring2BoundaryStream`: streams Ring_2 in lockstep with the Ring_3_4 pass via a
+small rolling batch, refilled from disk only when exhausted -- memory stays flat regardless of
+how many groups a level actually has. Caught a second real bug while fixing the first: the new
+struct's rolling buffer was initially a raw `RingLevelRec[65536]` array (~768KB) embedded
+directly in the struct -- since the struct is a plain local variable in `main()`, that would
+have put ~768KB on the stack, a real overflow risk against a typical 1MB default thread stack
+(the same class of bug this project already hit once before with `CheckpointStats`). Switched
+to a heap-backed `std::vector` instead.
+
 ## [1.2.4] - 2026-09-14
 
 ### Ring34Indexer: purge stale segments before every run
