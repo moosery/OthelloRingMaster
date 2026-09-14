@@ -437,23 +437,26 @@ OthelloRingMasterLevelIndexer.exe --level N [options]
   --help              Show this help
 ```
 
-Splits an already-completed level's Ring_2 and/or Ring_3_4 files into independent,
+Splits an already-completed level's CellsInUse, Ring_2, and Ring_3_4 files into independent,
 individually-decodable segments -- the real building block for fast random lookups against the
-store without decompressing a whole level. Checks each ring's real on-disk size against
-`--target-size` independently: a ring already at or under that size is left flat (no directory
-created at all), so a level only gets segments for whichever ring(s) actually need it.
-CellsInUse is never segmented -- it stays small (well under 20MB) at every real level, and is
-only ever used as Ring_2's own boundary source.
+store without decompressing a whole level. Every ring is ALWAYS segmented, even one well under
+`--target-size` -- that case just naturally produces exactly one segment, since the size trigger
+never fires. This is deliberate consistency, not a size optimization: the goal is one standard
+directory+manifest interface every reader goes through for every ring at every level, with no
+"is this one flat or segmented" branch anywhere -- CellsInUse today only ever produces a single
+segment at real 6x6 sizes (well under 20MB at its real peak), but a future 8x8 run could plausibly
+need it segmented for real.
 
-Each level/player gets its own directory under `--levelindex-dir`, and each ring that needs
-segmenting gets its own subdirectory within that (`Ring2`/`Ring34` -- one real level can produce
-thousands of segments per ring). Within a ring's subdirectory, each segment is named by its own
-starting record ordinal in hex, so a plain directory listing already sorts in ordinal order; no
-separate index file exists or is needed. Segment boundaries are aligned to the next ring up's own
-group-boundary field (CellsInUse's for Ring_2, Ring_2's for Ring_3_4 -- found via one cheap real
-pass over the parent ring, never guessed), so a segment never splits one group's children across
-two files. The `--target-size` is a trigger, not a hard cut point -- once crossed, the actual cut
-waits for the next real group boundary.
+Each level/player gets its own directory under `--levelindex-dir`, and each ring gets its own
+subdirectory within that (`CellsInUse`/`Ring2`/`Ring34` -- one real level can produce thousands of
+segments per ring). Within a ring's subdirectory, each segment is named by its own starting record
+ordinal in hex, so a plain directory listing already sorts in ordinal order; no separate index
+file exists or is needed. Ring_2 and Ring_3_4 segment boundaries are aligned to the next ring up's
+own group-boundary field (CellsInUse's for Ring_2, Ring_2's for Ring_3_4 -- found via one cheap
+real pass over the parent ring, never guessed), so a segment never splits one group's children
+across two files; once the `--target-size` trigger crosses, the actual cut waits for the next real
+group boundary. CellsInUse sits at the root of the hierarchy with no parent to align to, so it has
+no such constraint -- its cuts fire immediately once the trigger crosses.
 
 The default 500MB target was chosen from real measurements (`Ring34SegmentSizeCheck`) showing
 ~3.8-3.9s decode time per segment with ~0.00% compression-ratio cost, confirmed on real Ring_3_4

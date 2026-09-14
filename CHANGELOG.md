@@ -4,6 +4,31 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.3.1] - 2026-09-14
+
+### LevelIndexer now always segments every ring, including CellsInUse -- consistency over optimization
+
+User's call after discussing where this is headed: the 6x6 solve stays untouched in its current
+flat form until it fully finishes (a stable dataset to validate against once segmenting eventually
+moves into the solver itself), but the indexer becomes the one standard way every future reader
+looks at ring data, starting now. Dropped the "leave flat if already under --target-size" branch
+entirely -- every ring always gets a segment directory + manifest, even when that naturally means
+exactly one segment (which is what happens today for every CellsInUse file and most Ring_2 files
+at real 6x6 sizes).
+
+CellsInUse is now segmented too, for the first time -- previously it was only ever read as a
+boundary source, never segmented itself. It sits at the root of the ring hierarchy with nothing
+pointing into it by ordinal from above, so unlike Ring_2/Ring_3_4 it has no group-boundary
+constraint to protect at all: `SegmentOneRing` now accepts a nullable `boundaryParentPath`, and
+when null, every record position is a valid cut point (a cut fires the instant the size trigger
+crosses, no boundary wait needed). Real 6x6 numbers show this only ever produces one segment in
+practice (CellsInUse peaks under 20MB at level 19, nowhere near the 500MB default) -- the value is
+purely a uniform read interface, not a size win today. That may not hold for a future 8x8
+exploration run: 8x8's legal-position count is many orders of magnitude past 6x6's, and CellsInUse
+already grows ~230,000x from level 0 to its 6x6 peak, so a real 8x8 CellsInUse could plausibly need
+genuine multi-segment splitting -- better the interface is already uniform before that's ever
+tested than special-cased later.
+
 ## [1.3.0] - 2026-09-14
 
 ### Generalized and renamed the ring indexer: Ring_2 now gets the same segmenting treatment as Ring_3_4

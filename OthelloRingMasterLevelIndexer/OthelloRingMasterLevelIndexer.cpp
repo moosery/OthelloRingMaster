@@ -3,7 +3,7 @@
 **
 ** Purpose:
 **   Real, permanent tool (not a disposable diagnostic): splits an already-
-**   completed level's large ring files (Ring_2 and/or Ring_3_4) into
+**   completed level's ring files (CellsInUse, Ring_2, Ring_3_4) into
 **   independently-decodable segments, each named by its own starting
 **   global record ordinal in hex, so a plain directory listing already
 **   sorts the same as ordinal order -- no separate index file needed. See
@@ -14,40 +14,48 @@
 **   real Ring_3_4 data at levels 16 and 20.
 **
 **   Started as a Ring_3_4-only tool (originally
-**   OthelloRingMasterRing34Indexer). Renamed and generalized once real
-**   Ring_2 file sizes were measured across every completed level: Ring_2
-**   itself hits multi-gigabyte sizes just as Ring_3_4 does (real numbers:
-**   level 21's Ring_2 file alone is 6.09GB compressed, and a wholesale
+**   OthelloRingMasterRing34Indexer), then generalized once real Ring_2
+**   file sizes were measured across every completed level: Ring_2 itself
+**   hits multi-gigabyte sizes just as Ring_3_4 does (real numbers: level
+**   21's Ring_2 file alone is 6.09GB compressed, and a wholesale
 **   decompress-to-vector of its ~2.2 BILLION group boundaries is exactly
 **   what made an earlier version of this tool go dangerously memory-heavy
-**   -- see Ring2BoundaryStream's own history, now folded into the generic
-**   GroupBoundaryStream below). CellsInUse, by contrast, never gets
-**   anywhere close (tops out under 20MB even at level 19 real numbers) --
-**   it is never segmented, only ever read as a small boundary source for
-**   Ring_2's own segmenting pass.
+**   -- see GroupBoundaryStream's own history).
 **
-**   Sizing is now self-detecting rather than a hand-picked level cutoff:
-**   each ring's own real on-disk size is checked against --target-size at
-**   runtime, and a ring already at or under that size is left flat (no
-**   segment directory created at all) rather than pointlessly segmented.
-**   This replaces the old MIN_INDEXABLE_LEVEL guess (itself only ever an
-**   approximation of "does this file already decode fast enough") with a
-**   direct measurement, and it naturally lets Ring_2 and Ring_3_4 have
-**   different real crossover levels without needing two different
-**   hardcoded constants.
+**   EVERY ring is now ALWAYS segmented -- even CellsInUse, which real
+**   numbers show never gets anywhere close to a real size trigger (tops
+**   out under 20MB even at its own real peak, level 19), producing
+**   exactly one segment for it at every 6x6 level today. This is
+**   deliberate, not wasted work: the goal is one single, consistent
+**   on-disk interface every reader goes through for every ring at every
+**   level, with no "is this one flat or segmented" branch anywhere. Two
+**   real reasons this matters more than it might look like it should:
+**   (1) a future 8x8 exploration run would very plausibly blow CellsInUse
+**   itself past any reasonable trigger too (8x8's legal-position count is
+**   many orders of magnitude past 6x6's, and CellsInUse already grows
+**   ~230,000x from level 0 to its 6x6 peak) -- better the read interface
+**   is already uniform before that's ever tested than special-cased later;
+**   (2) the long-term plan is to eventually fold this segmenting directly
+**   into the live solver's own ring-file writers and retire this
+**   standalone tool entirely -- keeping the read side consistent now means
+**   that switch is a pure backend swap for consumers, not a rewrite.
 **
 **   Segment boundaries are aligned to the *next ring up*'s own group
-**   boundaries -- never split one parent group's children across two
-**   segments (this is what lets a later lookup resolve to either one
-**   whole segment or several complete ones, never a partial straddle).
-**   Ring_3_4 aligns to Ring_2's own `.offset` field; Ring_2 aligns to
-**   CellsInUse's own `.offset` field. Both are already real, existing
-**   fields (confirmed via RingNestedIndexReader::FindBoardPosition's own
-**   usage) -- finding boundaries is just one cheap sequential pass over
+**   boundaries where one exists -- never split one parent group's children
+**   across two segments (this is what lets a later lookup resolve to
+**   either one whole segment or several complete ones, never a partial
+**   straddle). Ring_3_4 aligns to Ring_2's own `.offset` field; Ring_2
+**   aligns to CellsInUse's own `.offset` field. Both are already real,
+**   existing fields (confirmed via RingNestedIndexReader::FindBoardPosition's
+**   own usage) -- finding boundaries is just one cheap sequential pass over
 **   the parent ring (always much smaller than the ring being segmented),
-**   never a guess. The --target-size trigger is a trigger, not a hard cut
-**   point: once crossed, the cut waits for the *next* real group boundary
-**   rather than firing immediately.
+**   never a guess. CellsInUse itself sits at the ROOT of the hierarchy --
+**   nothing points into it by ordinal from above, so it has no group-
+**   boundary constraint at all and can be cut at any record position once
+**   the size trigger fires (see SegmentOneRing's boundaryParentPath ==
+**   nullptr case). The --target-size trigger is a trigger, not a hard cut
+**   point where a boundary parent exists: once crossed, the cut waits for
+**   the *next* real group boundary rather than firing immediately.
 **
 **   A ring's segment directory only gets a manifest.txt once segmenting
 **   completes AND self-verifies (segmented record count matches the
@@ -62,9 +70,9 @@
 **   to a dedicated --levelindex-dir, kept entirely separate from
 **   storeDir/storeMergeDir/writerDir so this never collides with a live
 **   solver's own active I/O. Each level/player gets its own directory
-**   under there, and each ring that actually needs segmenting gets its
-**   own subdirectory within that -- a single level can produce thousands
-**   of segments per ring, so this keeps any one directory listing small.
+**   under there, and each ring gets its own subdirectory within that --
+**   a single level can produce thousands of segments per ring, so this
+**   keeps any one directory listing small.
 */
 
 /* Includes */
@@ -288,42 +296,55 @@ static void GroupBoundaryStreamClose(GroupBoundaryStream* s)
 /*
 ** Type:    SegmentRingResult
 ** @brief   What one call to SegmentOneRing actually did, for the final
-**          per-level summary.
+**          per-level summary. Segmenting always happens now (even a ring
+**          well under --target-size still gets exactly one segment), so
+**          this only carries real counts, not a "did it even segment" flag.
 */
 struct SegmentRingResult
 {
-    bool     segmented    = false;   /* false if left flat -- already under --target-size */
     uint64_t segmentCount = 0;
     uint64_t totalRecords = 0;
 };
 
 /*
 ** Function: SegmentOneRing
-** @brief    Segments one ring file (Ring_2 or Ring_3_4) into independently-
-**           decodable, group-boundary-aligned segments, using another
-**           ring's own `.offset` field as the real boundary source. Skips
-**           entirely (leaving the ring flat, no directory created) when
-**           the ring's real on-disk size is already at or under
-**           targetBytes -- there would be nothing to gain from segmenting
-**           a file that already decodes as fast as one segment would.
-** @param    ringName             - "Ring2" or "Ring34" (used for the
-**                                  segment subdirectory name and log lines)
+** @brief    Segments one ring file (CellsInUse, Ring_2, or Ring_3_4) into
+**           independently-decodable segments -- ALWAYS, even when the
+**           source is well under targetBytes (that case just naturally
+**           produces exactly one segment, since the cut trigger never
+**           fires -- see the main loop below). Consistency, not a size
+**           optimization, is the point: see this file's own top-of-file
+**           Notes.
+**
+**           When boundaryParentPath is non-null, cuts are aligned to that
+**           parent ring's own `.offset` field so a cut never splits one
+**           parent group's children across two segments. When it's
+**           nullptr (CellsInUse's case -- nothing sits above it in the
+**           hierarchy, so there is no group to protect), every record
+**           position is a valid cut point and a cut fires as soon as the
+**           size trigger crosses, with no boundary wait.
+** @param    ringName             - "CellsInUse", "Ring2", or "Ring34"
+**                                  (used for the segment subdirectory name
+**                                  and log lines)
 ** @param    sourcePath           - path to the ring file being segmented
 ** @param    sourceShape          - that ring file's record shape
 ** @param    boundaryParentPath   - path to the parent ring providing real
 **                                  group boundaries (Ring_2 for Ring_3_4;
-**                                  CellsInUse for Ring_2)
-** @param    boundaryParentShape  - the parent ring's record shape
+**                                  CellsInUse for Ring_2), or nullptr if
+**                                  this ring has no parent (CellsInUse)
+** @param    boundaryParentShape  - the parent ring's record shape (ignored
+**                                  when boundaryParentPath is nullptr)
 ** @param    levelDir             - this level/player's own directory
 **                                  (from RSFNameLevelIndexDir)
 ** @param    targetBytes          - nominal segment size trigger
-** @return   What happened (segmented or left flat, and real counts).
+** @return   Real segment/record counts actually written.
 */
 static SegmentRingResult SegmentOneRing(const char* ringName, const char* sourcePath, RSFRecordShape sourceShape,
                                          const char* boundaryParentPath, RSFRecordShape boundaryParentShape,
                                          const char* levelDir, uint64_t targetBytes)
 {
     SegmentRingResult result;
+    bool alignToBoundary = (boundaryParentPath != nullptr);
 
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
     if (!GetFileAttributesExA(sourcePath, GetFileExInfoStandard, &fad))
@@ -335,22 +356,6 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     char manifestPath[MAX_FULL_PATH_NAME];
     RSFNameRingManifestFile(manifestPath, sizeof(manifestPath), ringSegmentDir);
 
-    if (origOnDiskBytes <= targetBytes)
-    {
-        printf("%s: '%s' already fits under target size (%llu <= %llu bytes) -- leaving flat, no segmenting needed.\n",
-               ringName, sourcePath, (unsigned long long)origOnDiskBytes, (unsigned long long)targetBytes);
-        /* Clean up any stale segments/manifest from an earlier run with a
-        ** smaller --target-size -- otherwise a leftover valid-looking
-        ** manifest would tell a lookup consumer to trust segments that
-        ** contradict this run's real skip decision.
-        */
-        DeleteFileA(manifestPath);
-        if (GetFileAttributesA(ringSegmentDir) != INVALID_FILE_ATTRIBUTES)
-            PurgeExistingSegments(ringSegmentDir);
-        fflush(stdout);
-        return result;
-    }
-
     if (!CreateFullPath(ringSegmentDir))
         Fatal(FATAL_CREATE_DIR_FAILED, "Cannot create ring segment directory '%s'", ringSegmentDir);
     /* Delete any stale manifest FIRST, before writing a single new segment
@@ -361,15 +366,24 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     PurgeExistingSegments(ringSegmentDir);
 
     printf("\n=== %s ===\n", ringName);
-    printf("Opening boundary source for streaming: '%s'\n", boundaryParentPath);
-    fflush(stdout);
+
     GroupBoundaryStream boundaryStream;
-    GroupBoundaryStreamOpen(boundaryParentPath, boundaryParentShape, &boundaryStream);
     uint64_t nextBoundary     = 0;
-    bool     haveNextBoundary = GroupBoundaryStreamNext(&boundaryStream, &nextBoundary);
-    if (!haveNextBoundary)
-        Fatal(FATAL_FILE_OPEN, "%s: boundary source '%s' has zero records -- cannot determine group boundaries",
-              ringName, boundaryParentPath);
+    bool     haveNextBoundary = false;
+    if (alignToBoundary)
+    {
+        printf("Opening boundary source for streaming: '%s'\n", boundaryParentPath);
+        fflush(stdout);
+        GroupBoundaryStreamOpen(boundaryParentPath, boundaryParentShape, &boundaryStream);
+        haveNextBoundary = GroupBoundaryStreamNext(&boundaryStream, &nextBoundary);
+        if (!haveNextBoundary)
+            Fatal(FATAL_FILE_OPEN, "%s: boundary source '%s' has zero records -- cannot determine group boundaries",
+                  ringName, boundaryParentPath);
+    }
+    else
+    {
+        printf("Root of the hierarchy -- no parent group to align to, cutting purely by size trigger.\n");
+    }
 
     RSFReader* pReader = RSFOpenShaped(sourcePath, sourceShape);
     if (!pReader)
@@ -416,13 +430,17 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     {
         for (int i = 0; i < n; i++)
         {
-            bool atGroupBoundary = (haveNextBoundary && currentOrdinal == nextBoundary);
-            if (atGroupBoundary)
+            /* No parent to align to (CellsInUse) -- every position is a
+            ** valid cut point. Otherwise, only a real parent group
+            ** boundary counts.
+            */
+            bool atGroupBoundary = !alignToBoundary || (haveNextBoundary && currentOrdinal == nextBoundary);
+            if (alignToBoundary && atGroupBoundary)
                 haveNextBoundary = GroupBoundaryStreamNext(&boundaryStream, &nextBoundary);
 
-            /* Only cut once BOTH the size trigger has fired AND we're
-            ** exactly at a real parent group boundary -- never mid-group,
-            ** never mid-record.
+            /* Only cut once BOTH the size trigger has fired AND we're at a
+            ** valid cut point -- never mid-group when one exists, never
+            ** mid-record.
             */
             if (cutRequested && atGroupBoundary && currentOrdinal > segmentStartOrdinal)
             {
@@ -473,7 +491,8 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
         }
     }
     RSFClose(&pReader);
-    GroupBoundaryStreamClose(&boundaryStream);
+    if (alignToBoundary)
+        GroupBoundaryStreamClose(&boundaryStream);
 
     /* Close the final segment. */
     {
@@ -522,7 +541,6 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
            totalStr, origStr, avgStr, minStr, maxStr);
     printf("Segments written to: %s\n", ringSegmentDir);
 
-    result.segmented    = true;
     result.segmentCount = segmentCount;
     result.totalRecords = currentOrdinal;
     return result;
@@ -544,13 +562,15 @@ static void PrintUsage(const char* prog)
     printf("  --levelindex-dir P  Sub-path on that drive (no drive letter)                  [default: \\OthelloRingMaster\\Store\\levelIndexDir]\n");
     printf("  --target-size SIZE  Nominal segment size trigger (e.g. 500MB)                 [default: 500MB]\n");
     printf("  --help              Show this help\n\n");
-    printf("Checks Ring_2 and Ring_3_4 independently: each is segmented only if its own\n");
-    printf("real on-disk size exceeds --target-size, using the next ring up's own boundary\n");
-    printf("field (CellsInUse for Ring_2, Ring_2 for Ring_3_4) so no group is ever split\n");
-    printf("across two segments. CellsInUse itself is never segmented -- it stays small at\n");
-    printf("every real level. Writes to --levelindex-dir (one directory per level/player,\n");
-    printf("one subdirectory per segmented ring), entirely separate from the live store's\n");
-    printf("own working directories, so this is safe to run alongside a live solve.\n\n");
+    printf("Always segments all three rings (CellsInUse, Ring_2, Ring_3_4) -- even one well\n");
+    printf("under --target-size still gets exactly one segment, for a single consistent\n");
+    printf("on-disk interface every reader goes through. Ring_2 and Ring_3_4 cuts align to\n");
+    printf("the next ring up's own boundary field (CellsInUse for Ring_2, Ring_2 for\n");
+    printf("Ring_3_4) so no group is ever split across two segments; CellsInUse has no\n");
+    printf("parent to align to, so it cuts purely by size. Writes to --levelindex-dir (one\n");
+    printf("directory per level/player, one subdirectory per ring), entirely separate from\n");
+    printf("the live store's own working directories, so this is safe to run alongside a\n");
+    printf("live solve.\n\n");
 }
 
 int main(int argc, char* argv[])
@@ -632,13 +652,18 @@ int main(int argc, char* argv[])
 
     printf("Level %d, %dx%d, %s -- level index directory: '%s'\n", level, boardSize, boardSize, color, levelDir);
 
-    /* Ring_2's own boundaries come from CellsInUse; Ring_3_4's come from
+    /* CellsInUse is the root -- no parent, so no boundary source (nullptr).
+    ** Ring_2's own boundaries come from CellsInUse; Ring_3_4's come from
     ** Ring_2 -- always the ORIGINAL flat file in storeDir either way, since
     ** segmenting only ever writes to levelIndexDir and never touches
-    ** storeDir itself. Order between the two doesn't matter for
-    ** correctness, but Ring_2 first mirrors the hierarchy's own top-down
-    ** shape.
+    ** storeDir itself. Processed top-down to mirror the hierarchy's own
+    ** shape, though order doesn't matter for correctness.
     */
+    SegmentRingResult cellsInUseResult = SegmentOneRing(
+        "CellsInUse", cellsInUsePath, RSF_SHAPE_PAIR64,
+        nullptr, RSF_SHAPE_PAIR64,
+        levelDir, targetBytes);
+
     SegmentRingResult ring2Result = SegmentOneRing(
         "Ring2", ring2Path, RSF_SHAPE_RING_LEVEL,
         cellsInUsePath, RSF_SHAPE_PAIR64,
@@ -650,10 +675,12 @@ int main(int argc, char* argv[])
         levelDir, targetBytes);
 
     printf("\n=== Summary: level %d, %dx%d, %s ===\n", level, boardSize, boardSize, color);
-    printf("Ring_2:   %s\n", ring2Result.segmented
-           ? "segmented" : "left flat (already under target size)");
-    printf("Ring_3_4: %s\n", ring34Result.segmented
-           ? "segmented" : "left flat (already under target size)");
+    printf("CellsInUse: %llu segment(s), %llu records\n",
+           (unsigned long long)cellsInUseResult.segmentCount, (unsigned long long)cellsInUseResult.totalRecords);
+    printf("Ring_2:     %llu segment(s), %llu records\n",
+           (unsigned long long)ring2Result.segmentCount, (unsigned long long)ring2Result.totalRecords);
+    printf("Ring_3_4:   %llu segment(s), %llu records\n",
+           (unsigned long long)ring34Result.segmentCount, (unsigned long long)ring34Result.totalRecords);
 
     return 0;
 }
