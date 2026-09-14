@@ -3,8 +3,9 @@
 **
 ** Purpose:
 **   DISPOSABLE diagnostic/verification tool -- not part of the permanent
-**   solution. Exhaustively verifies OthelloRingMasterRing34Indexer's real
-**   output against the real original Ring_3_4 file it was built from:
+**   solution. Exhaustively verifies OthelloRingMasterLevelIndexer's real
+**   Ring_3_4 output against the real original Ring_3_4 file it was built
+**   from:
 **   walks every record in the original file (sequential, cheap) and looks
 **   each one up through the segmented index (binary-search which segment,
 **   open+decode it if not already loaded, compare the record), Fataling
@@ -53,7 +54,7 @@ struct SegmentInfo
 ** Function: DiscoverSegments
 ** @brief    Lists a level/player's segment directory and parses each real
 **           segment file's own starting ordinal straight from its filename
-**           (no separate index needed -- see RSFNameRing34SegmentFile).
+**           (no separate index needed -- see RSFNameRingSegmentFile).
 **           Sorted explicitly rather than trusting directory enumeration
 **           order, even though fixed-width hex filenames already sort the
 **           same as ordinal order.
@@ -186,8 +187,10 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    char levelDir[MAX_FULL_PATH_NAME];
+    RSFNameLevelIndexDir(levelDir, sizeof(levelDir), levelIndexDir, boardSize, level, player);
     char levelSegmentDir[MAX_FULL_PATH_NAME];
-    RSFNameRing34SegmentDir(levelSegmentDir, sizeof(levelSegmentDir), levelIndexDir, boardSize, level, player);
+    RSFNameRingSegmentDir(levelSegmentDir, sizeof(levelSegmentDir), levelDir, "Ring34");
 
     printf("Discovering segments in '%s'...\n", levelSegmentDir);
     fflush(stdout);

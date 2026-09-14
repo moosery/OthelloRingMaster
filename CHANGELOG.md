@@ -4,6 +4,36 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.3.0] - 2026-09-14
+
+### Generalized and renamed the ring indexer: Ring_2 now gets the same segmenting treatment as Ring_3_4
+
+Real Ring_2 file sizes were checked across every completed level (0-24): Ring_2 hits the same
+multi-gigabyte territory Ring_3_4 does -- level 21's Ring_2 file alone is 6.09GB compressed, and
+the earlier, already-fixed wholesale-load bug (see 1.2.5) loaded that level's ~2.2 billion real
+Ring_2 group boundaries, confirming a plain unsegmented Ring_2 has exactly the same no-random-
+access problem that motivated segmenting Ring_3_4 in the first place. CellsInUse, by contrast,
+never gets anywhere close (real numbers: under 20MB even at its own real peak, level 19) -- it's
+never segmented, only used as Ring_2's own boundary source.
+
+`OthelloRingMasterRing34Indexer` is renamed `OthelloRingMasterLevelIndexer` and now checks both
+Ring_2 and Ring_3_4 independently in one run, segmenting whichever real ring(s) actually need it.
+The old hand-picked `MIN_INDEXABLE_LEVEL` level cutoff is gone -- replaced with a direct per-ring
+check against `--target-size`: a ring already at or under that size is left flat (no directory
+created) rather than pointlessly segmented, so Ring_2's real crossover level (~17) and Ring_3_4's
+(~14) no longer need two separate hardcoded constants. `RSFFileName.h` gains `RSFNameLevelIndexDir`
+(the per-level/player directory, renamed from `RSFNameRing34SegmentDir`) and generic
+`RSFNameRingSegmentDir`/`RSFNameRingSegmentFile` (renamed from the Ring_3_4-specific versions) so
+each segmented ring gets its own subdirectory (`Ring2`/`Ring34`) underneath.
+
+Also adds a completion manifest (`RSFNameRingManifestFile` -> `manifest.txt`) written into a
+ring's segment directory only after self-verification passes (segmented record count matches the
+source exactly) -- this is the one thing a future lookup consumer should trust to know a ring is
+really, safely segmented, since a killed or interrupted run (a real scenario already seen this
+session) can leave partial segment files behind with no way to tell from directory listing alone.
+Every run now purges any stale manifest FIRST, before writing a single new segment, so an
+interrupted run can never leave a manifest that still looks valid over incomplete data.
+
 ## [1.2.5] - 2026-09-14
 
 ### Fixed a real wholesale-load risk in Ring34Indexer, caught before it was ever run at real scale

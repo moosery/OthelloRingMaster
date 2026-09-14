@@ -13,7 +13,7 @@
   <Project Path="OthelloRingMasterCalculatorCountsStats/OthelloRingMasterCalculatorCountsStats.vcxproj" Id="a5fb88c5-13db-4555-9a80-3757982480f1" />
   <Project Path="Ring34PopcountBandCheck/Ring34PopcountBandCheck.vcxproj" Id="6f4a2e18-9c3d-4b7a-8e21-5d0f3a9c7b42" />
   <Project Path="Ring34SegmentSizeCheck/Ring34SegmentSizeCheck.vcxproj" Id="0653d589-3a09-4fca-947e-3215cb3cc9fb" />
-  <Project Path="OthelloRingMasterRing34Indexer/OthelloRingMasterRing34Indexer.vcxproj" Id="2bac72aa-e81b-4d20-8043-f4a5267923ed" />
+  <Project Path="OthelloRingMasterLevelIndexer/OthelloRingMasterLevelIndexer.vcxproj" Id="2bac72aa-e81b-4d20-8043-f4a5267923ed" />
   <Project Path="Ring34LookupCheck/Ring34LookupCheck.vcxproj" Id="2d41cb96-7bf0-4504-9d70-5cd93244ee75" />
   <Project Path="Utility/Utility.vcxproj" Id="1ff99cce-54c7-4bc7-b3bb-94ceae7e93a1" />
   <Project Path="lz4/lz4.vcxproj" Id="1ffdb617-7315-47e7-8359-ce3f75e4ec8f" />

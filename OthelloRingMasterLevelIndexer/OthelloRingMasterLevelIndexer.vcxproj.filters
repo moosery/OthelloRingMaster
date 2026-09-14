@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="OthelloRingMasterRing34Indexer.cpp">
+    <ClCompile Include="OthelloRingMasterLevelIndexer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -188,15 +188,15 @@ static inline void RSFNameRing34File(char* out, size_t outSize,
 }
 
 /*
-** Function: RSFNameRing34SegmentDir
-** @brief    Builds the per-level-per-player subdirectory holding all of one
-**           level's Ring_3_4 segments (see OthelloRingMasterRing34Indexer).
-**           One real level can produce thousands of segment files -- giving
-**           each level/player its own subdirectory under levelIndexDir
-**           keeps any single directory listing small, and lets each
-**           segment's own filename (RSFNameRing34SegmentFile) skip
-**           repeating level/boardSize/player on every one of them, since
-**           that's already encoded once, in this directory's own name.
+** Function: RSFNameLevelIndexDir
+** @brief    Builds the per-level-per-player directory holding all of one
+**           level's segmented rings (see OthelloRingMasterLevelIndexer).
+**           Each ring that actually needs segmenting (Ring_2 and/or
+**           Ring_3_4 -- CellsInUse never does, it stays tiny at every real
+**           level) gets its own subdirectory underneath this one (see
+**           RSFNameRingSegmentDir), so a level where only one ring crosses
+**           the size trigger doesn't create an empty directory for the
+**           other.
 ** @param    out           - buffer to receive the built path
 ** @param    outSize       - size of out
 ** @param    levelIndexDir - the dedicated top-level index area (separate
@@ -206,37 +206,80 @@ static inline void RSFNameRing34File(char* out, size_t outSize,
 ** @param    level         - level number
 ** @param    player        - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
 */
-static inline void RSFNameRing34SegmentDir(char* out, size_t outSize,
-                                            const char* levelIndexDir, int boardSize,
-                                            int level, int player)
+static inline void RSFNameLevelIndexDir(char* out, size_t outSize,
+                                         const char* levelIndexDir, int boardSize,
+                                         int level, int player)
 {
     snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s",
              levelIndexDir, level, boardSize, boardSize, RSFPlayerStr(player));
 }
 
 /*
-** Function: RSFNameRing34SegmentFile
-** @brief    Builds one segment's file path within its level/player's own
-**           segment subdirectory (see RSFNameRing34SegmentDir) -- named by
-**           its own starting global record ordinal in hex, fixed-width (16
-**           hex digits) so a plain directory listing sorts lexicographically
+** Function: RSFNameRingSegmentDir
+** @brief    Builds one ring's own segment subdirectory within a level's
+**           directory (see RSFNameLevelIndexDir) -- one real level can
+**           produce thousands of segment files for a single ring, so
+**           giving each ring its own subdirectory keeps any one directory
+**           listing small and lets each segment's own filename
+**           (RSFNameRingSegmentFile) skip repeating level/boardSize/
+**           player/ring on every one of them.
+** @param    out       - buffer to receive the built path
+** @param    outSize   - size of out
+** @param    levelDir  - this level/player's own directory (from
+**                       RSFNameLevelIndexDir)
+** @param    ringName  - which ring this is ("Ring2" or "Ring34")
+*/
+static inline void RSFNameRingSegmentDir(char* out, size_t outSize,
+                                          const char* levelDir, const char* ringName)
+{
+    snprintf(out, outSize, "%s\\%s", levelDir, ringName);
+}
+
+/*
+** Function: RSFNameRingSegmentFile
+** @brief    Builds one segment's file path within its ring's own segment
+**           subdirectory (see RSFNameRingSegmentDir) -- named by its own
+**           starting global record ordinal in hex, fixed-width (16 hex
+**           digits) so a plain directory listing sorts lexicographically
 **           the same as ordinal order, with no separate index file needed.
 **           A segment's end is implied by the next segment's own starting
-**           ordinal (or the level's total record count for the last one),
+**           ordinal (or the ring's total record count for the last one),
 **           the same "no count field, implied by the next entry"
 **           convention CellsInUseRec/RingLevelRec already use.
 ** @param    out             - buffer to receive the built path
 ** @param    outSize         - size of out
-** @param    levelSegmentDir - this level/player's own segment subdirectory
-**                            (from RSFNameRing34SegmentDir)
+** @param    ringSegmentDir  - this ring's own segment subdirectory
+**                            (from RSFNameRingSegmentDir)
 ** @param    startOrdinal    - this segment's own starting global record
-**                            ordinal (0-based, into the source Ring_3_4
+**                            ordinal (0-based, into the source ring
 **                            file's full record stream)
 */
-static inline void RSFNameRing34SegmentFile(char* out, size_t outSize,
-                                             const char* levelSegmentDir, uint64_t startOrdinal)
+static inline void RSFNameRingSegmentFile(char* out, size_t outSize,
+                                           const char* ringSegmentDir, uint64_t startOrdinal)
 {
-    snprintf(out, outSize, "%s\\seg%016llx.rsfzl", levelSegmentDir, (unsigned long long)startOrdinal);
+    snprintf(out, outSize, "%s\\seg%016llx.rsfzl", ringSegmentDir, (unsigned long long)startOrdinal);
+}
+
+/*
+** Function: RSFNameRingManifestFile
+** @brief    Builds the completion-manifest path within a ring's segment
+**           subdirectory. Written only after the indexer's own self-
+**           verification (segmented record count == source record count)
+**           passes -- its mere presence is what tells a lookup consumer
+**           this ring is really, safely segmented (not mid-run, not from
+**           a killed prior attempt). Purged at the START of every indexer
+**           run, before any new segment is written, so a run that gets
+**           killed partway through can never leave a manifest that still
+**           looks valid over an incomplete segment set.
+** @param    out            - buffer to receive the built path
+** @param    outSize        - size of out
+** @param    ringSegmentDir - this ring's own segment subdirectory
+**                           (from RSFNameRingSegmentDir)
+*/
+static inline void RSFNameRingManifestFile(char* out, size_t outSize,
+                                            const char* ringSegmentDir)
+{
+    snprintf(out, outSize, "%s\\manifest.txt", ringSegmentDir);
 }
 
 /*
