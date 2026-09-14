@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.2] - 2026-09-14
+
+### Fixed a real build break: RSFFileName.h never included <stdint.h> itself
+
+Real compile failures across every file including `RSFFileName.h` (`Ring34PopcountBandCheck.cpp`,
+`Ring34SegmentSizeCheck.cpp`, `OthelloRingMasterRing34Indexer.cpp`): `uint64_t` unrecognized as a
+type. Root cause: `RSFFileName.h` only ever included `<stdio.h>`/`<string.h>` -- `uint64_t` (used
+by `RSFNameRing34SegmentFile`'s `startOrdinal` parameter) was only available by luck, via
+whatever some `.cpp` file's later includes happened to transitively pull in before this header's
+own declarations were parsed. That's fragile by construction (this header is typically the very
+first include in each `.cpp`, so it can't rely on anything after it), and v1.2.1's refactor
+apparently disturbed whatever coincidence had been making it work. Added `#include <stdint.h>`
+directly to `RSFFileName.h` -- the actual fix, not a workaround.
+
 ## [1.2.1] - 2026-09-14
 
 ### Ring34Indexer: per-level/player subdirectories, renamed segmentDir -> levelIndexDir

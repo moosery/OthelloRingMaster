@@ -32,6 +32,7 @@
 /* Includes */
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 /* Constants */
 #define RSF_PLAYER_BLACK 1
