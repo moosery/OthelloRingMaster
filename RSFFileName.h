@@ -187,34 +187,55 @@ static inline void RSFNameRing34File(char* out, size_t outSize,
 }
 
 /*
+** Function: RSFNameRing34SegmentDir
+** @brief    Builds the per-level-per-player subdirectory holding all of one
+**           level's Ring_3_4 segments (see OthelloRingMasterRing34Indexer).
+**           One real level can produce thousands of segment files -- giving
+**           each level/player its own subdirectory under levelIndexDir
+**           keeps any single directory listing small, and lets each
+**           segment's own filename (RSFNameRing34SegmentFile) skip
+**           repeating level/boardSize/player on every one of them, since
+**           that's already encoded once, in this directory's own name.
+** @param    out           - buffer to receive the built path
+** @param    outSize       - size of out
+** @param    levelIndexDir - the dedicated top-level index area (separate
+**                          from storeDir, so the indexer's own read/write
+**                          activity never collides with a live solver)
+** @param    boardSize     - board size (e.g. 6 for 6x6)
+** @param    level         - level number
+** @param    player        - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+*/
+static inline void RSFNameRing34SegmentDir(char* out, size_t outSize,
+                                            const char* levelIndexDir, int boardSize,
+                                            int level, int player)
+{
+    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s",
+             levelIndexDir, level, boardSize, boardSize, RSFPlayerStr(player));
+}
+
+/*
 ** Function: RSFNameRing34SegmentFile
-** @brief    Builds one segment's file path for the segmented Ring_3_4 index
-**           (see OthelloRingMasterRing34Indexer) -- named by its own
-**           starting global record ordinal in hex, fixed-width (16 hex
-**           digits) so a plain directory listing sorts lexicographically
+** @brief    Builds one segment's file path within its level/player's own
+**           segment subdirectory (see RSFNameRing34SegmentDir) -- named by
+**           its own starting global record ordinal in hex, fixed-width (16
+**           hex digits) so a plain directory listing sorts lexicographically
 **           the same as ordinal order, with no separate index file needed.
 **           A segment's end is implied by the next segment's own starting
 **           ordinal (or the level's total record count for the last one),
 **           the same "no count field, implied by the next entry"
 **           convention CellsInUseRec/RingLevelRec already use.
-** @param    out          - buffer to receive the built path
-** @param    outSize      - size of out
-** @param    dir          - segment directory (a dedicated area, separate
-**                          from storeDir, so the indexer's own read/write
-**                          activity never collides with a live solver)
-** @param    boardSize    - board size (e.g. 6 for 6x6)
-** @param    level        - level number
-** @param    player       - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
-** @param    startOrdinal - this segment's own starting global record ordinal
-**                          (0-based, into the source Ring_3_4 file's full record stream)
+** @param    out             - buffer to receive the built path
+** @param    outSize         - size of out
+** @param    levelSegmentDir - this level/player's own segment subdirectory
+**                            (from RSFNameRing34SegmentDir)
+** @param    startOrdinal    - this segment's own starting global record
+**                            ordinal (0-based, into the source Ring_3_4
+**                            file's full record stream)
 */
 static inline void RSFNameRing34SegmentFile(char* out, size_t outSize,
-                                             const char* dir, int boardSize,
-                                             int level, int player, uint64_t startOrdinal)
+                                             const char* levelSegmentDir, uint64_t startOrdinal)
 {
-    snprintf(out, outSize, "%s\\Level_%04d_%dx%d_%s_0000.ring34.seg%016llx.rsfzl",
-             dir, level, boardSize, boardSize, RSFPlayerStr(player),
-             (unsigned long long)startOrdinal);
+    snprintf(out, outSize, "%s\\seg%016llx.rsfzl", levelSegmentDir, (unsigned long long)startOrdinal);
 }
 
 /*

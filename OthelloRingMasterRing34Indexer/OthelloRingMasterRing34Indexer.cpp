@@ -28,9 +28,13 @@
 **   *next* real group boundary rather than firing immediately.
 **
 **   Reads from the live store's storeDir (read-only) and writes segments
-**   to a dedicated --segment-dir, kept entirely separate from
+**   to a dedicated --levelindex-dir, kept entirely separate from
 **   storeDir/storeMergeDir/writerDir so this never collides with a live
-**   solver's own active I/O.
+**   solver's own active I/O. Each level/player gets its own subdirectory
+**   under there (RSFNameRing34SegmentDir) -- a single level can produce
+**   thousands of segments, so this keeps any one directory listing small
+**   and lets each segment's own filename skip repeating level/boardSize/
+**   player on every one of them.
 */
 
 /* Includes */
@@ -137,15 +141,16 @@ static void PrintUsage(const char* prog)
     printf("  --board-size N      Board size: 4, 6, or 8                                   [default: 6]\n");
     printf("  --store-drive L     Drive letter the source store lives on                   [default: Y]\n");
     printf("  --store-dir P       Sub-path on store drive (no drive letter)                  [default: \\OthelloRingMaster\\Store]\n");
-    printf("  --segment-drive L   Drive letter for segment output                          [default: Y]\n");
-    printf("  --segment-dir P     Sub-path on segment drive (no drive letter)                [default: \\OthelloRingMaster\\Store\\segmentDir]\n");
+    printf("  --levelindex-drive L  Drive letter for the level-index output               [default: Y]\n");
+    printf("  --levelindex-dir P  Sub-path on that drive (no drive letter)                  [default: \\OthelloRingMaster\\Store\\levelIndexDir]\n");
     printf("  --target-size SIZE  Nominal segment size trigger (e.g. 500MB)                 [default: 500MB]\n");
     printf("  --help              Show this help\n\n");
     printf("Reads Ring_2 once to find real group boundaries, then splits Ring_3_4 into\n");
     printf("independent segments, only cutting at a group boundary once the target size\n");
     printf("has been reached -- never splits one Ring_2 group's children across two\n");
-    printf("segments. Writes to --segment-dir, entirely separate from the live store's\n");
-    printf("own working directories, so this is safe to run alongside a live solve.\n\n");
+    printf("segments. Writes to --levelindex-dir (one subdirectory per level/player),\n");
+    printf("entirely separate from the live store's own working directories, so this is\n");
+    printf("safe to run alongside a live solve.\n\n");
 }
 
 int main(int argc, char* argv[])
@@ -154,9 +159,9 @@ int main(int argc, char* argv[])
     char color[16]  = "black";
     int  boardSize  = 6;
     char storeDrive = 'Y';
-    char storeDirNoDrive[MAX_FULL_PATH_NAME]   = "\\OthelloRingMaster\\Store";
-    char segmentDrive = 'Y';
-    char segmentDirNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store\\segmentDir";
+    char storeDirNoDrive[MAX_FULL_PATH_NAME]      = "\\OthelloRingMaster\\Store";
+    char levelIndexDrive = 'Y';
+    char levelIndexDirNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store\\levelIndexDir";
     char targetSizeArg[32] = "500MB";
 
     for (int i = 1; i < argc; i++)
@@ -168,8 +173,8 @@ int main(int argc, char* argv[])
         else if (strcmp(argv[i], "--board-size") == 0)    { REQUIRE_NEXT("--board-size")     boardSize = atoi(argv[i]); }
         else if (strcmp(argv[i], "--store-drive") == 0)   { REQUIRE_NEXT("--store-drive")    storeDrive = (char)toupper((unsigned char)argv[i][0]); }
         else if (strcmp(argv[i], "--store-dir") == 0)     { REQUIRE_NEXT("--store-dir")      strncpy(storeDirNoDrive, argv[i], sizeof(storeDirNoDrive) - 1); }
-        else if (strcmp(argv[i], "--segment-drive") == 0) { REQUIRE_NEXT("--segment-drive")  segmentDrive = (char)toupper((unsigned char)argv[i][0]); }
-        else if (strcmp(argv[i], "--segment-dir") == 0)   { REQUIRE_NEXT("--segment-dir")    strncpy(segmentDirNoDrive, argv[i], sizeof(segmentDirNoDrive) - 1); }
+        else if (strcmp(argv[i], "--levelindex-drive") == 0) { REQUIRE_NEXT("--levelindex-drive") levelIndexDrive = (char)toupper((unsigned char)argv[i][0]); }
+        else if (strcmp(argv[i], "--levelindex-dir") == 0)   { REQUIRE_NEXT("--levelindex-dir")   strncpy(levelIndexDirNoDrive, argv[i], sizeof(levelIndexDirNoDrive) - 1); }
         else if (strcmp(argv[i], "--target-size") == 0)   { REQUIRE_NEXT("--target-size")    strncpy(targetSizeArg, argv[i], sizeof(targetSizeArg) - 1); }
         else { printf("ERROR: unknown argument '%s'\n\n", argv[i]); PrintUsage(argv[0]); return 1; }
 #undef REQUIRE_NEXT
@@ -202,8 +207,8 @@ int main(int argc, char* argv[])
     char storeDir[MAX_FULL_PATH_NAME];
     snprintf(storeDir, sizeof(storeDir), "%c:%s\\storeDir", storeDrive, storeDirNoDrive);
 
-    char segmentDir[MAX_FULL_PATH_NAME];
-    snprintf(segmentDir, sizeof(segmentDir), "%c:%s", segmentDrive, segmentDirNoDrive);
+    char levelIndexDir[MAX_FULL_PATH_NAME];
+    snprintf(levelIndexDir, sizeof(levelIndexDir), "%c:%s", levelIndexDrive, levelIndexDirNoDrive);
 
     char ring2Path[MAX_FULL_PATH_NAME];
     RSFNameRing2File(ring2Path, sizeof(ring2Path), storeDir, boardSize, level, player, 0);
@@ -221,8 +226,10 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    if (!CreateFullPath(segmentDir))
-        Fatal(FATAL_CREATE_DIR_FAILED, "Cannot create segment directory '%s'", segmentDir);
+    char levelSegmentDir[MAX_FULL_PATH_NAME];
+    RSFNameRing34SegmentDir(levelSegmentDir, sizeof(levelSegmentDir), levelIndexDir, boardSize, level, player);
+    if (!CreateFullPath(levelSegmentDir))
+        Fatal(FATAL_CREATE_DIR_FAILED, "Cannot create level segment directory '%s'", levelSegmentDir);
 
     printf("Loading Ring_2 group boundaries from '%s'...\n", ring2Path);
     fflush(stdout);
@@ -254,7 +261,7 @@ int main(int argc, char* argv[])
            (unsigned long long)targetBytes, (unsigned long long)recordsPerChunkEstimate);
 
     char firstSegPath[MAX_FULL_PATH_NAME];
-    RSFNameRing34SegmentFile(firstSegPath, sizeof(firstSegPath), segmentDir, boardSize, level, player, 0);
+    RSFNameRing34SegmentFile(firstSegPath, sizeof(firstSegPath), levelSegmentDir, 0);
     RSFWriter* pw = RSFWriterOpenZLShaped(firstSegPath, RSF_SHAPE_LEAF16);
 
     uint64_t segmentStartOrdinal = 0;
@@ -273,7 +280,7 @@ int main(int argc, char* argv[])
     int lastPercentBucket = -1;
     uint64_t startTickMs = GetTickCount64();
 
-    printf("Building segments in '%s'...\n", segmentDir);
+    printf("Building segments in '%s'...\n", levelSegmentDir);
     fflush(stdout);
 
     while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
@@ -301,7 +308,7 @@ int main(int argc, char* argv[])
                 cutRequested        = false;
 
                 char segPath[MAX_FULL_PATH_NAME];
-                RSFNameRing34SegmentFile(segPath, sizeof(segPath), segmentDir, boardSize, level, player, segmentStartOrdinal);
+                RSFNameRing34SegmentFile(segPath, sizeof(segPath), levelSegmentDir, segmentStartOrdinal);
                 pw = RSFWriterOpenZLShaped(segPath, RSF_SHAPE_LEAF16);
             }
 
@@ -369,7 +376,7 @@ int main(int argc, char* argv[])
            (unsigned long long)segmentCount, (unsigned long long)currentOrdinal);
     printf("Total: %s (original single-stream: %s)   Avg/segment: %s   Min: %s   Max: %s\n",
            totalStr, origStr, avgStr, minStr, maxStr);
-    printf("Segments written to: %s\n", segmentDir);
+    printf("Segments written to: %s\n", levelSegmentDir);
 
     return 0;
 }

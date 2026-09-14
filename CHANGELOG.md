@@ -4,6 +4,21 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.1] - 2026-09-14
+
+### Ring34Indexer: per-level/player subdirectories, renamed segmentDir -> levelIndexDir
+
+User-requested changes before any real segments existed. A single level can produce thousands
+of segments, so a flat shared directory across every indexed level and color would eventually
+hold tens of thousands of files -- real NTFS directory-listing slowdown at that scale, and it
+would force the lookup mechanism to filter a mixed-level listing by filename prefix every time
+instead of just working directly within one level's own folder. New `RSFNameRing34SegmentDir`
+(`RSFFileName.h`) builds each level/player's own subdirectory; `RSFNameRing34SegmentFile` is
+simplified to just `seg<16-hex-ordinal>.rsfzl` within it, since level/boardSize/player are now
+encoded once in the directory name instead of repeated on every segment file. Also renamed the
+whole area and its CLI flags from `segmentDir`/`--segment-drive`/`--segment-dir` to
+`levelIndexDir`/`--levelindex-drive`/`--levelindex-dir` throughout.
+
 ## [1.2.0] - 2026-09-14
 
 ### New tool: OthelloRingMasterRing34Indexer -- real segment builder for Ring_3_4
