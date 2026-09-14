@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.4] - 2026-09-14
+
+### Ring34Indexer: purge stale segments before every run
+
+Real gap: a rerun (e.g. after Ctrl+C interrupting a prior attempt, or with a different
+`--target-size`) could leave old segment files mixed in with the new ones, since segment
+boundaries depend on the trigger size and real per-level compression -- a differently-
+configured old run's leftovers wouldn't necessarily get overwritten by a new one, silently
+corrupting the index. New `PurgeExistingSegments` deletes every existing `seg*.rsfzl` file in
+the level/player's own segment directory before a fresh run writes anything, guaranteeing a
+clean, fully-rebuilt index every time.
+
 ## [1.2.3] - 2026-09-14
 
 ### New disposable tool: Ring34LookupCheck -- exhaustive real verification of the indexed segments

@@ -98,6 +98,44 @@ static void FormatBytes(uint64_t bytes, char* out, size_t outSize)
 }
 
 /*
+** Function: PurgeExistingSegments
+** @brief    Deletes every existing seg*.rsfzl file in a level/player's own
+**           segment directory before a fresh run writes new ones. Without
+**           this, a rerun (e.g. after an interrupted prior attempt, or with
+**           different --target-size) could leave stale segments mixed in
+**           with the new ones -- since segment boundaries depend on the
+**           trigger size and real per-level compression, a differently-
+**           configured old run's leftovers wouldn't necessarily get
+**           overwritten by a new one, silently corrupting the index.
+** @param    levelSegmentDir - the level/player's own segment subdirectory
+**                            (already created by the caller)
+*/
+static void PurgeExistingSegments(const char* levelSegmentDir)
+{
+    char pattern[MAX_FULL_PATH_NAME];
+    snprintf(pattern, sizeof(pattern), "%s\\seg*.rsfzl", levelSegmentDir);
+
+    WIN32_FIND_DATAA fd = {};
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return;   /* nothing to purge -- a fresh directory, or first run for this level */
+
+    int purged = 0;
+    do
+    {
+        char fullPath[MAX_FULL_PATH_NAME];
+        snprintf(fullPath, sizeof(fullPath), "%s\\%s", levelSegmentDir, fd.cFileName);
+        if (!DeleteFileA(fullPath))
+            Fatal(FATAL_FILE_OPEN, "PurgeExistingSegments: could not delete stale segment '%s'", fullPath);
+        purged++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    if (purged > 0)
+        printf("Purged %d stale segment file(s) from a previous run.\n", purged);
+}
+
+/*
 ** Function: LoadRing2GroupBoundaries
 ** @brief    Reads a level's Ring_2 file sequentially and collects the
 **           sequence of Ring_3_4 group-start ordinals -- each RingLevelRec's
@@ -230,6 +268,7 @@ int main(int argc, char* argv[])
     RSFNameRing34SegmentDir(levelSegmentDir, sizeof(levelSegmentDir), levelIndexDir, boardSize, level, player);
     if (!CreateFullPath(levelSegmentDir))
         Fatal(FATAL_CREATE_DIR_FAILED, "Cannot create level segment directory '%s'", levelSegmentDir);
+    PurgeExistingSegments(levelSegmentDir);
 
     printf("Loading Ring_2 group boundaries from '%s'...\n", ring2Path);
     fflush(stdout);
