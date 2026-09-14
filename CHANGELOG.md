@@ -4,6 +4,21 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.3.2] - 2026-09-14
+
+### Ring34LookupCheck now validates a level's full file set, not just Ring_3_4
+
+Direct ask after v1.3.1 made CellsInUse and Ring_2 real segmented rings for the first time: "it
+should validate the full file set for the level." `CheckOneRing` generalizes the existing
+Ring_3_4-only verification engine (shape-generic via `RSFShapeSize`, raw byte-for-byte `memcmp`
+comparison instead of one shape's named field) so the same walk-original/binary-search-segment/
+Fatal-on-mismatch method now runs three times per invocation -- CellsInUse, Ring_2, Ring_3_4 --
+each against its own real original file and its own real segment set, with a combined summary at
+the end. Byte-for-byte comparison matters here specifically: CellsInUse and Ring_2 records carry
+both a pattern AND an offset field, and the old Ring_3_4-only code only ever compared `.pattern`
+(the only field Ring_3_4 records have) -- a straight memcmp catches a mismatch in either field for
+every ring, not just the one Ring_3_4 happened to need.
+
 ## [1.3.1] - 2026-09-14
 
 ### LevelIndexer now always segments every ring, including CellsInUse -- consistency over optimization
