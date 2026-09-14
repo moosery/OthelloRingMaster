@@ -4,6 +4,24 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.2.3] - 2026-09-14
+
+### New disposable tool: Ring34LookupCheck -- exhaustive real verification of the indexed segments
+
+Walks every real record in a level's original (unsegmented) Ring_3_4 file and looks each one up
+through `OthelloRingMasterRing34Indexer`'s real segmented output -- binary-searching which
+segment covers it, opening+decoding that segment if it isn't already loaded, and comparing the
+record against the original. Fatals immediately on any mismatch, exercising the same segment-
+discovery-by-filename and binary-search mechanism a real production lookup would use.
+
+Reports two different timing numbers deliberately, not one, since they answer different
+questions: the overall average (dominated by near-free repeat lookups into an already-loaded
+segment, since the walk is sequential) versus segment-transition timing (only the lookups that
+triggered a genuine fresh open+decode) -- the second is the honest number that actually answers
+"how long does a real random lookup take," matching the ~5s budget this whole design targets.
+Progress reported every 1% with elapsed time and ETA, matching the established convention from
+the other Ring34-prefixed tools.
+
 ## [1.2.2] - 2026-09-14
 
 ### Fixed a real build break: RSFFileName.h never included <stdint.h> itself
