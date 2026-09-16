@@ -4,6 +4,55 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.0] - 2026-09-16
+
+### Real board-lookup CLI: CPU canonicalization + random-access store search, both built as a reusable library
+
+Closes the loop on the original "type in a board, get its level/file/offset" ask, which had been
+blocked on a real open question: CPU-only board canonicalization didn't exist anywhere -- only as
+a CUDA kernel (`dev_canonicalize`/`RingConversion.h`'s ring-order conversion), deliberately GPU-
+exclusive per `OthelloBasics.h`'s own documented scope rule ("no row-major indexing... no
+canonicalization"). Investigated the real GPU code rather than assuming: every function involved
+(`dev_bswap64`, `dev_flipDiagA1H8`, `dev_mirrorBytewise`, the rotate/mirror/flip/compare steps, the
+ring-permutation bit-gather) turned out to be pure integer bit arithmetic with zero real CUDA
+dependency -- `__device__` was a matter of the file's own organizational policy, not necessity.
+Move generation/flip computation (the actually GPU-heavy part) isn't needed at all for a lookup,
+since canonicalize only calls it to populate a transient field that isn't part of the stored key.
+
+New `BoardLookup` static library (deliberately standalone -- doesn't touch `OthelloBasics.h`/
+`OthelloBasicsForCUDA.h`/`RingConversion.h`, zero risk to the live solver/calculator's real GPU
+pipeline):
+- `BoardCanonicalize.h/.cpp` -- direct CPU port of the 16-way symmetry search, in the exact same
+  order of operations the real production kernel uses (confirmed via `RetrogradeKernels.cu`'s own
+  usage: canonicalize compares in ROW-MAJOR space, ring-conversion happens only afterward, on the
+  winner -- comparing in the wrong space would silently pick a different "canonical" board than
+  the one actually in the store). Self-checks itself on first use against a real, hand-verified
+  production constant (`OthelloBasics/BoardKeyAllocate.cpp`'s starting-position ring-ordered
+  values) -- Fatals immediately if the port doesn't reproduce it exactly, rather than silently
+  producing wrong lookups that would just look like "board not found" for everything.
+- `BoardLookupSearch.h/.cpp` -- real random-access descent (CellsInUse -> Ring_2 -> Ring_3_4)
+  against the segmented index, deliberately independent of canonicalization (a caller that already
+  has a canonical key can use this directly) -- two separately reusable pieces, not one monolithic
+  function, per direct request ("make the search routine reusable, we will reuse it in the future
+  in another project"). Level is derived directly from the board itself (`popcount(cellsInUse) -
+  4`, confirmed against `CreateSeedFile.cpp`'s own real level-0 seeding). Never loads a whole ring
+  wholesale: Ring_2/Ring_3_4's group-scoped descent decodes exactly one segment per ring, since the
+  indexer's own group-boundary alignment guarantees a parent group's children never cross a
+  segment boundary; only CellsInUse's own top-level, unbounded search could in principle need to
+  pick among several segments, and does so by VALUE using each segment's manifest-recorded
+  [minPattern,maxPattern] range rather than scanning.
+
+`OthelloRingMasterLevelIndexer`'s manifest.txt now also records each segment's own
+[minPattern,maxPattern] -- the piece that makes the above value-based segment selection possible
+at all; without it, a lookup at a deep level with thousands of segments would have to linearly
+decode them in order (tens of minutes in the worst case) instead of jumping straight to the one
+real candidate. Levels already indexed before this change need reindexing for lookups against them
+to use this; existing manifests without it will simply not have per-segment ranges to search.
+
+New `OthelloRingMasterBoardLookup` CLI: prompts for a 6x6 board (6 rows x 6 chars, space/b/w) and
+whose turn, canonicalizes it, and reports level, player, and each ring's exact segment file +
+local offset, with real lookup timing.
+
 ## [1.3.2] - 2026-09-14
 
 ### Ring34LookupCheck now validates a level's full file set, not just Ring_3_4

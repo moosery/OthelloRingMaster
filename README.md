@@ -198,6 +198,7 @@ Outputs:
 - `x64/Release/OthelloRingMasterStoreStats.exe` -- per-level CSV store statistics (read-only)
 - `x64/Release/OthelloRingMasterCalculatorCountsStats.exe` -- per-level CSV calculator counts statistics (read-only)
 - `x64/Release/OthelloRingMasterLevelIndexer.exe` -- splits a level's Ring_2 and/or Ring_3_4 files into independently-decodable segments (whichever ring's real size needs it)
+- `x64/Release/OthelloRingMasterBoardLookup.exe` -- interactive CLI: type in a board, get its level/player/segment file/offset
 
 ## Usage
 
@@ -477,6 +478,28 @@ never collides with a live solver's own I/O. Verifies its own output before repo
 Fatals if a ring's segments' combined record count doesn't exactly match its source file's real
 record count.
 
+### Board lookup
+
+```
+OthelloRingMasterBoardLookup.exe [options]
+
+  --board-size N        Board size (6 is the only real, indexed size today)  [default: 6]
+  --levelindex-drive L  Drive letter the segmented index lives on            [default: Y]
+  --levelindex-dir P    Sub-path on that drive (no drive letter)               [default: \OthelloRingMaster\Store\levelIndexDir]
+  --help                Show this help
+```
+
+Interactively prompts for a board (6 rows of 6 characters -- space/b/w) and whose turn it is, then
+reports where it lives in the real, already-indexed store: level, player, and for each of
+CellsInUse/Ring_2/Ring_3_4, which segment file and what offset within it, plus real lookup timing.
+
+Requires the level to already be indexed (see Level indexer above) -- a board from an unindexed
+level, or one that was legitimately never reached during the real solve, is a normal "not found"
+result, not an error. All the real work (canonicalization, random-access search) lives in the
+`BoardLookup` static library, not this CLI's own code -- see that project's own header comments
+for the full design, including why it's a from-scratch CPU port of the GPU's canonicalization
+kernel rather than an extension to `OthelloBasics.h`/`OthelloBasicsForCUDA.h`.
+
 Both the solver and the calculator auto-resume: if their respective output directories
 already contain completed level data, they pick up from the first incomplete level.
 Press **Ctrl+C** on the solver for a graceful shutdown -- merge loops check the terminate
@@ -600,11 +623,17 @@ OthelloRingMaster/
   GetMachineInfo.cpp / .h       Drive detection, GPU detection, benchmarking
   InitLogger.cpp / .h           Log file setup
 
-  OthelloBasics/                Board representation, move generation, canonicalization (CPU);
+  OthelloBasics/                BOARD_KEY allocate/compare/print, ring-order-only logic (CPU) --
+                                  deliberately NEVER interprets a key's bits by row/col position;
                                   RingNestedIndex.h/.cpp -- the ring nested-index builder/reader/
                                   pull-reader, shared by the solver and the calculator
-  OthelloBasicsForCUDA/          Same, compiled for device code; RingConversion.h/.cu -- the
-                                  ring<->row-major boundary conversion tables/kernels
+  OthelloBasicsForCUDA/          Row-major bit interpretation (GPU-exclusive by policy): move
+                                  generation, flip computation, canonicalization; RingConversion.h/.cu --
+                                  the ring<->row-major boundary conversion tables/kernels
+  BoardLookup/                   Standalone CPU port of canonicalization + ring conversion
+                                  (BoardCanonicalize.h/.cpp, for lookup-only use, not the live
+                                  solve pipeline) and real random-access store search
+                                  (BoardLookupSearch.h/.cpp) -- see OthelloRingMasterBoardLookup
   Utility/                       Threading, memory, clocks, drive info, logging, RingStoreFile.h/.cpp
                                   (the generic RSF record-file format, plain + shaped)
   lz4/                           Vendored LZ4 library
@@ -615,6 +644,7 @@ OthelloRingMaster/
   OthelloRingMasterStoreStats/   Per-level CSV store statistics tool (read-only, see its own --help)
   OthelloRingMasterCalculatorCountsStats/  Per-level CSV calculator counts statistics tool (read-only, see its own --help)
   OthelloRingMasterLevelIndexer/  Splits a level's Ring_2/Ring_3_4 files into segments (whichever ring needs it, see its own --help)
+  OthelloRingMasterBoardLookup/  Interactive board-lookup CLI (see its own --help)
 ```
 
 ## Related

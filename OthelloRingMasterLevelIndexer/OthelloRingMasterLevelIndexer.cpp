@@ -66,6 +66,14 @@
 **   crashed, or just an earlier run with a different --target-size) can
 **   never leave a manifest that still looks valid over the wrong data.
 **
+**   The manifest also carries each segment's own [minPattern, maxPattern]
+**   (that segment's first and last record's `.pattern` value, since the
+**   whole ring is one globally sorted stream just physically chunked) --
+**   this is what lets a real value-based lookup (see BoardLookup/
+**   BoardLookupSearch.h) binary-search which ONE segment to decode instead
+**   of scanning every segment in ordinal order, which would take minutes
+**   at levels with thousands of segments.
+**
 **   Reads from the live store's storeDir (read-only) and writes segments
 **   to a dedicated --levelindex-dir, kept entirely separate from
 **   storeDir/storeMergeDir/writerDir so this never collides with a live
@@ -151,6 +159,42 @@ static int RSFShapeSize(RSFRecordShape shape)
     Fatal(FATAL_MERGE_LOGIC_ERROR, "RSFShapeSize: unsupported shape %d", (int)shape);
     return 0;
 }
+
+/*
+** Function: ExtractPattern
+** @brief    Pulls a record's own `.pattern` field out as a uniform uint64_t
+**           regardless of shape -- CellsInUse/Ring_2 carry it in the first
+**           8/4 bytes respectively, Ring_3_4 in its only 2 bytes. Used to
+**           track each segment's own min/max pattern for the manifest, so
+**           a future value-based lookup can binary-search which segment to
+**           open without decoding every one of them first.
+*/
+static uint64_t ExtractPattern(RSFRecordShape shape, const uint8_t* rec)
+{
+    switch (shape)
+    {
+        case RSF_SHAPE_PAIR64:     return reinterpret_cast<const UINT64_PAIR*>(rec)->hi;
+        case RSF_SHAPE_RING_LEVEL: return (uint64_t)reinterpret_cast<const RingLevelRec*>(rec)->pattern;
+        case RSF_SHAPE_LEAF16:     return (uint64_t)reinterpret_cast<const Ring34Rec*>(rec)->pattern;
+    }
+    Fatal(FATAL_MERGE_LOGIC_ERROR, "ExtractPattern: unsupported shape %d", (int)shape);
+    return 0;
+}
+
+/*
+** Type:    SegmentPatternRange
+** @brief   One finished segment's own [minPattern, maxPattern] -- since
+**          the whole ring is one globally sorted stream just physically
+**          chunked, a segment's first record written is always its min
+**          and its last is always its max. Written into the manifest so a
+**          value-based lookup can pick the one right segment directly.
+*/
+struct SegmentPatternRange
+{
+    uint64_t startOrdinal;
+    uint64_t minPattern;
+    uint64_t maxPattern;
+};
 
 /*
 ** Function: PurgeExistingSegments
@@ -417,6 +461,9 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     uint64_t totalSegmentBytes   = 0;
     uint64_t minSegBytes = UINT64_MAX, maxSegBytes = 0;
 
+    std::vector<SegmentPatternRange> segRanges;
+    uint64_t segMinPattern = UINT64_MAX, segMaxPattern = 0;
+
     std::vector<uint8_t> batch((size_t)STREAM_BATCH * recSize);
     int n;
     uint64_t processed = 0;
@@ -450,6 +497,9 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
                 totalSegmentBytes += segBytes;
                 if (segBytes < minSegBytes) minSegBytes = segBytes;
                 if (segBytes > maxSegBytes) maxSegBytes = segBytes;
+                segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
+                segMinPattern = UINT64_MAX;
+                segMaxPattern = 0;
 
                 segmentStartOrdinal = currentOrdinal;
                 recordsInSegment    = 0;
@@ -461,6 +511,9 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
             }
 
             RSFWriterRecordShaped(pw, &batch[(size_t)i * recSize]);
+            uint64_t recPattern = ExtractPattern(sourceShape, &batch[(size_t)i * recSize]);
+            if (recPattern < segMinPattern) segMinPattern = recPattern;
+            if (recPattern > segMaxPattern) segMaxPattern = recPattern;
             recordsInSegment++;
             currentOrdinal++;
 
@@ -502,6 +555,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
         totalSegmentBytes += segBytes;
         if (segBytes < minSegBytes) minSegBytes = segBytes;
         if (segBytes > maxSegBytes) maxSegBytes = segBytes;
+        segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
     }
 
     /* Never silently report success on a mismatch -- if the segmented
@@ -526,6 +580,17 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     fprintf(mf, "segmentCount=%llu\n", (unsigned long long)segmentCount);
     fprintf(mf, "targetBytes=%llu\n", (unsigned long long)targetBytes);
     fprintf(mf, "sourceOnDiskBytes=%llu\n", (unsigned long long)origOnDiskBytes);
+    /* Per-segment [min,max] pattern, keyed by that segment's own starting
+    ** ordinal (same hex form as its filename) -- lets a value-based lookup
+    ** binary-search which ONE segment to decode instead of scanning every
+    ** segment in order, which would be minutes at levels with thousands
+    ** of segments.
+    */
+    for (const auto& r : segRanges)
+    {
+        fprintf(mf, "seg%016llx.minPattern=%016llx\n", (unsigned long long)r.startOrdinal, (unsigned long long)r.minPattern);
+        fprintf(mf, "seg%016llx.maxPattern=%016llx\n", (unsigned long long)r.startOrdinal, (unsigned long long)r.maxPattern);
+    }
     fclose(mf);
 
     char totalStr[32], origStr[32], avgStr[32], minStr[32], maxStr[32];
