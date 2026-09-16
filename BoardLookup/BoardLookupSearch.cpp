@@ -426,8 +426,10 @@ BoardLookupResult FindBoardInStore(uint64_t ringCellsInUse, uint64_t ringCellCol
     RSFNameLevelIndexDir(levelDir, sizeof(levelDir), levelIndexDir, boardSize, level, player);
 
     char errBuf[256];
+    LARGE_INTEGER ringT0, ringT1;
 
     /* --- CellsInUse: unrestricted top-level search --- */
+    QueryPerformanceCounter(&ringT0);
     RingIndex cellsInUseIdx;
     if (!LoadRingIndex(levelDir, "CellsInUse", RSF_SHAPE_PAIR64, &cellsInUseIdx, errBuf, sizeof(errBuf)))
     {
@@ -439,11 +441,15 @@ BoardLookupResult FindBoardInStore(uint64_t ringCellsInUse, uint64_t ringCellCol
         FoundRecord cellsInUseFound;
         if (!SearchUnrestricted(cellsInUseIdx, ringCellsInUse, &cellsInUseFound))
         {
+            QueryPerformanceCounter(&ringT1);
+            result.cellsInUseLoc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
             snprintf(result.notFoundReason, sizeof(result.notFoundReason),
                       "level %d: this board's CellsInUse pattern was never reached during the solve", level);
             goto done;
         }
         result.cellsInUseLoc = cellsInUseFound.loc;
+        QueryPerformanceCounter(&ringT1);
+        result.cellsInUseLoc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
 
         if (!RingNestedIndexHasRing2(boardSize))
         {
@@ -454,6 +460,7 @@ BoardLookupResult FindBoardInStore(uint64_t ringCellsInUse, uint64_t ringCellCol
         }
 
         /* --- Ring_2: descent restricted to this CellsInUse group's span --- */
+        QueryPerformanceCounter(&ringT0);
         RingIndex ring2Idx;
         if (!LoadRingIndex(levelDir, "Ring2", RSF_SHAPE_RING_LEVEL, &ring2Idx, errBuf, sizeof(errBuf)))
         {
@@ -474,13 +481,18 @@ BoardLookupResult FindBoardInStore(uint64_t ringCellsInUse, uint64_t ringCellCol
         FoundRecord ring2Found;
         if (!SearchRestricted(ring2Idx, ring2RangeStart, ring2RangeEnd, (uint64_t)ring2Pattern, &ring2Found))
         {
+            QueryPerformanceCounter(&ringT1);
+            result.ring2Loc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
             snprintf(result.notFoundReason, sizeof(result.notFoundReason),
                       "level %d: CellsInUse pattern found, but no matching Ring_2 child -- store is inconsistent, or this exact color arrangement was never reached", level);
             goto done;
         }
         result.ring2Loc = ring2Found.loc;
+        QueryPerformanceCounter(&ringT1);
+        result.ring2Loc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
 
         /* --- Ring_3_4: descent restricted to this Ring_2 group's span --- */
+        QueryPerformanceCounter(&ringT0);
         RingIndex ring34Idx;
         if (!LoadRingIndex(levelDir, "Ring34", RSF_SHAPE_LEAF16, &ring34Idx, errBuf, sizeof(errBuf)))
         {
@@ -495,11 +507,15 @@ BoardLookupResult FindBoardInStore(uint64_t ringCellsInUse, uint64_t ringCellCol
         FoundRecord ring34Found;
         if (!SearchRestricted(ring34Idx, ring34RangeStart, ring34RangeEnd, (uint64_t)ring34Pattern, &ring34Found))
         {
+            QueryPerformanceCounter(&ringT1);
+            result.ring34Loc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
             snprintf(result.notFoundReason, sizeof(result.notFoundReason),
                       "level %d: Ring_2 pattern found, but no matching Ring_3_4 child -- store is inconsistent, or this exact board was never reached", level);
             goto done;
         }
         result.ring34Loc = ring34Found.loc;
+        QueryPerformanceCounter(&ringT1);
+        result.ring34Loc.elapsedSeconds = (double)(ringT1.QuadPart - ringT0.QuadPart) / (double)freq.QuadPart;
         result.found = true;
     }
 

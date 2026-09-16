@@ -177,14 +177,17 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    printf("\nFOUND. (lookup took %.6f seconds)\n\n", result.elapsedSeconds);
-    printf("  CellsInUse: global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+    printf("\nFOUND. (total lookup took %.6f seconds)\n\n", result.elapsedSeconds);
+    printf("  CellsInUse: %.6fs -- global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+           result.cellsInUseLoc.elapsedSeconds,
            (unsigned long long)result.cellsInUseLoc.globalOrdinal, result.cellsInUseLoc.segmentPath,
            (unsigned long long)result.cellsInUseLoc.segmentStartOrdinal, (unsigned long long)result.cellsInUseLoc.localIndexInSegment);
-    printf("  Ring_2:     global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+    printf("  Ring_2:     %.6fs -- global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+           result.ring2Loc.elapsedSeconds,
            (unsigned long long)result.ring2Loc.globalOrdinal, result.ring2Loc.segmentPath,
            (unsigned long long)result.ring2Loc.segmentStartOrdinal, (unsigned long long)result.ring2Loc.localIndexInSegment);
-    printf("  Ring_3_4:   global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+    printf("  Ring_3_4:   %.6fs -- global ordinal %llu -- segment '%s'  (starts at %llu, local index %llu)\n",
+           result.ring34Loc.elapsedSeconds,
            (unsigned long long)result.ring34Loc.globalOrdinal, result.ring34Loc.segmentPath,
            (unsigned long long)result.ring34Loc.segmentStartOrdinal, (unsigned long long)result.ring34Loc.localIndexInSegment);
 

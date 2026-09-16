@@ -4,6 +4,19 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.1] - 2026-09-16
+
+### Board lookup reports per-ring timing, not just a total
+
+Real live validation this session's testing surfaced: v1.4.0's total-only timing hid that CellsInUse
+and Ring_2 stay fast at every real level tested so far while Ring_3_4 is the ring that dominates
+once it actually needs multiple segments (level 17's real test: 9.5s total, first real confirmation
+the manifest's value-based segment selection picks a genuinely non-first segment correctly). Added
+`elapsedSeconds` to `RingLocation` (`BoardLookup/BoardLookupSearch.h`) -- timed independently per
+ring (load its manifest/segment listing + search it), set on both the found and not-found path so a
+partial failure still shows how long that ring's search ran before giving up. `OthelloRingMasterBoardLookup`
+now prints each ring's own time alongside its segment/offset.
+
 ## [1.4.0] - 2026-09-16
 
 ### Real board-lookup CLI: CPU canonicalization + random-access store search, both built as a reusable library

@@ -63,6 +63,7 @@ struct RingLocation
     uint64_t segmentStartOrdinal  = 0;
     uint64_t localIndexInSegment  = 0;
     uint64_t childOffset          = 0;                        /* this record's own `.offset` field -- where ITS children start in the next ring down (0 / unused for Ring_3_4, which has none) */
+    double   elapsedSeconds       = 0.0;                      /* real time spent resolving THIS ring alone -- loading its manifest/segment listing plus the search itself, not the other rings */
 };
 
 /*
