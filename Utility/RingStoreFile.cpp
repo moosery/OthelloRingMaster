@@ -506,6 +506,24 @@ void RSFWriterRecordShaped(RSFWriter* pw, const void* pRecord)
 }
 
 /*
+** Function: RSFWriterBytesWrittenSoFar
+** @brief    Implements RingStoreFile.h's own declaration -- see there for
+**           the real motivation (lets a caller check a size trigger
+**           mid-stream instead of estimating from a whole different
+**           file's average bytes/record).
+*/
+uint64_t RSFWriterBytesWrittenSoFar(RSFWriter* pw)
+{
+    if (pw->compressed)
+        return pw->compBytesTotal;
+    /* Plain writer: fixed-size records, no compression -- same formula
+    ** RSFWriterClose itself uses for fileBytes, just without the trailer
+    ** (not written until close).
+    */
+    return pw->count * (uint64_t)pw->recordBytes;
+}
+
+/*
 ** Function: RSFWriterClose
 ** @brief    Flushes any pending output, writes the trailer, closes the
 **           writer, and frees it.

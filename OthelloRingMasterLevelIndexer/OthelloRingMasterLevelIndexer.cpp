@@ -57,6 +57,22 @@
 **   point where a boundary parent exists: once crossed, the cut waits for
 **   the *next* real group boundary rather than firing immediately.
 **
+**   The size trigger itself checks each segment's REAL compressed bytes
+**   written so far (RSFWriterBytesWrittenSoFar, Utility/RingStoreFile.h),
+**   not an estimate. An earlier version computed one average bytes/record
+**   from the whole source file's own real totals and used records-written
+**   as a proxy -- workable, but only possible because this runs as a
+**   post-pass over an already-finished file with a known total. A live
+**   writer (the eventual solver-native version this is meant to prepare
+**   for) would never have that average available in advance, so it would
+**   inevitably compute a different one and land on different segment
+**   boundaries than this tool did, even against identical data. Checking
+**   real bytes instead makes segmenting a pure function of the record
+**   stream itself -- same data in, same segment boundaries out, whether
+**   this tool built them as a post-pass or a future solver builds them
+**   natively while writing. That reproducibility, not just simplicity, is
+**   why this was worth changing.
+**
 **   A ring's segment directory only gets a manifest.txt once segmenting
 **   completes AND self-verifies (segmented record count matches the
 **   source's real record count exactly) -- this is the one thing a lookup
@@ -437,15 +453,13 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     if (totalRecords == 0)
         Fatal(FATAL_FILE_OPEN, "Source '%s' has zero records, nothing to index", sourcePath);
 
-    double   bytesPerRecord          = (double)origOnDiskBytes / (double)totalRecords;
-    uint64_t recordsPerChunkEstimate = (uint64_t)((double)targetBytes / bytesPerRecord);
-    if (recordsPerChunkEstimate < 1) recordsPerChunkEstimate = 1;
-
     printf("Source: '%s'\n", sourcePath);
-    printf("Real records: %llu, real on-disk compressed bytes: %llu (%.6f bytes/record average)\n",
-           (unsigned long long)totalRecords, (unsigned long long)origOnDiskBytes, bytesPerRecord);
-    printf("Target segment size: %llu bytes (~%llu records/segment estimate)\n\n",
-           (unsigned long long)targetBytes, (unsigned long long)recordsPerChunkEstimate);
+    printf("Real records: %llu, real on-disk compressed bytes: %llu\n",
+           (unsigned long long)totalRecords, (unsigned long long)origOnDiskBytes);
+    printf("Target segment size: %llu bytes -- checked against each segment's own real\n"
+           "compressed bytes as it's written (RSFWriterBytesWrittenSoFar), not estimated\n"
+           "from this file's average bytes/record.\n\n",
+           (unsigned long long)targetBytes);
 
     int recSize = RSFShapeSize(sourceShape);
 
@@ -454,7 +468,6 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     RSFWriter* pw = RSFWriterOpenZLShaped(firstSegPath, sourceShape);
 
     uint64_t segmentStartOrdinal = 0;
-    uint64_t recordsInSegment    = 0;
     uint64_t currentOrdinal      = 0;
     bool     cutRequested        = false;
     uint64_t segmentCount        = 0;
@@ -502,7 +515,6 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
                 segMaxPattern = 0;
 
                 segmentStartOrdinal = currentOrdinal;
-                recordsInSegment    = 0;
                 cutRequested        = false;
 
                 char segPath[MAX_FULL_PATH_NAME];
@@ -514,10 +526,13 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
             uint64_t recPattern = ExtractPattern(sourceShape, &batch[(size_t)i * recSize]);
             if (recPattern < segMinPattern) segMinPattern = recPattern;
             if (recPattern > segMaxPattern) segMaxPattern = recPattern;
-            recordsInSegment++;
             currentOrdinal++;
 
-            if (!cutRequested && recordsInSegment >= recordsPerChunkEstimate)
+            /* Real bytes actually written to THIS segment so far, not an
+            ** estimate derived from the source file's average bytes/record
+            ** -- see RSFWriterBytesWrittenSoFar's own Notes.
+            */
+            if (!cutRequested && RSFWriterBytesWrittenSoFar(pw) >= targetBytes)
                 cutRequested = true;
         }
 

@@ -189,6 +189,22 @@ RSFWriter* RSFWriterOpenZMemShaped(uint8_t* buf, size_t maxBytes, RSFRecordShape
 void RSFWriterRecord(RSFWriter* pw, const UINT64_PAIR* pRec);
 
 /*
+** Function: RSFWriterBytesWrittenSoFar
+** @brief    Real compressed bytes actually flushed to this writer's
+**           destination so far -- the SAME running total RSFWriterClose's
+**           own pFileBytes eventually reports, just readable mid-stream
+**           instead of only after closing. Lags slightly behind what's
+**           logically been written (records sitting in the pending
+**           varint buffer haven't been compressed/flushed yet), bounded by
+**           RSF_COMP_WRITE_BUFFER_SIZE -- negligible against a real
+**           multi-hundred-MB segment-size trigger. For a plain/uncompressed
+**           writer this is exactly the file's real byte count so far.
+** @param    pw - the writer to query (must still be open)
+** @return   Real bytes written so far.
+*/
+uint64_t RSFWriterBytesWrittenSoFar(RSFWriter* pw);
+
+/*
 ** Function: RSFWriterClose
 ** @brief    Flushes any pending output, writes the trailer, closes the
 **           writer, and frees it.

@@ -4,6 +4,30 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.2] - 2026-09-19
+
+### Indexer's segment-size trigger now checks real bytes, not an estimate
+
+Direct question that led here: "why are we doing bytes-per-record math? The check should be 'has
+the file hit 500MB', shouldn't it?" -- correct, and the only reason it wasn't already exactly that
+is `RSFWriter` never exposed a way to ask "how many real bytes have I written so far" mid-stream;
+the only way to learn a segment's real size used to be `RSFWriterClose()`, which ends the segment.
+New `RSFWriterBytesWrittenSoFar()` (`Utility/RingStoreFile.h/.cpp`) exposes the running total the
+writer already tracked internally (`compBytesTotal` for compressed writers, `count * recordBytes`
+for plain ones) -- purely additive, nothing existing changes signature or behavior.
+
+The indexer's segment-cut check is now literally `RSFWriterBytesWrittenSoFar(pw) >= targetBytes`,
+replacing the old `bytesPerRecord`-derived records-per-chunk estimate entirely (dead code removed,
+including the now-unused `recordsInSegment` counter). This isn't just simpler -- it makes
+segmenting reproducible across contexts: the old estimate only worked because this tool runs as a
+post-pass over an already-finished file with a known total record/byte count in advance. A live
+writer (the eventual solver-native version this whole design is meant to prepare for) would never
+have that average available ahead of time, so it would inevitably compute a different one and land
+on different segment boundaries than this tool did, even against identical data. Checking real
+bytes instead makes the segment-cut decision a pure function of the record stream itself -- same
+data in, same segment boundaries out, regardless of whether a post-pass tool or a future live
+writer produces them.
+
 ## [1.4.1] - 2026-09-16
 
 ### Board lookup reports per-ring timing, not just a total
