@@ -434,7 +434,7 @@ OthelloRingMasterLevelIndexer.exe --level N [options]
   --store-dir P       Sub-path on store drive (no drive letter)                [default: \OthelloRingMaster\Store]
   --levelindex-drive L  Drive letter for the level-index output              [default: Y]
   --levelindex-dir P  Sub-path on that drive (no drive letter)                [default: \OthelloRingMaster\Store\levelIndexDir]
-  --target-size SIZE  Nominal segment size trigger (e.g. 500MB)                [default: 500MB]
+  --target-size SIZE  Nominal segment size trigger (e.g. 100MB)                [default: 100MB]
   --help              Show this help
 ```
 
@@ -459,11 +459,16 @@ across two files; once the `--target-size` trigger crosses, the actual cut waits
 group boundary. CellsInUse sits at the root of the hierarchy with no parent to align to, so it has
 no such constraint -- its cuts fire immediately once the trigger crosses.
 
-The default 500MB target was chosen from real measurements (`Ring34SegmentSizeCheck`) showing
+500MB was the original target, chosen from real measurements (`Ring34SegmentSizeCheck`) showing
 ~3.8-3.9s decode time per segment with ~0.00% compression-ratio cost, confirmed on real Ring_3_4
-data at levels 16 and 20. Real per-level sizes show Ring_3_4 crosses that threshold around level
-14 and Ring_2 around level 17 -- no need to hardcode either number, since the tool checks real
-size directly.
+data at levels 16 and 20. A later real, measured comparison against the exact same real board at
+level 16 -- not just a scaled-down projection -- found 100MB gives a further ~4.3x real total
+lookup speedup (10.37s -> 2.42s), with ~0.00% compression-ratio cost still holding and no
+measurable fixed per-segment overhead from the extra file opens, so 100MB is now the default.
+Real segments-per-level grow accordingly (Ring_3_4 alone: 20 -> 96 segments at level 16),
+acceptable at real NTFS/lookup scale since a lookup never enumerates a directory to begin with --
+segment boundaries are self-detecting either way, since the tool checks each ring's real size
+directly rather than hardcoding a level number.
 
 A ring's segment directory only gets a `manifest.txt` once segmenting completes and self-verifies
 (segmented record count matches the source exactly) -- that manifest's presence is what a lookup

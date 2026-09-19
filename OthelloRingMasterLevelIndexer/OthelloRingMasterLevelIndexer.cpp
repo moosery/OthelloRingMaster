@@ -7,11 +7,19 @@
 **   independently-decodable segments, each named by its own starting
 **   global record ordinal in hex, so a plain directory listing already
 **   sorts the same as ordinal order -- no separate index file needed. See
-**   project_othello_web_ui_design memory (2026-09-13/14 sections) for the
-**   full design and the real, validated numbers this is built on:
-**   ~500MB segments land at ~3.8-3.9s decode time (comfortably under the
-**   ~5s lookup budget) with ~0.00% compression-ratio cost, confirmed on
-**   real Ring_3_4 data at levels 16 and 20.
+**   project_othello_web_ui_design memory (2026-09-13/14 sections, and the
+**   2026-09-19 100MB re-validation) for the full design and the real,
+**   validated numbers this is built on: ~500MB was the original target
+**   (~3.8-3.9s decode, ~0.00% compression-ratio cost, real Ring_3_4 data
+**   at levels 16 and 20), but a real, measured comparison against the
+**   SAME real board at level 16 -- not just a smaller-scale projection --
+**   found 100MB gives a further ~4.3x real total lookup speedup (10.37s
+**   -> 2.42s) with ~0.00% compression-ratio cost still holding and no
+**   measurable fixed per-segment overhead, so 100MB is now the default.
+**   Real segments-per-level do grow accordingly (Ring_3_4 alone: 20 -> 96
+**   segments at level 16), acceptable at real NTFS/lookup scale since a
+**   lookup never enumerates a directory to begin with (see this file's
+**   own manifest Notes below).
 **
 **   Started as a Ring_3_4-only tool (originally
 **   OthelloRingMasterRing34Indexer), then generalized once real Ring_2
@@ -683,7 +691,7 @@ static void PrintUsage(const char* prog)
     printf("  --store-dir P       Sub-path on store drive (no drive letter)                  [default: \\OthelloRingMaster\\Store]\n");
     printf("  --levelindex-drive L  Drive letter for the level-index output               [default: Y]\n");
     printf("  --levelindex-dir P  Sub-path on that drive (no drive letter)                  [default: \\OthelloRingMaster\\Store\\levelIndexDir]\n");
-    printf("  --target-size SIZE  Nominal segment size trigger (e.g. 500MB)                 [default: 500MB]\n");
+    printf("  --target-size SIZE  Nominal segment size trigger (e.g. 100MB)                 [default: 100MB]\n");
     printf("  --help              Show this help\n\n");
     printf("Always segments all three rings (CellsInUse, Ring_2, Ring_3_4) -- even one well\n");
     printf("under --target-size still gets exactly one segment, for a single consistent\n");
@@ -705,7 +713,7 @@ int main(int argc, char* argv[])
     char storeDirNoDrive[MAX_FULL_PATH_NAME]      = "\\OthelloRingMaster\\Store";
     char levelIndexDrive = 'Y';
     char levelIndexDirNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store\\levelIndexDir";
-    char targetSizeArg[32] = "500MB";
+    char targetSizeArg[32] = "100MB";
 
     for (int i = 1; i < argc; i++)
     {

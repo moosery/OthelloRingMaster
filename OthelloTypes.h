@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.4.5"
+#define VERSION "1.4.6"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */

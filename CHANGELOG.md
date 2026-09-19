@@ -4,6 +4,42 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.6] - 2026-09-19
+
+### Default segment target lowered to 100MB -- real, measured ~4.3x lookup speedup
+
+Real question: would a smaller trigger speed up lookups? Rather than trust the linear-scaling
+theory, ran `Ring34SegmentSizeCheck` at 100/250/500MB on real level 16 data first (compression
+ratio held at +0.00% across all three, resolving one real risk), then went further: actually
+reindexed level 16 at 100MB into a separate directory and ran the SAME real board lookup already
+measured at 500MB, for a genuine before/after comparison instead of a projection.
+
+Real numbers, same board, same data:
+
+| Ring       | 500MB   | 100MB   | Speedup |
+|------------|---------|---------|---------|
+| CellsInUse | 0.883s  | 0.783s  | ~unchanged (1 segment either way) |
+| Ring_2     | 4.551s  | 0.852s  | ~5.3x |
+| Ring_3_4   | 4.744s  | 0.763s  | ~6.2x |
+| **Total**  | **10.37s** | **2.42s** | **~4.3x** |
+
+The measured Ring_3_4 number (0.763s) landed almost exactly on the earlier *projected* estimate
+(0.78s) from the size-check benchmark -- no hidden fixed per-segment overhead (file-open latency
+over Y:'s NAS mount, etc.) showed up in practice, resolving the other real risk. Ring_2's win was
+larger than the pure size ratio predicts because at 500MB, level 16's real Ring_2 file (486MB)
+was landing in exactly ONE segment -- the old default wasn't actually segmenting Ring_2 at this
+level at all, so every lookup was paying for the whole file; at 100MB it's 5 real segments, so a
+lookup only pays for the one it needs.
+
+`OthelloRingMasterLevelIndexer`'s `--target-size` default changed from `500MB` to `100MB`. Real
+segment counts grow accordingly (Ring_3_4 alone: 20 -> 96 segments for level 16), acceptable
+given a lookup never enumerates a directory (see 1.4.4/1.4.5).
+
+**Levels indexed under the old 500MB default still work fine as-is** -- this only changes what
+NEW indexer runs default to; nothing needs reindexing because of this change alone. Levels
+already reindexed under 1.4.5's manifest format (like the just-completed 0-21 sweep) are
+unaffected -- their segment sizes just reflect whatever `--target-size` was passed at the time.
+
 ## [1.4.5] - 2026-09-19
 
 ### Ring_2/Ring_3_4 manifest entries drop the unused min/max fields entirely
