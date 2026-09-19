@@ -294,12 +294,20 @@ static inline void RSFNameRingManifestFile(char* out, size_t outSize,
 ** built as a post-pass (today's indexer) or by a live writer that only
 ** learns its own final counts at the very end, same as RSFWriterClose.
 **
-** Layout: zero or more fixed-width entry lines (only for a ring with no
-** parent to align to -- see OthelloRingMasterLevelIndexer.cpp's own
-** Notes on why a ring WITH a parent has no meaningful per-segment value
-** range to record at all), each exactly RSF_MANIFEST_ENTRY_WIDTH bytes:
+** Layout: one fixed-width entry line PER SEGMENT, for EVERY ring (never
+** zero -- a lookup must never fall back to an OS directory listing to
+** find which segment holds a given ordinal, so every ring's own segment
+** list lives here too, not just a value-searchable ring's), each exactly
+** RSF_MANIFEST_ENTRY_WIDTH bytes:
 **
 **   "%016llx %016llx %016llx\n"   (startOrdinal minPattern maxPattern)
+**
+** minPattern/maxPattern are only real for a ring with no parent to align
+** to (CellsInUse); a ring WITH a parent (Ring_2/Ring_3_4) writes 0/0 for
+** both -- see OthelloRingMasterLevelIndexer.cpp's own Notes on why a
+** segment-wide pattern range would be meaningless there. Those rings are
+** still found by ordinal alone, binary-searched the same way CellsInUse
+** is searched by value (see BoardLookup/BoardLookupSearch.cpp).
 **
 ** ...followed by the fixed RSF_MANIFEST_TRAILER_WIDTH-byte trailer, one
 ** field per line, hex-padded to a fixed width for the same reason the

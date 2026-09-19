@@ -82,13 +82,17 @@
 **   crashed, or just an earlier run with a different --target-size) can
 **   never leave a manifest that still looks valid over the wrong data.
 **
-**   The manifest also carries each segment's own [minPattern, maxPattern]
-**   (that segment's first and last record's `.pattern` value, since the
-**   whole ring is one globally sorted stream just physically chunked) --
-**   this is what lets a real value-based lookup (see BoardLookup/
-**   BoardLookupSearch.h) binary-search which ONE segment to decode instead
-**   of scanning every segment in ordinal order, which would take minutes
-**   at levels with thousands of segments.
+**   The manifest carries one entry per segment for EVERY ring -- its own
+**   starting ordinal always, plus [minPattern, maxPattern] for a root
+**   ring only (CellsInUse; written as 0/0 for Ring_2/Ring_3_4, where a
+**   segment-wide pattern range would be meaningless -- see this file's
+**   own per-record Notes below). This is deliberate: a lookup must never
+**   fall back to an OS directory listing to find which segment holds a
+**   given ordinal or value, even for Ring_2/Ring_3_4's ordinal-only
+**   descent -- see BoardLookup/BoardLookupSearch.h, which binary-searches
+**   the manifest directly (one seek+read per comparison) for every ring,
+**   deriving each candidate segment's path from its ordinal rather than
+**   ever reading a directory listing.
 **
 **   Reads from the live store's storeDir (read-only) and writes segments
 **   to a dedicated --levelindex-dir, kept entirely separate from
@@ -96,7 +100,8 @@
 **   solver's own active I/O. Each level/player gets its own directory
 **   under there, and each ring gets its own subdirectory within that --
 **   a single level can produce thousands of segments per ring, so this
-**   keeps any one directory listing small.
+**   keeps any one directory listing small (not that a lookup ever lists
+**   one -- see above).
 */
 
 /* Includes */
@@ -510,12 +515,18 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
                 totalSegmentBytes += segBytes;
                 if (segBytes < minSegBytes) minSegBytes = segBytes;
                 if (segBytes > maxSegBytes) maxSegBytes = segBytes;
-                if (!alignToBoundary)
-                {
-                    segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
-                    segMinPattern = UINT64_MAX;
-                    segMaxPattern = 0;
-                }
+                /* Every ring records its own ordinal list -- a lookup must
+                ** never fall back to an OS directory listing to find which
+                ** segment holds a given ordinal/value. Only a root ring
+                ** (CellsInUse) has a real min/max to go with it; a ring
+                ** with a parent writes 0/0 (see this file's own Notes) --
+                ** its own segment is instead found by ordinal alone,
+                ** binary-searched the same way.
+                */
+                segRanges.push_back({ segmentStartOrdinal, alignToBoundary ? 0 : segMinPattern,
+                                       alignToBoundary ? 0 : segMaxPattern });
+                segMinPattern = UINT64_MAX;
+                segMaxPattern = 0;
 
                 segmentStartOrdinal = currentOrdinal;
                 cutRequested        = false;
@@ -583,8 +594,8 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
         totalSegmentBytes += segBytes;
         if (segBytes < minSegBytes) minSegBytes = segBytes;
         if (segBytes > maxSegBytes) maxSegBytes = segBytes;
-        if (!alignToBoundary)
-            segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
+        segRanges.push_back({ segmentStartOrdinal, alignToBoundary ? 0 : segMinPattern,
+                               alignToBoundary ? 0 : segMaxPattern });
     }
 
     /* Never silently report success on a mismatch -- if the segmented
@@ -602,12 +613,13 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     ** the one signal a lookup consumer should trust to know this ring is
     ** really, safely segmented (see this file's own Notes). Fixed-width
     ** format (RSFFileName.h's own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH
-    ** Notes): zero or more fixed-width entry lines (only ever non-empty
-    ** for a ring with no parent -- CellsInUse), then the fixed-width
-    ** trailer, so a reader can find the trailer via one file-size check,
-    ** no sequential parse. BINARY mode is required -- text mode would
-    ** translate '\n' to '\r\n' on Windows and silently break every one of
-    ** these byte-width guarantees.
+    ** Notes): one fixed-width entry line per segment for EVERY ring (so a
+    ** lookup never needs an OS directory listing to find which segment
+    ** holds a given ordinal), then the fixed-width trailer, so a reader
+    ** can find the trailer via one file-size check, no sequential parse.
+    ** BINARY mode is required -- text mode would translate '\n' to
+    ** '\r\n' on Windows and silently break every one of these byte-width
+    ** guarantees.
     */
     FILE* mf = fopen(manifestPath, "wb");
     if (!mf)

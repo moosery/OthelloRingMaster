@@ -4,6 +4,38 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.4] - 2026-09-19
+
+### Manifest carries every ring's own ordinal list -- no OS directory listing, ever
+
+Direct correction: "I don't want to query the OS to get the file list. That takes too long.
+Having the file list in your manifest made sense. Also, it had the 'ordinal' in there so that you
+could find which file to use. But you'd have to binary search to find that rather than do a
+linear search, right? So why did you remove it?" -- 1.4.3 conflated two separate things that
+shouldn't have been conflated: the min/max VALUE range (genuinely meaningless for Ring_2/Ring_3_4,
+correctly dropped) and the per-segment ORDINAL list (needed by every ring regardless of whether it
+also tracks a value range, and wrongly dropped along with the min/max). Without it,
+`SearchRestricted` (Ring_2/Ring_3_4's descent) had no way to find which segment holds a given
+ordinal except falling back to `FindFirstFileA`/`FindNextFileA` -- a real, avoidable OS directory
+query, worse over Y:'s NAS mount.
+
+Every ring now gets one manifest entry per segment again (startOrdinal always meaningful;
+minPattern/maxPattern real only for CellsInUse, written as 0/0 for Ring_2/Ring_3_4 where they'd be
+meaningless). `SearchRestricted` now binary-searches the manifest by ORDINAL the same seek-based
+way `SearchUnrestricted` already searched by value -- find the last entry whose startOrdinal <=
+the target ordinal, then derive that segment's real path directly from
+`RSFNameRingSegmentFile(ringSegmentDir, startOrdinal)`, no path ever read from anywhere but
+recomputed from the naming convention. `ComputeGroupEnd` (peeking the next segment's first record
+when a match lands on the last record of its own) now walks manifest entry index+1 the same way,
+instead of indexing into a directory-derived segment list. `DiscoverSegments`/`FindFirstFileA` is
+gone from `BoardLookup/BoardLookupSearch.cpp` entirely -- a lookup now touches the filesystem only
+to open the manifest and the one or two segment files it actually needs, never to list a
+directory.
+
+**Breaking format change again**: levels indexed under 1.4.3 need reindexing once more -- that
+format dropped Ring_2/Ring_3_4's ordinal entries, which this version restores in a different (and
+now final) shape.
+
 ## [1.4.3] - 2026-09-19
 
 ### Manifest redesign: fixed-width, trailer-at-the-bottom, no meaningless Ring_2/Ring_3_4 ranges
