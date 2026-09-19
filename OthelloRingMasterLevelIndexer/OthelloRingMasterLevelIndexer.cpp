@@ -510,9 +510,12 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
                 totalSegmentBytes += segBytes;
                 if (segBytes < minSegBytes) minSegBytes = segBytes;
                 if (segBytes > maxSegBytes) maxSegBytes = segBytes;
-                segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
-                segMinPattern = UINT64_MAX;
-                segMaxPattern = 0;
+                if (!alignToBoundary)
+                {
+                    segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
+                    segMinPattern = UINT64_MAX;
+                    segMaxPattern = 0;
+                }
 
                 segmentStartOrdinal = currentOrdinal;
                 cutRequested        = false;
@@ -523,9 +526,19 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
             }
 
             RSFWriterRecordShaped(pw, &batch[(size_t)i * recSize]);
-            uint64_t recPattern = ExtractPattern(sourceShape, &batch[(size_t)i * recSize]);
-            if (recPattern < segMinPattern) segMinPattern = recPattern;
-            if (recPattern > segMaxPattern) segMaxPattern = recPattern;
+            /* Pattern min/max is only meaningful for a ring with no parent
+            ** (CellsInUse) -- a ring WITH a parent (Ring_2/Ring_3_4) only
+            ** sorts monotonically WITHIN each parent group, resetting at
+            ** every group boundary, so a segment-wide range would collapse
+            ** to nearly the whole field width and mean nothing. See this
+            ** file's own top-of-file Notes.
+            */
+            if (!alignToBoundary)
+            {
+                uint64_t recPattern = ExtractPattern(sourceShape, &batch[(size_t)i * recSize]);
+                if (recPattern < segMinPattern) segMinPattern = recPattern;
+                if (recPattern > segMaxPattern) segMaxPattern = recPattern;
+            }
             currentOrdinal++;
 
             /* Real bytes actually written to THIS segment so far, not an
@@ -570,7 +583,8 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
         totalSegmentBytes += segBytes;
         if (segBytes < minSegBytes) minSegBytes = segBytes;
         if (segBytes > maxSegBytes) maxSegBytes = segBytes;
-        segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
+        if (!alignToBoundary)
+            segRanges.push_back({ segmentStartOrdinal, segMinPattern, segMaxPattern });
     }
 
     /* Never silently report success on a mismatch -- if the segmented
@@ -586,26 +600,35 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
 
     /* Manifest written ONLY now, after self-verification passes -- this is
     ** the one signal a lookup consumer should trust to know this ring is
-    ** really, safely segmented (see this file's own Notes).
+    ** really, safely segmented (see this file's own Notes). Fixed-width
+    ** format (RSFFileName.h's own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH
+    ** Notes): zero or more fixed-width entry lines (only ever non-empty
+    ** for a ring with no parent -- CellsInUse), then the fixed-width
+    ** trailer, so a reader can find the trailer via one file-size check,
+    ** no sequential parse. BINARY mode is required -- text mode would
+    ** translate '\n' to '\r\n' on Windows and silently break every one of
+    ** these byte-width guarantees.
     */
-    FILE* mf = fopen(manifestPath, "w");
+    FILE* mf = fopen(manifestPath, "wb");
     if (!mf)
         Fatal(FATAL_FILE_OPEN, "Could not write manifest '%s'", manifestPath);
-    fprintf(mf, "totalRecords=%llu\n", (unsigned long long)totalRecords);
-    fprintf(mf, "segmentCount=%llu\n", (unsigned long long)segmentCount);
-    fprintf(mf, "targetBytes=%llu\n", (unsigned long long)targetBytes);
-    fprintf(mf, "sourceOnDiskBytes=%llu\n", (unsigned long long)origOnDiskBytes);
-    /* Per-segment [min,max] pattern, keyed by that segment's own starting
-    ** ordinal (same hex form as its filename) -- lets a value-based lookup
-    ** binary-search which ONE segment to decode instead of scanning every
-    ** segment in order, which would be minutes at levels with thousands
-    ** of segments.
-    */
     for (const auto& r : segRanges)
     {
-        fprintf(mf, "seg%016llx.minPattern=%016llx\n", (unsigned long long)r.startOrdinal, (unsigned long long)r.minPattern);
-        fprintf(mf, "seg%016llx.maxPattern=%016llx\n", (unsigned long long)r.startOrdinal, (unsigned long long)r.maxPattern);
+        int written = fprintf(mf, "%016llx %016llx %016llx\n",
+                               (unsigned long long)r.startOrdinal, (unsigned long long)r.minPattern,
+                               (unsigned long long)r.maxPattern);
+        if (written != RSF_MANIFEST_ENTRY_WIDTH)
+            Fatal(FATAL_FILE_OPEN, "Manifest entry for '%s' wrote %d bytes, expected exactly %d -- fixed-width guarantee broken",
+                  manifestPath, written, RSF_MANIFEST_ENTRY_WIDTH);
     }
+    int trailerWritten = 0;
+    trailerWritten += fprintf(mf, "totalRecords=%016llx\n", (unsigned long long)totalRecords);
+    trailerWritten += fprintf(mf, "segmentCount=%016llx\n", (unsigned long long)segmentCount);
+    trailerWritten += fprintf(mf, "targetBytes=%016llx\n", (unsigned long long)targetBytes);
+    trailerWritten += fprintf(mf, "sourceOnDiskBytes=%016llx\n", (unsigned long long)origOnDiskBytes);
+    if (trailerWritten != RSF_MANIFEST_TRAILER_WIDTH)
+        Fatal(FATAL_FILE_OPEN, "Manifest trailer for '%s' wrote %d bytes, expected exactly %d -- fixed-width guarantee broken",
+              manifestPath, trailerWritten, RSF_MANIFEST_TRAILER_WIDTH);
     fclose(mf);
 
     char totalStr[32], origStr[32], avgStr[32], minStr[32], maxStr[32];

@@ -4,6 +4,44 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.3] - 2026-09-19
+
+### Manifest redesign: fixed-width, trailer-at-the-bottom, no meaningless Ring_2/Ring_3_4 ranges
+
+Triggered by directly inspecting a real manifest: min/max for Ring_2 and Ring_3_4 was showing
+0x0000/0xFFFF (or close to it) for nearly every segment -- looked broken, and was: Ring_3_4's
+(and Ring_2's) own pattern field only sorts monotonically WITHIN one parent group, resetting near
+zero at every group boundary. A segment spans thousands of groups, so a segment-wide min/max
+collapses to nearly the whole field width and means nothing. Confirmed this doesn't corrupt any
+real lookup -- `SearchRestricted` (what Ring_2/Ring_3_4 actually use) finds its segment by
+ordinal, never by value, so this range was written but never read. Indexer now only tracks/writes
+per-segment min/max for a ring with no parent (today: only CellsInUse, whose range genuinely is
+meaningful -- confirmed against real data).
+
+Also redesigned the manifest's own on-disk format, mirroring RSFTrailer's own convention (fixed
+size, written last, so a reader never parses anything sequentially to find it): zero or more
+FIXED-WIDTH entry lines (`RSF_MANIFEST_ENTRY_WIDTH` = 51 bytes: `startOrdinal minPattern
+maxPattern`, one per segment, only ever non-empty for CellsInUse) followed by a FIXED-WIDTH
+trailer (`RSF_MANIFEST_TRAILER_WIDTH` = 124 bytes: totalRecords/segmentCount/targetBytes/
+sourceOnDiskBytes, each hex-padded to a constant width). A reader gets the real entry count from
+one `GetFileAttributesExA` call -- `(file size - 124) / 51` -- no sequential read needed to find
+either the trailer or any individual entry. Both format constants now live in `RSFFileName.h` as
+the one shared source of truth between the writer (indexer) and reader (`BoardLookup/
+BoardLookupSearch.cpp`).
+
+`BoardLookupSearch.cpp`'s `SearchUnrestricted` (CellsInUse's top-level search) now does a REAL
+binary search directly against the manifest file -- one seek + one fixed-size read per
+comparison, never loading the manifest into memory at all, regardless of how many segments a
+future (8x8) CellsInUse ever has.
+
+Both the writer and reader open the manifest in BINARY mode ("wb"/"rb") -- Windows text-mode
+translates '\n' to '\r\n' on write, which would silently break every one of these byte-width
+guarantees.
+
+**Breaking format change**: any level already indexed under the old manifest format (including
+the just-completed 0-21 reindex sweep) needs to be reindexed again for lookups to work -- the old
+variable-length text format and the new fixed-width format aren't interchangeable.
+
 ## [1.4.2] - 2026-09-19
 
 ### Indexer's segment-size trigger now checks real bytes, not an estimate

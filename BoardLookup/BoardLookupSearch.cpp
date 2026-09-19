@@ -13,6 +13,14 @@
 **   real segmented data for neither case to search against. A board whose
 **   size hits either path gets a clear notFoundReason, not a silent wrong
 **   answer.
+**
+**   A ring's manifest (RSFFileName.h's RSFNameRingManifestFile) is never
+**   loaded wholesale, not even for CellsInUse's own value-based search:
+**   its real entry count comes from one file-size check (fixed-width
+**   entries + a fixed-width trailer -- see RSFFileName.h's own
+**   RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH Notes), and the search itself
+**   is a real binary search directly against the file, one seek+read per
+**   comparison (see SearchUnrestricted/ReadManifestEntry).
 */
 
 /* Includes */
@@ -37,7 +45,13 @@ struct SegmentInfo
     char     path[BOARD_LOOKUP_MAX_PATH];
 };
 
-struct ManifestSegRange
+/*
+** Type:    ManifestEntry
+** @brief   One decoded fixed-width manifest entry -- see RSFFileName.h's
+**          own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH Notes for the exact
+**          on-disk format this mirrors.
+*/
+struct ManifestEntry
 {
     uint64_t startOrdinal;
     uint64_t minPattern;
@@ -48,16 +62,18 @@ struct ManifestSegRange
 ** Type:    RingIndex
 ** @brief   Everything needed to search one ring: its discovered segments
 **          (from a directory listing, for ordinal-based access) and its
-**          manifest-recorded per-segment value ranges (for CellsInUse's
-**          own unrestricted, value-only top-level search).
+**          manifest's own path + real entry count (for CellsInUse's own
+**          unrestricted, value-only top-level search -- read via direct
+**          seeks, never loaded wholesale; see SearchUnrestricted).
 */
 struct RingIndex
 {
-    std::vector<SegmentInfo>      segments;
-    std::vector<ManifestSegRange> manifestRanges;
-    uint64_t                      totalRecords = 0;
-    RSFRecordShape                shape        = RSF_SHAPE_PAIR64;
-    int                            recSize      = 0;
+    std::vector<SegmentInfo> segments;
+    char                     manifestPath[BOARD_LOOKUP_MAX_PATH] = {};
+    uint64_t                 numManifestEntries = 0;
+    uint64_t                 totalRecords       = 0;
+    RSFRecordShape           shape              = RSF_SHAPE_PAIR64;
+    int                      recSize            = 0;
 };
 
 /*
@@ -179,73 +195,59 @@ static void LoadSegmentRecordsRaw(const char* segPath, RSFRecordShape shape, int
 }
 
 /*
-** Function: ParseManifest
-** @brief    Reads a ring's manifest.txt -- totalRecords plus every
-**           segment's own [minPattern,maxPattern] (see
-**           OthelloRingMasterLevelIndexer.cpp's own manifest-writing code
-**           for the exact format this mirrors).
-** @return   true if the manifest was found and parsed.
-*/
-static bool ParseManifest(const char* manifestPath, RingIndex* idx)
-{
-    FILE* mf = fopen(manifestPath, "r");
-    if (!mf)
-        return false;
-
-    char line[256];
-    while (fgets(line, sizeof(line), mf))
-    {
-        unsigned long long ord = 0, val = 0;
-        if (sscanf(line, "seg%16llx.minPattern=%llx", &ord, &val) == 2)
-        {
-            if (idx->manifestRanges.empty() || idx->manifestRanges.back().startOrdinal != ord)
-                idx->manifestRanges.push_back({ ord, val, 0 });
-            else
-                idx->manifestRanges.back().minPattern = val;
-        }
-        else if (sscanf(line, "seg%16llx.maxPattern=%llx", &ord, &val) == 2)
-        {
-            if (idx->manifestRanges.empty() || idx->manifestRanges.back().startOrdinal != ord)
-                idx->manifestRanges.push_back({ ord, 0, val });
-            else
-                idx->manifestRanges.back().maxPattern = val;
-        }
-        else if (sscanf(line, "totalRecords=%llu", &val) == 1)
-        {
-            idx->totalRecords = val;
-        }
-    }
-    fclose(mf);
-
-    std::sort(idx->manifestRanges.begin(), idx->manifestRanges.end(),
-              [](const ManifestSegRange& a, const ManifestSegRange& b) { return a.startOrdinal < b.startOrdinal; });
-    return true;
-}
-
-/*
 ** Function: LoadRingIndex
-** @brief    Loads everything needed to search one ring -- its manifest
-**           (must exist, or this ring was never indexed) and its real
-**           segment file listing.
+** @brief    Loads everything needed to search one ring: the manifest's
+**           real entry count and totalRecords (both from one file-size
+**           check plus a single fixed-size trailer read -- see
+**           RSFFileName.h's own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH
+**           Notes; no sequential parse of the whole manifest, ever) and
+**           its real segment file listing.
 */
 static bool LoadRingIndex(const char* levelDir, const char* ringName, RSFRecordShape shape,
                            RingIndex* idx, char* errBuf, size_t errBufSize)
 {
     char ringSegmentDir[BOARD_LOOKUP_MAX_PATH];
     RSFNameRingSegmentDir(ringSegmentDir, sizeof(ringSegmentDir), levelDir, ringName);
-    char manifestPath[BOARD_LOOKUP_MAX_PATH];
-    RSFNameRingManifestFile(manifestPath, sizeof(manifestPath), ringSegmentDir);
+    RSFNameRingManifestFile(idx->manifestPath, sizeof(idx->manifestPath), ringSegmentDir);
 
     idx->shape   = shape;
     idx->recSize = RSFShapeSize(shape);
 
-    if (!ParseManifest(manifestPath, idx))
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (!GetFileAttributesExA(idx->manifestPath, GetFileExInfoStandard, &fad))
     {
         snprintf(errBuf, errBufSize,
                  "%s: not indexed yet (no manifest at '%s') -- run OthelloRingMasterLevelIndexer for this level first",
-                 ringName, manifestPath);
+                 ringName, idx->manifestPath);
         return false;
     }
+    uint64_t fileSize = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
+    if (fileSize < (uint64_t)RSF_MANIFEST_TRAILER_WIDTH ||
+        (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) % (uint64_t)RSF_MANIFEST_ENTRY_WIDTH != 0)
+        Fatal(FATAL_FILE_OPEN,
+              "%s: manifest '%s' is %llu bytes -- doesn't fit the fixed-width entry+trailer format, index is corrupt",
+              ringName, idx->manifestPath, (unsigned long long)fileSize);
+    idx->numManifestEntries = (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) / (uint64_t)RSF_MANIFEST_ENTRY_WIDTH;
+
+    /* One seek straight to the trailer -- no sequential read of anything
+    ** before it, regardless of how many entries precede it.
+    */
+    FILE* mf = fopen(idx->manifestPath, "rb");
+    if (!mf)
+        Fatal(FATAL_FILE_OPEN, "%s: could not open manifest '%s'", ringName, idx->manifestPath);
+    if (_fseeki64(mf, (long long)(fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH), SEEK_SET) != 0)
+        Fatal(FATAL_FILE_OPEN, "%s: could not seek to trailer in '%s'", ringName, idx->manifestPath);
+    char trailer[RSF_MANIFEST_TRAILER_WIDTH + 1] = {};
+    if (fread(trailer, 1, (size_t)RSF_MANIFEST_TRAILER_WIDTH, mf) != (size_t)RSF_MANIFEST_TRAILER_WIDTH)
+        Fatal(FATAL_FILE_OPEN, "%s: could not read trailer from '%s'", ringName, idx->manifestPath);
+    fclose(mf);
+
+    unsigned long long totalRecordsHex = 0;
+    if (sscanf(trailer, "totalRecords=%llx", &totalRecordsHex) != 1)
+        Fatal(FATAL_FILE_OPEN, "%s: manifest trailer in '%s' doesn't match the expected fixed format",
+              ringName, idx->manifestPath);
+    idx->totalRecords = totalRecordsHex;
+
     if (!DiscoverSegments(ringSegmentDir, &idx->segments))
     {
         snprintf(errBuf, errBufSize, "%s: manifest exists but no segment files found in '%s' -- index looks corrupt",
@@ -278,52 +280,89 @@ static bool BinarySearchPatternInRange(const std::vector<uint8_t>& decoded, RSFR
 }
 
 /*
+** Function: ReadManifestEntry
+** @brief    Reads exactly one fixed-width manifest entry via a direct
+**           seek -- never reads any entry other than the one asked for.
+** @param    mf         - the manifest file, already open in binary mode
+** @param    entryIndex - which entry (0-based)
+** @param    manifestPath - for error messages only
+** @param    pOut       - out: the decoded entry
+*/
+static void ReadManifestEntry(FILE* mf, uint64_t entryIndex, const char* manifestPath, ManifestEntry* pOut)
+{
+    if (_fseeki64(mf, (long long)(entryIndex * (uint64_t)RSF_MANIFEST_ENTRY_WIDTH), SEEK_SET) != 0)
+        Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: could not seek to entry %llu in '%s'",
+              (unsigned long long)entryIndex, manifestPath);
+    char buf[RSF_MANIFEST_ENTRY_WIDTH + 1] = {};
+    if (fread(buf, 1, (size_t)RSF_MANIFEST_ENTRY_WIDTH, mf) != (size_t)RSF_MANIFEST_ENTRY_WIDTH)
+        Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: could not read entry %llu from '%s'",
+              (unsigned long long)entryIndex, manifestPath);
+    unsigned long long a = 0, b = 0, c = 0;
+    if (sscanf(buf, "%llx %llx %llx", &a, &b, &c) != 3)
+        Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: entry %llu in '%s' doesn't match the expected fixed format",
+              (unsigned long long)entryIndex, manifestPath);
+    pOut->startOrdinal = a;
+    pOut->minPattern    = b;
+    pOut->maxPattern    = c;
+}
+
+/*
 ** Function: SearchUnrestricted
 ** @brief    CellsInUse's own top-level search: no ordinal bound is known
-**           in advance, so this uses the manifest's per-segment
-**           [minPattern,maxPattern] to find the one candidate segment by
-**           VALUE (a plain linear scan over the segment list -- CellsInUse
-**           is always exactly one segment at every real 6x6 level today,
-**           so this is never actually a hot loop; a future level with
-**           many CellsInUse segments would still only decode the one real
-**           candidate, never more).
+**           in advance, so this binary-searches the manifest's fixed-
+**           width entries directly on disk by VALUE (each comparison is
+**           one seek + one fixed-size read -- the manifest is never
+**           loaded wholesale, not even into a std::vector, regardless of
+**           how many segments a ring has).
 */
 static bool SearchUnrestricted(RingIndex& idx, uint64_t targetPattern, FoundRecord* pOut)
 {
-    for (size_t i = 0; i < idx.manifestRanges.size(); i++)
+    if (idx.numManifestEntries == 0)
+        return false;
+
+    FILE* mf = fopen(idx.manifestPath, "rb");
+    if (!mf)
+        Fatal(FATAL_FILE_OPEN, "SearchUnrestricted: could not open manifest '%s'", idx.manifestPath);
+
+    uint64_t lo = 0, hi = idx.numManifestEntries;
+    bool found = false;
+    ManifestEntry match{};
+    while (lo < hi)
     {
-        const ManifestSegRange& r = idx.manifestRanges[i];
-        if (targetPattern < r.minPattern) return false;   /* sorted ranges -- falls in a gap, not present */
-        if (targetPattern > r.maxPattern) continue;
-
-        /* Candidate segment -- find its real file by matching startOrdinal
-        ** (manifest order and directory-listing order are the same, but
-        ** don't assume it -- look it up for real).
-        */
-        auto segIt = std::find_if(idx.segments.begin(), idx.segments.end(),
-                                   [&](const SegmentInfo& s) { return s.startOrdinal == r.startOrdinal; });
-        if (segIt == idx.segments.end())
-            Fatal(FATAL_MERGE_LOGIC_ERROR, "BoardLookupSearch: manifest references segment start %llu with no matching segment file",
-                  (unsigned long long)r.startOrdinal);
-
-        size_t segIdx = (size_t)(segIt - idx.segments.begin());
-        LoadSegmentRecordsRaw(segIt->path, idx.shape, idx.recSize, &pOut->decodedSegment);
-
-        size_t recordCount = pOut->decodedSegment.size() / (size_t)idx.recSize;
-        size_t localIdx = 0;
-        if (!BinarySearchPatternInRange(pOut->decodedSegment, idx.shape, idx.recSize, 0, recordCount, targetPattern, &localIdx))
-            return false;   /* in range but genuinely absent -- a real, expected "board never reached" outcome */
-
-        pOut->segmentIdx              = segIdx;
-        pOut->loc.found               = true;
-        pOut->loc.globalOrdinal       = r.startOrdinal + localIdx;
-        strncpy(pOut->loc.segmentPath, segIt->path, sizeof(pOut->loc.segmentPath) - 1);
-        pOut->loc.segmentStartOrdinal = r.startOrdinal;
-        pOut->loc.localIndexInSegment = localIdx;
-        pOut->loc.childOffset         = ExtractOffset(idx.shape, &pOut->decodedSegment[localIdx * (size_t)idx.recSize]);
-        return true;
+        uint64_t mid = lo + (hi - lo) / 2;
+        ManifestEntry e;
+        ReadManifestEntry(mf, mid, idx.manifestPath, &e);
+        if (targetPattern < e.minPattern)      hi = mid;
+        else if (targetPattern > e.maxPattern) lo = mid + 1;
+        else { found = true; match = e; break; }
     }
-    return false;
+    fclose(mf);
+
+    if (!found)
+        return false;   /* falls in a real gap between segments' actual ranges -- genuinely absent */
+
+    auto segIt = std::find_if(idx.segments.begin(), idx.segments.end(),
+                               [&](const SegmentInfo& s) { return s.startOrdinal == match.startOrdinal; });
+    if (segIt == idx.segments.end())
+        Fatal(FATAL_MERGE_LOGIC_ERROR, "BoardLookupSearch: manifest references segment start %llu with no matching segment file",
+              (unsigned long long)match.startOrdinal);
+
+    size_t segIdx = (size_t)(segIt - idx.segments.begin());
+    LoadSegmentRecordsRaw(segIt->path, idx.shape, idx.recSize, &pOut->decodedSegment);
+
+    size_t recordCount = pOut->decodedSegment.size() / (size_t)idx.recSize;
+    size_t localIdx = 0;
+    if (!BinarySearchPatternInRange(pOut->decodedSegment, idx.shape, idx.recSize, 0, recordCount, targetPattern, &localIdx))
+        return false;   /* within the segment's own range but genuinely absent -- a real, expected "board never reached" outcome */
+
+    pOut->segmentIdx              = segIdx;
+    pOut->loc.found               = true;
+    pOut->loc.globalOrdinal       = match.startOrdinal + localIdx;
+    strncpy(pOut->loc.segmentPath, segIt->path, sizeof(pOut->loc.segmentPath) - 1);
+    pOut->loc.segmentStartOrdinal = match.startOrdinal;
+    pOut->loc.localIndexInSegment = localIdx;
+    pOut->loc.childOffset         = ExtractOffset(idx.shape, &pOut->decodedSegment[localIdx * (size_t)idx.recSize]);
+    return true;
 }
 
 /*

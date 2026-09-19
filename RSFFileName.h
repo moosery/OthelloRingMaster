@@ -284,6 +284,46 @@ static inline void RSFNameRingManifestFile(char* out, size_t outSize,
 
 /*
 ** ============================================================
+** Manifest fixed-width format (RSFNameRingManifestFile's own contents)
+**
+** Mirrors RSFTrailer's own convention -- a fixed-size trailer written
+** LAST, after content whose real count isn't known until the write is
+** done -- so a reader never has to sequentially parse anything to find
+** it: seek to (real file size - RSF_MANIFEST_TRAILER_WIDTH), read that
+** block, done. The same fixed-size trailer works whether this file was
+** built as a post-pass (today's indexer) or by a live writer that only
+** learns its own final counts at the very end, same as RSFWriterClose.
+**
+** Layout: zero or more fixed-width entry lines (only for a ring with no
+** parent to align to -- see OthelloRingMasterLevelIndexer.cpp's own
+** Notes on why a ring WITH a parent has no meaningful per-segment value
+** range to record at all), each exactly RSF_MANIFEST_ENTRY_WIDTH bytes:
+**
+**   "%016llx %016llx %016llx\n"   (startOrdinal minPattern maxPattern)
+**
+** ...followed by the fixed RSF_MANIFEST_TRAILER_WIDTH-byte trailer, one
+** field per line, hex-padded to a fixed width for the same reason the
+** entries are (a reader needs to know the trailer's exact byte size
+** without parsing it first):
+**
+**   "totalRecords=%016llx\n"       (30 bytes)
+**   "segmentCount=%016llx\n"       (30 bytes)
+**   "targetBytes=%016llx\n"        (29 bytes)
+**   "sourceOnDiskBytes=%016llx\n"  (35 bytes)
+**
+** A ring's entry count is then just (real file size - trailer width) /
+** entry width -- computed from one GetFileAttributesExA call, no
+** sequential read at all. Both this file's writer (the indexer) and its
+** real seek-based reader (BoardLookup/BoardLookupSearch.cpp) must open
+** the file in BINARY mode ("wb"/"rb") -- Windows text-mode translates
+** '\n' to '\r\n' on write, which would silently break every one of these
+** byte-width guarantees.
+*/
+constexpr int RSF_MANIFEST_ENTRY_WIDTH   = 51;
+constexpr int RSF_MANIFEST_TRAILER_WIDTH = 124;
+
+/*
+** ============================================================
 ** Writer files (NVMe MW buffers)
 ** ============================================================
 */
