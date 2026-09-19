@@ -297,22 +297,33 @@ static inline void RSFNameRingManifestFile(char* out, size_t outSize,
 ** Layout: one fixed-width entry line PER SEGMENT, for EVERY ring (never
 ** zero -- a lookup must never fall back to an OS directory listing to
 ** find which segment holds a given ordinal, so every ring's own segment
-** list lives here too, not just a value-searchable ring's), each exactly
-** RSF_MANIFEST_ENTRY_WIDTH bytes:
+** list lives here too, not just a value-searchable ring's). Two entry
+** shapes, chosen by whether the ring has a parent to align to (i.e.
+** whether its shape is RSF_SHAPE_PAIR64 -- CellsInUse is the only root
+** ring today):
+**
+** Root ring (CellsInUse) -- RSF_MANIFEST_ROOT_ENTRY_WIDTH bytes, carries
+** a real, searchable value range alongside the ordinal:
 **
 **   "%016llx %016llx %016llx\n"   (startOrdinal minPattern maxPattern)
 **
-** minPattern/maxPattern are only real for a ring with no parent to align
-** to (CellsInUse); a ring WITH a parent (Ring_2/Ring_3_4) writes 0/0 for
-** both -- see OthelloRingMasterLevelIndexer.cpp's own Notes on why a
-** segment-wide pattern range would be meaningless there. Those rings are
-** still found by ordinal alone, binary-searched the same way CellsInUse
-** is searched by value (see BoardLookup/BoardLookupSearch.cpp).
+** Ring with a parent (Ring_2/Ring_3_4) -- RSF_MANIFEST_CHILD_ENTRY_WIDTH
+** bytes, ordinal only. No min/max field at all, not even as a zeroed
+** placeholder -- see OthelloRingMasterLevelIndexer.cpp's own Notes on why
+** a segment-wide pattern range would be meaningless for these rings
+** anyway, so there is nothing worth spending the bytes on:
 **
-** ...followed by the fixed RSF_MANIFEST_TRAILER_WIDTH-byte trailer, one
-** field per line, hex-padded to a fixed width for the same reason the
-** entries are (a reader needs to know the trailer's exact byte size
-** without parsing it first):
+**   "%016llx\n"                   (startOrdinal)
+**
+** Both are found by binary search directly against the manifest (see
+** BoardLookup/BoardLookupSearch.cpp) -- root by value, child by ordinal
+** -- a reader already knows which shape applies from the ring's own
+** record shape, so this never needs to be self-describing per entry.
+**
+** ...followed by the fixed RSF_MANIFEST_TRAILER_WIDTH-byte trailer (same
+** for every ring), one field per line, hex-padded to a fixed width for
+** the same reason the entries are (a reader needs to know the trailer's
+** exact byte size without parsing it first):
 **
 **   "totalRecords=%016llx\n"       (30 bytes)
 **   "segmentCount=%016llx\n"       (30 bytes)
@@ -320,15 +331,16 @@ static inline void RSFNameRingManifestFile(char* out, size_t outSize,
 **   "sourceOnDiskBytes=%016llx\n"  (35 bytes)
 **
 ** A ring's entry count is then just (real file size - trailer width) /
-** entry width -- computed from one GetFileAttributesExA call, no
-** sequential read at all. Both this file's writer (the indexer) and its
-** real seek-based reader (BoardLookup/BoardLookupSearch.cpp) must open
-** the file in BINARY mode ("wb"/"rb") -- Windows text-mode translates
-** '\n' to '\r\n' on write, which would silently break every one of these
-** byte-width guarantees.
+** (its own entry width) -- computed from one GetFileAttributesExA call,
+** no sequential read at all. Both this file's writer (the indexer) and
+** its real seek-based reader (BoardLookup/BoardLookupSearch.cpp) must
+** open the file in BINARY mode ("wb"/"rb") -- Windows text-mode
+** translates '\n' to '\r\n' on write, which would silently break every
+** one of these byte-width guarantees.
 */
-constexpr int RSF_MANIFEST_ENTRY_WIDTH   = 51;
-constexpr int RSF_MANIFEST_TRAILER_WIDTH = 124;
+constexpr int RSF_MANIFEST_ROOT_ENTRY_WIDTH  = 51;   /* "%016llx %016llx %016llx\n" -- CellsInUse only */
+constexpr int RSF_MANIFEST_CHILD_ENTRY_WIDTH = 17;   /* "%016llx\n" -- Ring_2/Ring_3_4 (ordinal only) */
+constexpr int RSF_MANIFEST_TRAILER_WIDTH     = 124;
 
 /*
 ** ============================================================

@@ -4,6 +4,24 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.5] - 2026-09-19
+
+### Ring_2/Ring_3_4 manifest entries drop the unused min/max fields entirely
+
+Direct catch: "You now have zeroes in there for min and max. You literally don't need those for
+the ring files. So why write them?" -- fair. 1.4.4 restored the ordinal but kept writing 34 bytes
+of unused 0x0000000000000000 padding per entry for every Ring_2/Ring_3_4 segment, purely because
+the entry format was uniform across ring types. Split into two real entry shapes instead:
+`RSF_MANIFEST_ROOT_ENTRY_WIDTH` (51 bytes: `startOrdinal minPattern maxPattern`, CellsInUse only)
+and `RSF_MANIFEST_CHILD_ENTRY_WIDTH` (17 bytes: `startOrdinal` alone, Ring_2/Ring_3_4). A ring's
+own record shape already determines which applies (`RSF_SHAPE_PAIR64` = root), so nothing needs
+to self-describe its own format per entry. `ReadManifestEntry` parses whichever format the ring
+calls for and returns 0 for minPattern/maxPattern on a child entry (never read by any caller
+there anyway). Real space savings too: at 8x8 scale, a ring with many thousands of segments would
+have been carrying real, meaningful bytes of pure padding.
+
+**Breaking format change again**: levels indexed under 1.4.4 need reindexing once more.
+
 ## [1.4.4] - 2026-09-19
 
 ### Manifest carries every ring's own ordinal list -- no OS directory listing, ever

@@ -612,7 +612,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     /* Manifest written ONLY now, after self-verification passes -- this is
     ** the one signal a lookup consumer should trust to know this ring is
     ** really, safely segmented (see this file's own Notes). Fixed-width
-    ** format (RSFFileName.h's own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH
+    ** format (RSFFileName.h's own RSF_MANIFEST_ROOT_ENTRY_WIDTH/CHILD_ENTRY_WIDTH/TRAILER_WIDTH
     ** Notes): one fixed-width entry line per segment for EVERY ring (so a
     ** lookup never needs an OS directory listing to find which segment
     ** holds a given ordinal), then the fixed-width trailer, so a reader
@@ -626,12 +626,20 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
         Fatal(FATAL_FILE_OPEN, "Could not write manifest '%s'", manifestPath);
     for (const auto& r : segRanges)
     {
-        int written = fprintf(mf, "%016llx %016llx %016llx\n",
-                               (unsigned long long)r.startOrdinal, (unsigned long long)r.minPattern,
-                               (unsigned long long)r.maxPattern);
-        if (written != RSF_MANIFEST_ENTRY_WIDTH)
+        /* Root ring (CellsInUse): full entry with a real, searchable
+        ** value range. A ring with a parent (Ring_2/Ring_3_4): ordinal
+        ** only -- no min/max field at all, not even zeroed, since nothing
+        ** would ever read it (see RSFFileName.h's own Notes).
+        */
+        int written = alignToBoundary
+            ? fprintf(mf, "%016llx\n", (unsigned long long)r.startOrdinal)
+            : fprintf(mf, "%016llx %016llx %016llx\n",
+                      (unsigned long long)r.startOrdinal, (unsigned long long)r.minPattern,
+                      (unsigned long long)r.maxPattern);
+        int expectedWidth = alignToBoundary ? RSF_MANIFEST_CHILD_ENTRY_WIDTH : RSF_MANIFEST_ROOT_ENTRY_WIDTH;
+        if (written != expectedWidth)
             Fatal(FATAL_FILE_OPEN, "Manifest entry for '%s' wrote %d bytes, expected exactly %d -- fixed-width guarantee broken",
-                  manifestPath, written, RSF_MANIFEST_ENTRY_WIDTH);
+                  manifestPath, written, expectedWidth);
     }
     int trailerWritten = 0;
     trailerWritten += fprintf(mf, "totalRecords=%016llx\n", (unsigned long long)totalRecords);

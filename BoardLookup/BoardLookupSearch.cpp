@@ -18,7 +18,7 @@
 **   loaded wholesale, not even for CellsInUse's own value-based search:
 **   its real entry count comes from one file-size check (fixed-width
 **   entries + a fixed-width trailer -- see RSFFileName.h's own
-**   RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH Notes), and the search itself
+**   RSF_MANIFEST_ROOT_ENTRY_WIDTH/CHILD_ENTRY_WIDTH/TRAILER_WIDTH Notes), and the search itself
 **   is a real binary search directly against the file, one seek+read per
 **   comparison (see SearchUnrestricted/ReadManifestEntry).
 */
@@ -41,7 +41,7 @@
 /*
 ** Type:    ManifestEntry
 ** @brief   One decoded fixed-width manifest entry -- see RSFFileName.h's
-**          own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH Notes for the exact
+**          own RSF_MANIFEST_ROOT_ENTRY_WIDTH/CHILD_ENTRY_WIDTH/TRAILER_WIDTH Notes for the exact
 **          on-disk format this mirrors. Every ring has one of these per
 **          segment; minPattern/maxPattern are only real for a root ring
 **          (CellsInUse) -- see this file's own Purpose.
@@ -69,6 +69,8 @@ struct RingIndex
     uint64_t       totalRecords       = 0;
     RSFRecordShape shape              = RSF_SHAPE_PAIR64;
     int            recSize            = 0;
+    bool           isRootRing         = false;   /* RSF_SHAPE_PAIR64 (CellsInUse) -- only a root ring's manifest entries carry a real min/max */
+    int            manifestEntryWidth = 0;       /* RSF_MANIFEST_ROOT_ENTRY_WIDTH or RSF_MANIFEST_CHILD_ENTRY_WIDTH, matching isRootRing */
 };
 
 /*
@@ -163,7 +165,7 @@ static void LoadSegmentRecordsRaw(const char* segPath, RSFRecordShape shape, int
 ** @brief    Loads everything needed to search one ring: the manifest's
 **           real entry count and totalRecords (both from one file-size
 **           check plus a single fixed-size trailer read -- see
-**           RSFFileName.h's own RSF_MANIFEST_ENTRY_WIDTH/TRAILER_WIDTH
+**           RSFFileName.h's own RSF_MANIFEST_ROOT_ENTRY_WIDTH/CHILD_ENTRY_WIDTH/TRAILER_WIDTH
 **           Notes; no sequential parse of the whole manifest, ever, and
 **           no OS directory listing either -- every segment's path is
 **           derived on demand from its own ordinal).
@@ -174,8 +176,10 @@ static bool LoadRingIndex(const char* levelDir, const char* ringName, RSFRecordS
     RSFNameRingSegmentDir(idx->ringSegmentDir, sizeof(idx->ringSegmentDir), levelDir, ringName);
     RSFNameRingManifestFile(idx->manifestPath, sizeof(idx->manifestPath), idx->ringSegmentDir);
 
-    idx->shape   = shape;
-    idx->recSize = RSFShapeSize(shape);
+    idx->shape              = shape;
+    idx->recSize            = RSFShapeSize(shape);
+    idx->isRootRing         = (shape == RSF_SHAPE_PAIR64);
+    idx->manifestEntryWidth = idx->isRootRing ? RSF_MANIFEST_ROOT_ENTRY_WIDTH : RSF_MANIFEST_CHILD_ENTRY_WIDTH;
 
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
     if (!GetFileAttributesExA(idx->manifestPath, GetFileExInfoStandard, &fad))
@@ -187,11 +191,11 @@ static bool LoadRingIndex(const char* levelDir, const char* ringName, RSFRecordS
     }
     uint64_t fileSize = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
     if (fileSize < (uint64_t)RSF_MANIFEST_TRAILER_WIDTH ||
-        (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) % (uint64_t)RSF_MANIFEST_ENTRY_WIDTH != 0)
+        (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) % (uint64_t)idx->manifestEntryWidth != 0)
         Fatal(FATAL_FILE_OPEN,
               "%s: manifest '%s' is %llu bytes -- doesn't fit the fixed-width entry+trailer format, index is corrupt",
               ringName, idx->manifestPath, (unsigned long long)fileSize);
-    idx->numManifestEntries = (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) / (uint64_t)RSF_MANIFEST_ENTRY_WIDTH;
+    idx->numManifestEntries = (fileSize - (uint64_t)RSF_MANIFEST_TRAILER_WIDTH) / (uint64_t)idx->manifestEntryWidth;
 
     /* One seek straight to the trailer -- no sequential read of anything
     ** before it, regardless of how many entries precede it.
@@ -245,24 +249,41 @@ static bool BinarySearchPatternInRange(const std::vector<uint8_t>& decoded, RSFR
 ** Function: ReadManifestEntry
 ** @brief    Reads exactly one fixed-width manifest entry via a direct
 **           seek -- never reads any entry other than the one asked for.
+**           Parses the root (ordinal+min+max) or child (ordinal-only)
+**           format according to idx.isRootRing/manifestEntryWidth; a
+**           child entry's minPattern/maxPattern come back as 0 (never
+**           written, never meant to be read -- callers for a child ring
+**           only ever use startOrdinal).
+** @param    idx        - the ring being read (for its manifest path,
+**                        entry width, and root/child format)
 ** @param    mf         - the manifest file, already open in binary mode
 ** @param    entryIndex - which entry (0-based)
-** @param    manifestPath - for error messages only
 ** @param    pOut       - out: the decoded entry
 */
-static void ReadManifestEntry(FILE* mf, uint64_t entryIndex, const char* manifestPath, ManifestEntry* pOut)
+static void ReadManifestEntry(const RingIndex& idx, FILE* mf, uint64_t entryIndex, ManifestEntry* pOut)
 {
-    if (_fseeki64(mf, (long long)(entryIndex * (uint64_t)RSF_MANIFEST_ENTRY_WIDTH), SEEK_SET) != 0)
+    if (_fseeki64(mf, (long long)(entryIndex * (uint64_t)idx.manifestEntryWidth), SEEK_SET) != 0)
         Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: could not seek to entry %llu in '%s'",
-              (unsigned long long)entryIndex, manifestPath);
-    char buf[RSF_MANIFEST_ENTRY_WIDTH + 1] = {};
-    if (fread(buf, 1, (size_t)RSF_MANIFEST_ENTRY_WIDTH, mf) != (size_t)RSF_MANIFEST_ENTRY_WIDTH)
+              (unsigned long long)entryIndex, idx.manifestPath);
+    char buf[RSF_MANIFEST_ROOT_ENTRY_WIDTH + 1] = {};
+    if (fread(buf, 1, (size_t)idx.manifestEntryWidth, mf) != (size_t)idx.manifestEntryWidth)
         Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: could not read entry %llu from '%s'",
-              (unsigned long long)entryIndex, manifestPath);
+              (unsigned long long)entryIndex, idx.manifestPath);
+
     unsigned long long a = 0, b = 0, c = 0;
-    if (sscanf(buf, "%llx %llx %llx", &a, &b, &c) != 3)
-        Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: entry %llu in '%s' doesn't match the expected fixed format",
-              (unsigned long long)entryIndex, manifestPath);
+    if (idx.isRootRing)
+    {
+        if (sscanf(buf, "%llx %llx %llx", &a, &b, &c) != 3)
+            Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: entry %llu in '%s' doesn't match the expected root format",
+                  (unsigned long long)entryIndex, idx.manifestPath);
+    }
+    else
+    {
+        if (sscanf(buf, "%llx", &a) != 1)
+            Fatal(FATAL_FILE_OPEN, "ReadManifestEntry: entry %llu in '%s' doesn't match the expected child format",
+                  (unsigned long long)entryIndex, idx.manifestPath);
+        b = 0; c = 0;
+    }
     pOut->startOrdinal = a;
     pOut->minPattern    = b;
     pOut->maxPattern    = c;
@@ -291,7 +312,7 @@ static bool SearchUnrestricted(RingIndex& idx, uint64_t targetPattern, FoundReco
     {
         uint64_t mid = lo + (hi - lo) / 2;
         ManifestEntry e;
-        ReadManifestEntry(mf, mid, idx.manifestPath, &e);
+        ReadManifestEntry(idx, mf, mid, &e);
         if (targetPattern < e.minPattern)      hi = mid;
         else if (targetPattern > e.maxPattern) lo = mid + 1;
         else { found = true; matchIndex = mid; match = e; break; }
@@ -344,7 +365,7 @@ static bool SearchRestricted(RingIndex& idx, uint64_t rangeStart, uint64_t range
     {
         uint64_t mid = lo + (hi - lo) / 2;
         ManifestEntry e;
-        ReadManifestEntry(mf, mid, idx.manifestPath, &e);
+        ReadManifestEntry(idx, mf, mid, &e);
         if (e.startOrdinal <= rangeStart) lo = mid + 1;
         else                              hi = mid;
     }
@@ -354,7 +375,7 @@ static bool SearchRestricted(RingIndex& idx, uint64_t rangeStart, uint64_t range
     uint64_t entryIndex = lo - 1;
 
     ManifestEntry matchEntry;
-    ReadManifestEntry(mf, entryIndex, idx.manifestPath, &matchEntry);
+    ReadManifestEntry(idx, mf, entryIndex, &matchEntry);
     fclose(mf);
 
     char segPath[BOARD_LOOKUP_MAX_PATH];
@@ -407,7 +428,7 @@ static uint64_t ComputeGroupEnd(RingIndex& idx, const FoundRecord& found, uint64
         if (!mf)
             Fatal(FATAL_FILE_OPEN, "ComputeGroupEnd: could not open manifest '%s'", idx.manifestPath);
         ManifestEntry nextEntry;
-        ReadManifestEntry(mf, found.entryIndex + 1, idx.manifestPath, &nextEntry);
+        ReadManifestEntry(idx, mf, found.entryIndex + 1, &nextEntry);
         fclose(mf);
 
         char nextSegPath[BOARD_LOOKUP_MAX_PATH];
