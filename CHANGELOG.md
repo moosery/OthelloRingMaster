@@ -4,6 +4,43 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.8] - 2026-09-25
+
+### Every event create, wait, signal and close is checked; waits are bounded and say what they are waiting for
+
+The audit that followed the 2026-09-24 crash found the whole cross-thread completion machinery
+ignoring its own failure results: `CreateEventA` (4 sites), `WaitForMultipleObjects` /
+`WaitForSingleObject` with `INFINITE` (3 sites), `SetEvent` (5 sites) and the matching
+`CloseHandle` calls. Visual Studio Code Analysis independently flagged the four unchecked events
+(C6387: `events[]` could be 0). Each of these waits is a *barrier*: the code after it assumes the
+awaited work has finished. If a create failed (NULL handle) or a wait returned `WAIT_FAILED`, the
+call returned immediately and the caller carried on while the flush/merge job was still reading
+or writing the buffers it was about to reset -- silent corruption, with nothing in the log.
+
+- **New checked helpers** (Utility `ThreadPool.cpp/.h`): `CreateEventOrFatal`, `SetEventOrFatal`,
+  `CloseHandleOrFatal`, `WaitForEventsOrFatal`. Any failure stops the process naming what was
+  being created/signaled/waited on and the Windows error. New `FATAL_SYNC_FAILED` code (plus
+  `FATAL_FILE_DELETE_FAILED`, `FATAL_FILE_WRITE_FAILED`, `FATAL_MERGE_VERIFY_FAILED`,
+  `FATAL_STALE_FILES` reserved for the data-integrity work that follows).
+- **Waits are bounded and self-reporting.** `WaitForEventsOrFatal` waits in one-minute slices
+  instead of `INFINITE`. A slice that times out just means the work is still running (flushing
+  many gigabytes legitimately takes minutes), so it keeps waiting -- but after 15 minutes, and
+  every 30 after that, the log says `Still waiting on <what> after N minutes`. A wait that can
+  never finish no longer looks the same as a quiet run.
+- **`ThreadPool::QueueJob` now returns `bool`.** It used to drop a job silently when the pool
+  was stopping, so a caller that then waited for the job hung forever (a shutdown that never
+  finished). Every caller now checks: the flush, iMerge, merge-writer and feeder waits skip or
+  signal a refused job instead of waiting for it; the consolidation master releases everything a
+  refused batch had reserved; the calculator's lookup pool (whose counter a refused job would
+  never decrement) stops with an explanation; the stats-listener submits log a refusal. A refusal
+  while the run is NOT shutting down is a real fault and stops the process.
+- Applied at: `FlushMergeWriterBuffer` (black/white flush events + wait), `RunBothColorIMerge`
+  (white/black iMerge session events + wait), `FlushAccumulator` (GPU device-to-host done event +
+  wait) and `RunMergeWriterJob`'s signal, `SubmitMergeWriterJob` / `SubmitGpuFeederJob`,
+  `ConsolidationMasterLoop`, `ProcessNonTerminalLevel`. `ThreadPool::Start` now checks its
+  busy-flag allocation, and `SetThreadDescription`'s result is checked (logged once, not fatal).
+  The single-instance mutex's release now checks its `CloseHandle`.
+
 ## [1.4.7] - 2026-09-25
 
 ### Failures now say why: `Fatal()` in the log, a native crash record, checked log writes, checked drive-space and socket calls

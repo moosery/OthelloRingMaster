@@ -117,7 +117,11 @@ static void AcquireInstanceLock(const char* storeDir)
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        CloseHandle(g_instanceMutex);
+        /* The result is deliberately not acted on: the Fatal just below
+        ** reports the real problem (another instance is running), and a
+        ** failed close of this duplicate handle would change nothing about it.
+        */
+        (void)CloseHandle(g_instanceMutex);
         g_instanceMutex = NULL;
         Fatal(FATAL_FILE_OPEN,
               "Another OthelloRingMaster instance is already running (targeting '%s' or a different storeDir).\n"
@@ -135,7 +139,7 @@ static void ReleaseInstanceLock()
 {
     if (g_instanceMutex)
     {
-        CloseHandle(g_instanceMutex);
+        CloseHandleOrFatal(g_instanceMutex, "the single-instance mutex");
         g_instanceMutex = NULL;
     }
 }

@@ -74,8 +74,10 @@ void SubmitGpuFeederJob(PSolveContext pCtx, uint8_t level);
 ** @brief    Queues a completed GPU flush onto the merge-writer thread pool for D2H+compression.
 ** @param    pCtx  - solve context
 ** @param    pDesc - the flush to process; freed by the queued job after it runs
+** @return   true if queued; false if the pool refused it (shutting down), in which case the
+**           caller still owns pDesc and must not wait for pDesc->hDoneEvent to be signaled.
 */
-void SubmitMergeWriterJob(PSolveContext pCtx, PFlushDescriptor pDesc);
+bool SubmitMergeWriterJob(PSolveContext pCtx, PFlushDescriptor pDesc);
 
 /*
 ** Function: FlushAllMergeWriterBuffers

@@ -170,6 +170,36 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
 }
 
 /*
+** Function: SkipDroppedFlush
+** @brief    Handles a flush job the flusher pool refused to queue: stops the
+**           process if the run is not shutting down, otherwise notes the
+**           skipped flush and signals its event so the waiter does not wait
+**           forever for a job that will never run.
+** @details  A pool only refuses jobs while it is being stopped, which
+**           happens when the whole process is shutting down; the buffered
+**           boards are discarded along with the level then. If the run is
+**           NOT shutting down, a refused job would silently lose that
+**           color's buffered boards -- stop instead.
+** @param    pSt      - solver state
+** @param    hDone    - the flush-complete event for the color whose job was refused
+** @param    pszColor - "black" or "white", for the message
+*/
+static void SkipDroppedFlush(POthelloRingMasterState pSt, HANDLE hDone, const char* pszColor)
+{
+    /* Not shutting down means this refusal is a real fault that would lose data. */
+    if (!pSt->terminateThreads)
+        Fatal(FATAL_SYNC_FAILED,
+              "FlushMergeWriterBuffer: the flusher pool refused the %s flush job while the run is not shutting down -- "
+              "that color's buffered boards would be lost\n", pszColor);
+
+    LoggerLog("FlushMergeWriterBuffer: the flusher pool is stopping for shutdown; the %s flush was not queued "
+              "(its buffered boards are discarded with the level)\n", pszColor);
+
+    /* Signal the event so the wait in the caller completes instead of hanging. */
+    SetEventOrFatal(hDone, "a flush skipped at shutdown");
+}
+
+/*
 ** Function: FlushMergeWriterBuffer
 ** @brief    See FlusherPool.h.
 */
@@ -204,30 +234,44 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
 
     /* Dispatch both colors to the flusher pool concurrently, wait for both.
     ** Manual-reset events, pre-signaled for a color with nothing to do, so
-    ** WaitForMultipleObjects(..., TRUE, ...) always waits on exactly two
-    ** real handles regardless of which color(s) are actually present.
+    ** the wait below always waits on exactly two real handles regardless of
+    ** which color(s) are actually present. Every create, queue, signal, wait
+    ** and close result is checked: an ignored failure here would let this
+    ** function reset the pool state while a flush job was still reading it.
     */
     HANDLE events[2];
-    events[RSF_PLAYER_BLACK] = CreateEventA(nullptr, TRUE, hasBlack ? FALSE : TRUE, nullptr);
-    events[RSF_PLAYER_WHITE] = CreateEventA(nullptr, TRUE, hasWhite ? FALSE : TRUE, nullptr);
+    events[RSF_PLAYER_BLACK] = CreateEventOrFatal(TRUE, hasBlack ? FALSE : TRUE, "the black flush-complete event");
+    events[RSF_PLAYER_WHITE] = CreateEventOrFatal(TRUE, hasWhite ? FALSE : TRUE, "the white flush-complete event");
 
     if (hasBlack)
-        pSt->pFlusherPool->QueueJob([pCtx, ti, &events](uint32_t)
-            { FlushOneColor(pCtx, ti, RSF_PLAYER_BLACK); SetEvent(events[RSF_PLAYER_BLACK]); });
-    if (hasWhite)
-        pSt->pFlusherPool->QueueJob([pCtx, ti, &events](uint32_t)
-            { FlushOneColor(pCtx, ti, RSF_PLAYER_WHITE); SetEvent(events[RSF_PLAYER_WHITE]); });
+    {
+        bool queued = pSt->pFlusherPool->QueueJob([pCtx, ti, &events](uint32_t)
+            { FlushOneColor(pCtx, ti, RSF_PLAYER_BLACK); SetEventOrFatal(events[RSF_PLAYER_BLACK], "the finished black flush"); });
 
-    WaitForMultipleObjects(2, events, TRUE, INFINITE);
-    CloseHandle(events[RSF_PLAYER_BLACK]);
-    CloseHandle(events[RSF_PLAYER_WHITE]);
+        /* A job the pool refused will never signal; do not wait for it. */
+        if (!queued)
+            SkipDroppedFlush(pSt, events[RSF_PLAYER_BLACK], "black");
+    }
+    if (hasWhite)
+    {
+        bool queued = pSt->pFlusherPool->QueueJob([pCtx, ti, &events](uint32_t)
+            { FlushOneColor(pCtx, ti, RSF_PLAYER_WHITE); SetEventOrFatal(events[RSF_PLAYER_WHITE], "the finished white flush"); });
+
+        /* A job the pool refused will never signal; do not wait for it. */
+        if (!queued)
+            SkipDroppedFlush(pSt, events[RSF_PLAYER_WHITE], "white");
+    }
+
+    WaitForEventsOrFatal(events, 2, "the black and white flush jobs of a merge-writer buffer");
+    CloseHandleOrFatal(events[RSF_PLAYER_BLACK], "the black flush-complete event");
+    CloseHandleOrFatal(events[RSF_PLAYER_WHITE], "the white flush-complete event");
 
     pSt->mwFlushActive[ti][RSF_PLAYER_BLACK] = 0;
     pSt->mwFlushActive[ti][RSF_PLAYER_WHITE] = 0;
 
     /* Reset all pool and staging state for this thread -- safe now, both
     ** dispatched jobs have finished reading out of mwBuf by the time
-    ** WaitForMultipleObjects returns.
+    ** WaitForEventsOrFatal returns.
     */
     pSt->mwBlackSegCount[ti]      = 0;
     pSt->mwBlackCompBytesUsed[ti] = 0;

@@ -993,10 +993,16 @@ static void RunStatsListenerJob(uint32_t /*thdIdx*/, PSolveContext pCtx)
 */
 void SubmitStatsListenerJob(PSolveContext pCtx)
 {
-    pCtx->pState->pStatsThreadPool->QueueJob(
+    bool queued = pCtx->pState->pStatsThreadPool->QueueJob(
         [pCtx](uint32_t thdIdx)
         {
             RunStatsListenerJob(thdIdx, pCtx);
         }
     );
+
+    /* Not fatal -- the solve does not depend on the status display -- but a
+    ** listener that silently never started leaves no STATUS and no clue why.
+    */
+    if (!queued)
+        LoggerLog("Stats listener: the stats thread pool refused the listener job -- the STATUS display is unavailable for this run\n");
 }

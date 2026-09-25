@@ -95,7 +95,7 @@ static void RunMergeWriterJob(uint32_t thdIdx, PSolveContext pCtx, PFlushDescrip
     ** the event on compression instead just serializes GPU compute behind
     ** single-threaded LZ4 work for no safety benefit.
     */
-    SetEvent(pDesc->hDoneEvent);
+    SetEventOrFatal(pDesc->hDoneEvent, "the GPU flush's device-to-host-copy-done event");
 
     /* Mark staging areas as live (before compression so flush path can see them) */
     pSt->mwBlackStagingCount[ti] = blackCount;
@@ -182,10 +182,13 @@ static void RunMergeWriterJob(uint32_t thdIdx, PSolveContext pCtx, PFlushDescrip
 ** @brief    Queues a completed GPU flush onto the merge-writer thread pool for D2H+compression.
 ** @param    pCtx  - solve context
 ** @param    pDesc - the flush to process; freed after the job runs
+** @return   true if the job was queued; false if the merge-writer pool is shutting down and
+**           refused it, in which case the job never runs, pDesc is NOT freed by it (the caller
+**           still owns pDesc), and nobody will ever signal pDesc->hDoneEvent.
 */
-void SubmitMergeWriterJob(PSolveContext pCtx, PFlushDescriptor pDesc)
+bool SubmitMergeWriterJob(PSolveContext pCtx, PFlushDescriptor pDesc)
 {
-    pCtx->pState->pMergeWriterPool->QueueJob(
+    return pCtx->pState->pMergeWriterPool->QueueJob(
         [pCtx, pDesc](uint32_t thdIdx)
         {
             RunMergeWriterJob(thdIdx, pCtx, pDesc);
@@ -490,14 +493,37 @@ static void FlushAccumulator(GpuAccumulator* pAccum, PSolveContext pCtx)
     pDesc->pAccum     = pAccum;
     pDesc->blackCount = GpuFlushBlackCount(pAccum);
     pDesc->whiteCount = GpuFlushWhiteCount(pAccum);
-    pDesc->hDoneEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-    if (!pDesc->hDoneEvent)
-        Fatal(FATAL_ALLOCATION_FAILED, "FlushAccumulator: cannot create done event");
+    pDesc->hDoneEvent = CreateEventOrFatal(FALSE, FALSE, "the GPU flush's device-to-host-copy-done event");
 
-    SubmitMergeWriterJob(pCtx, pDesc);
+    /* A pool that refuses the job is being stopped, which only happens as
+    ** the whole process shuts down. The job will then never run, so nobody
+    ** will free pDesc or signal the event -- waiting would hang forever. Clean
+    ** up here and carry on. If the run is NOT shutting down, the refusal is a
+    ** real fault: this flush's boards would be silently lost.
+    */
+    if (!SubmitMergeWriterJob(pCtx, pDesc))
+    {
+        if (!pCtx->pState->terminateThreads)
+            Fatal(FATAL_SYNC_FAILED,
+                  "FlushAccumulator: the merge-writer pool refused a flush job while the run is not shutting down -- "
+                  "%d black and %d white unique boards would be lost\n",
+                  pDesc->blackCount, pDesc->whiteCount);
 
-    WaitForSingleObject(pDesc->hDoneEvent, INFINITE);
-    CloseHandle(pDesc->hDoneEvent);
+        LoggerLog("FlushAccumulator: the merge-writer pool is stopping for shutdown; this flush was not queued "
+                  "(its boards are discarded with the level)\n");
+
+        CloseHandleOrFatal(pDesc->hDoneEvent, "the GPU flush's device-to-host-copy-done event");
+        MemFree(pDesc);
+        GpuFlushReset(pAccum);
+        return;
+    }
+
+    /* The event is signaled as soon as the device-to-host copy is done (not
+    ** after compression), so this wait is normally brief; it is bounded in
+    ** slices and reports if it ever runs long.
+    */
+    WaitForEventsOrFatal(&pDesc->hDoneEvent, 1, "the merge-writer job's GPU-to-host copy");
+    CloseHandleOrFatal(pDesc->hDoneEvent, "the GPU flush's device-to-host-copy-done event");
 
     GpuFlushReset(pAccum);
 }
@@ -713,10 +739,24 @@ static void RunGpuFeederJob(uint32_t /*thdIdx*/, PSolveContext pCtx, uint8_t lev
 */
 void SubmitGpuFeederJob(PSolveContext pCtx, uint8_t level)
 {
-    pCtx->pState->pGPUFeederThreadPool->QueueJob(
+    bool queued = pCtx->pState->pGPUFeederThreadPool->QueueJob(
         [pCtx, level](uint32_t thdIdx)
         {
             RunGpuFeederJob(thdIdx, pCtx, level);
         }
     );
+
+    /* A refused feeder job means nothing solves this level, yet the caller's
+    ** next step (waiting for the feeder pool to go idle) would return at once
+    ** and the level would be treated as solved. That is only acceptable while
+    ** the process is shutting down.
+    */
+    if (!queued)
+    {
+        if (!pCtx->pState->terminateThreads)
+            Fatal(FATAL_SYNC_FAILED, "SubmitGpuFeederJob: the GPU feeder pool refused the level %d feeder job while the run is not shutting down\n",
+                  (int)level);
+
+        LoggerLog("SubmitGpuFeederJob: the GPU feeder pool is stopping for shutdown; level %d feeder job not queued\n", (int)level);
+    }
 }

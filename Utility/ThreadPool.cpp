@@ -3,17 +3,36 @@
 **
 ** Purpose:
 **   Implements the ThreadPool class declared in ThreadPool.h: a fixed-size
-**   worker-thread pool pulling jobs from a bounded queue.
+**   worker-thread pool pulling jobs from a bounded queue. Also implements
+**   the checked event helpers (CreateEventOrFatal, SetEventOrFatal,
+**   CloseHandleOrFatal, WaitForEventsOrFatal) used wherever one thread waits
+**   for another's completion signal.
+**
+** Notes:
+**   The event helpers exist because every wait/create/set/close call has a
+**   failure result that must never be ignored. An ignored failed wait
+**   returns immediately, and the caller then carries on while the work it
+**   was waiting for is still running -- silent corruption of whatever that
+**   work was still using. These helpers stop the process with the real cause
+**   instead, and turn an unbounded wait into one that periodically says
+**   what it is still waiting for.
 */
 
 /* Includes */
 #include "ThreadPool.h"
 #include <Windows.h>
 #include <codecvt>
+#include "Error.h"
+#include "Logger.h"
 
 using namespace std;
 
 //#define THREADPOOL_VERBOSE
+
+/* Macros and Defines */
+#define WAIT_SLICE_MS          60000ULL                /* how long one wait blocks before it re-checks and may report              */
+#define WAIT_FIRST_REPORT_MS   (15ULL * 60 * 1000)     /* first "still waiting" note appears once a wait has lasted this long       */
+#define WAIT_REPEAT_REPORT_MS  (30ULL * 60 * 1000)     /* after that, the note repeats every this long                              */
 
 /* Functions */
 
@@ -29,6 +48,14 @@ void ThreadPool::Start()
     ** this project builds for. Cheap enough to do it the correct way.
     */
     isBusyArray = (std::atomic<bool>*)MemMalloc((char*)"bool.Array.ThreadPool", sizeof(std::atomic<bool>) * num_threads);
+
+    /* Every other allocation in the project stops with a clear message on
+    ** failure; without this the loop below would write through a null pointer.
+    */
+    if (isBusyArray == NULL)
+        Fatal(FATAL_ALLOCATION_FAILED, "ThreadPool::Start: cannot allocate the busy-flag array for pool '%s' (%u threads)\n",
+              m_threadName.c_str(), (unsigned)num_threads);
+
     for (uint32_t i = 0; i < num_threads; i++)
         isBusyArray[i].store(false, std::memory_order_relaxed);
     readyCount.store(0, std::memory_order_relaxed);
@@ -47,17 +74,25 @@ void ThreadPool::Start()
 ** @brief  Enqueues job for a worker thread to run, blocking the caller
 **         if the queue is already at MAX_QUEUE_DEPTH.
 ** @param  job - the work to run; called as job(workerIndex) by whichever worker picks it up
+** @return true if the job was queued; false if the pool is shutting down and the job was
+**         dropped. The caller MUST NOT wait for a dropped job to finish -- it never will.
 */
-void ThreadPool::QueueJob(const std::function<void(uint32_t)>& job)
+bool ThreadPool::QueueJob(const std::function<void(uint32_t)>& job)
 {
     {
         unique_lock<mutex> lock(queue_mutex);
         queue_not_full.wait(lock, [this] { return jobs.size() < MAX_QUEUE_DEPTH || should_terminate; });
+
+        /* A pool that is stopping discards new work. Say so through the
+        ** return value: a caller that then waited for this job would wait
+        ** forever, which used to hang a shutdown with no explanation.
+        */
         if (should_terminate)
-            return;
+            return false;
         jobs.push(job);
     }
     mutex_condition.notify_one();
+    return true;
 }
 
 /*
@@ -226,6 +261,20 @@ void ThreadPool::ThreadLoop(uint32_t idx)
     LPCWSTR       result = wide.c_str();
     HRESULT       r      = SetThreadDescription(GetCurrentThread(), result);
 
+    /* The description only names the thread in debuggers and dumps, so a
+    ** failure is not fatal -- but say so (once for the whole process, not
+    ** once per thread) rather than have thread names quietly missing from
+    ** the next crash dump.
+    */
+    if (FAILED(r))
+    {
+        static std::atomic<bool> s_descriptionFailureReported{ false };   /* true once the failure has been logged */
+
+        if (!s_descriptionFailureReported.exchange(true))
+            LoggerLog("ThreadPool: SetThreadDescription failed (HRESULT 0x%08lX) -- worker threads will be unnamed in debuggers and crash dumps\n",
+                      (unsigned long)r);
+    }
+
     /* Marks this OS thread as genuinely running, as opposed to merely having
     ** had std::thread's constructor return on the caller's side (which says
     ** nothing about whether the new thread has actually been scheduled yet).
@@ -250,5 +299,131 @@ void ThreadPool::ThreadLoop(uint32_t idx)
         queue_not_full.notify_one();
 
         job(idx);
+    }
+}
+
+/*
+** Function: CloseHandleOrFatal
+** @brief    Closes a handle and stops the process if the close fails.
+** @details  A failed CloseHandle means the handle was already closed or was
+**           never valid -- a double close somewhere, which can also close a
+**           recycled handle value that now belongs to something else. That is
+**           a bug worth stopping for, not a result to discard.
+** @param    hHandle - the handle to close
+** @param    pszWhat - what the handle was, for the failure message
+*/
+void CloseHandleOrFatal(HANDLE hHandle, const char* pszWhat)
+{
+    /* GetLastError is read straight after the failed call, before anything
+    ** else can overwrite it.
+    */
+    if (!CloseHandle(hHandle))
+    {
+        DWORD closeError = GetLastError();   /* Windows error from the failed close */
+
+        Fatal(FATAL_SYNC_FAILED, "CloseHandle failed for %s (handle %p, Windows error %lu) -- a double close or an invalid handle\n",
+              pszWhat, hHandle, (unsigned long)closeError);
+    }
+}
+
+/*
+** Function: CreateEventOrFatal
+** @brief    Creates an unnamed event and stops the process if creation fails.
+** @details  A failed CreateEvent returns NULL. Passing NULL on to a wait makes
+**           the wait fail immediately, and a caller that ignores that
+**           proceeds while the work it meant to wait for is still running.
+** @param    manualReset  - TRUE for a manual-reset event, FALSE for auto-reset
+** @param    initialState - TRUE to create the event already signaled
+** @param    pszWhat      - what the event is for, for the failure message
+** @return   The new event handle (never NULL).
+*/
+HANDLE CreateEventOrFatal(BOOL manualReset, BOOL initialState, const char* pszWhat)
+{
+    HANDLE hEvent = CreateEventA(nullptr, manualReset, initialState, nullptr);   /* the new event, or NULL on failure */
+
+    if (hEvent == nullptr)
+    {
+        DWORD createError = GetLastError();   /* Windows error from the failed create */
+
+        Fatal(FATAL_SYNC_FAILED, "CreateEvent failed for %s (Windows error %lu)\n", pszWhat, (unsigned long)createError);
+    }
+
+    return hEvent;
+}
+
+/*
+** Function: SetEventOrFatal
+** @brief    Signals an event and stops the process if the signal fails.
+** @details  A failed SetEvent leaves the waiter waiting for a signal that
+**           will never come; the failure would otherwise surface only as a
+**           hang with no explanation.
+** @param    hEvent  - the event to signal
+** @param    pszWhat - what the event is for, for the failure message
+*/
+void SetEventOrFatal(HANDLE hEvent, const char* pszWhat)
+{
+    if (!SetEvent(hEvent))
+    {
+        DWORD setError = GetLastError();   /* Windows error from the failed signal */
+
+        Fatal(FATAL_SYNC_FAILED, "SetEvent failed for %s (handle %p, Windows error %lu)\n",
+              pszWhat, hEvent, (unsigned long)setError);
+    }
+}
+
+/*
+** Function: WaitForEventsOrFatal
+** @brief    Waits until every handle in pHandles is signaled, reporting on
+**           long waits and stopping the process if the wait itself fails.
+** @details  Waits in one-minute slices instead of INFINITE. A timed-out
+**           slice just means the work is still running (flushing many
+**           gigabytes legitimately takes minutes), so the wait continues --
+**           but once it has lasted 15 minutes, and every 30 after that, a
+**           line in the log says what it is still waiting for, so a wait that
+**           will never end no longer looks the same as a quiet run. Any
+**           result other than "all signaled" or "timed out" (an invalid
+**           handle, an abandoned wait) is a bug: continuing would let the
+**           caller run on while the waited-for work is still using shared
+**           memory, so the process stops with the real cause instead.
+** @param    pHandles - the handles to wait on (all of them must be signaled)
+** @param    count    - number of handles
+** @param    pszWhat  - what is being waited for, for log/failure messages
+*/
+void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat)
+{
+    uint64_t waitedMs   = 0;                     /* total time spent waiting so far                               */
+    uint64_t nextNoteMs = WAIT_FIRST_REPORT_MS;  /* waited time at which the next "still waiting" note is due    */
+    DWORD    waitResult = 0;                     /* result of the most recent wait slice                          */
+    DWORD    waitError  = 0;                     /* Windows error captured right after a failed wait              */
+
+    for (;;)
+    {
+        waitResult = WaitForMultipleObjects(count, pHandles, TRUE, (DWORD)WAIT_SLICE_MS);
+
+        /* Every handle signaled: the work is done. */
+        if (waitResult == WAIT_OBJECT_0)
+            return;
+
+        /* Just this slice timing out: the work is still running. Note it
+        ** if the wait has become unusually long, then keep waiting.
+        */
+        if (waitResult == WAIT_TIMEOUT)
+        {
+            waitedMs += WAIT_SLICE_MS;
+            if (waitedMs >= nextNoteMs)
+            {
+                LoggerLog("Still waiting on %s after %llu minutes (this is normal for a very large flush or merge, but report it if the run looks stuck)\n",
+                          pszWhat, (unsigned long long)(waitedMs / 60000ULL));
+                nextNoteMs += WAIT_REPEAT_REPORT_MS;
+            }
+            continue;
+        }
+
+        /* Anything else -- WAIT_FAILED for an invalid handle, or an
+        ** unexpected code -- means the wait did not do its job.
+        */
+        waitError = GetLastError();
+        Fatal(FATAL_SYNC_FAILED, "Wait on %s failed: WaitForMultipleObjects returned 0x%lX (Windows error %lu, %lu handle(s))\n",
+              pszWhat, (unsigned long)waitResult, (unsigned long)waitError, (unsigned long)count);
     }
 }

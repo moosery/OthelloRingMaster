@@ -312,10 +312,16 @@ static void RunCalculatorStatsListenerJob(uint32_t /*thdIdx*/, PCalculatorContex
 */
 void SubmitCalculatorStatsListenerJob(PCalculatorContext pCtx)
 {
-    pCtx->pState->pStatsThreadPool->QueueJob(
+    bool queued = pCtx->pState->pStatsThreadPool->QueueJob(
         [pCtx](uint32_t thdIdx)
         {
             RunCalculatorStatsListenerJob(thdIdx, pCtx);
         }
     );
+
+    /* Not fatal -- the calculation does not depend on the status display --
+    ** but a listener that silently never started leaves no STATUS and no clue why.
+    */
+    if (!queued)
+        LoggerLog("Calculator stats listener: the stats thread pool refused the listener job -- the STATUS display is unavailable for this run\n");
 }

@@ -77,17 +77,39 @@ static void RunBothColorIMerge(PSolveContext pCtx)
     ** same pattern FlushMergeWriterBuffer uses for its two flusher jobs.
     */
     HANDLE events[2];
-    events[RSF_PLAYER_WHITE] = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    events[RSF_PLAYER_BLACK] = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    events[RSF_PLAYER_WHITE] = CreateEventOrFatal(TRUE, FALSE, "the white iMerge-session-complete event");
+    events[RSF_PLAYER_BLACK] = CreateEventOrFatal(TRUE, FALSE, "the black iMerge-session-complete event");
 
-    pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
-        { IMergeRunSession(pCtx, RSF_PLAYER_WHITE); SetEvent(events[RSF_PLAYER_WHITE]); });
-    pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
-        { IMergeRunSession(pCtx, RSF_PLAYER_BLACK); SetEvent(events[RSF_PLAYER_BLACK]); });
+    /* Each session is queued and checked. A pool that refuses the job is
+    ** being stopped; that only happens as the whole process shuts down, and
+    ** a sweep that has not run is then simply not done. Waiting for a job
+    ** that was never queued would wait forever, so signal its event instead.
+    ** If the run is NOT shutting down, a refused session is a real fault.
+    */
+    bool whiteQueued = pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
+        { IMergeRunSession(pCtx, RSF_PLAYER_WHITE); SetEventOrFatal(events[RSF_PLAYER_WHITE], "the finished white iMerge session"); });
+    bool blackQueued = pSt->pIMergePool->QueueJob([pCtx, &events](uint32_t)
+        { IMergeRunSession(pCtx, RSF_PLAYER_BLACK); SetEventOrFatal(events[RSF_PLAYER_BLACK], "the finished black iMerge session"); });
 
-    WaitForMultipleObjects(2, events, TRUE, INFINITE);
-    CloseHandle(events[RSF_PLAYER_WHITE]);
-    CloseHandle(events[RSF_PLAYER_BLACK]);
+    if (!whiteQueued || !blackQueued)
+    {
+        if (!pSt->terminateThreads)
+            Fatal(FATAL_SYNC_FAILED,
+                  "RunBothColorIMerge: the iMerge pool refused a session job (white queued=%d, black queued=%d) while the run is not shutting down\n",
+                  (int)whiteQueued, (int)blackQueued);
+
+        LoggerLog("RunBothColorIMerge: the iMerge pool is stopping for shutdown; the space-relief sweep was not run for %s%s%s\n",
+                  whiteQueued ? "" : "white", (!whiteQueued && !blackQueued) ? " and " : "", blackQueued ? "" : "black");
+
+        if (!whiteQueued)
+            SetEventOrFatal(events[RSF_PLAYER_WHITE], "a white iMerge session skipped at shutdown");
+        if (!blackQueued)
+            SetEventOrFatal(events[RSF_PLAYER_BLACK], "a black iMerge session skipped at shutdown");
+    }
+
+    WaitForEventsOrFatal(events, 2, "the white and black iMerge sessions (a space-relief sweep)");
+    CloseHandleOrFatal(events[RSF_PLAYER_WHITE], "the white iMerge-session-complete event");
+    CloseHandleOrFatal(events[RSF_PLAYER_BLACK], "the black iMerge-session-complete event");
 }
 
 /*

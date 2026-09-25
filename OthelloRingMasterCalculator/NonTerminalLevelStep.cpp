@@ -174,7 +174,7 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
 
         for (int p = 0; p < parentCount; p++)
         {
-            pState->pLookupThreadPool->QueueJob([&, p](uint32_t /*thdIdx*/)
+            bool queued = pState->pLookupThreadPool->QueueJob([&, p](uint32_t /*thdIdx*/)
             {
                 ParentJobResult& jr = jobResults[p];
 
@@ -244,6 +244,15 @@ static PlayerLevelResult ProcessNonTerminalLevelForPlayer(
 
                 remaining.fetch_sub(1, std::memory_order_release);
             });
+
+            /* A refused job never decrements `remaining`, so the spin-wait
+            ** below would wait forever and the parent would be silently
+            ** skipped. The pool only refuses work while it is being stopped;
+            ** stop with the real cause instead of hanging.
+            */
+            if (!queued)
+                Fatal(FATAL_SYNC_FAILED, "ProcessNonTerminalLevel: level %d %s-to-move: the lookup thread pool refused parent job %d of %d\n",
+                      level, RSFPlayerStr(player), p, parentCount);
         }
 
         /* Wait for this batch's jobs -- cheap spin, batches are frequent

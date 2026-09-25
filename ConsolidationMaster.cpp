@@ -321,7 +321,7 @@ void ConsolidationMasterLoop(PSolveContext pCtx)
                 }
 
                 InterlockedDecrement((volatile LONG*)&pSt->consolidatorFreeCount);
-                pSt->pConsolidatorPool->QueueJob(
+                bool queued = pSt->pConsolidatorPool->QueueJob(
                     /* outPath (a char[MAX_FULL_PATH_NAME]) is captured by value --
                     ** the closure owns its own copy of the buffer, safe to use
                     ** after this scope returns.
@@ -331,6 +331,26 @@ void ConsolidationMasterLoop(PSolveContext pCtx)
                         ConsolidatorWorkerBody(pCtx, (int)thdIdx, wi, player, nodes, paths, count,
                                                 outNode, outPath, runningSize);
                     });
+
+                /* A pool that refuses the job is being stopped -- the process is
+                ** shutting down. Nothing will ever run this batch, so give back
+                ** everything it reserved (the same release the earlier
+                ** could-not-start paths above perform) instead of leaking it. If
+                ** the run is NOT shutting down, a refusal is a real fault.
+                */
+                if (!queued)
+                {
+                    if (!pSt->terminateThreads && !pSt->terminateConsolidation)
+                        Fatal(FATAL_SYNC_FAILED, "ConsolidationMasterLoop: the consolidator pool refused a %d-file batch while the run is not shutting down\n", count);
+
+                    LoggerLog("ConsolidationMasterLoop: the consolidator pool is stopping for shutdown; a %d-file batch was not started\n", count);
+
+                    RegistryAbandonNew(pSt, wi, outNode);
+                    DriveReclaim(pSt, driveLetter, runningSize);
+                    for (int i = 0; i < count; i++) { RegistryUnreserveOne(pSt, wi, nodes[i]); MemFree(paths[i]); }
+                    MemFree(nodes); MemFree(paths);
+                    InterlockedIncrement((volatile LONG*)&pSt->consolidatorFreeCount);
+                }
             }
         }
     }

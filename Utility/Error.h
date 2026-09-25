@@ -82,6 +82,11 @@ constexpr auto FATAL_GPU_ERROR                        = RC_FATAL_BASE + 36;
 constexpr auto FATAL_MERGE_LOGIC_ERROR                = RC_FATAL_BASE + 37;
 constexpr auto FATAL_COUNTER_WIDTH_CONFIG_WRITE_FAILED = RC_FATAL_BASE + 38;
 constexpr auto FATAL_STORE_DRIVE_UNREACHABLE           = RC_FATAL_BASE + 39;
+constexpr auto FATAL_SYNC_FAILED                       = RC_FATAL_BASE + 40;   /* an event/wait/signal/handle-close call failed */
+constexpr auto FATAL_FILE_DELETE_FAILED                = RC_FATAL_BASE + 41;   /* a file that had to be deleted could not be    */
+constexpr auto FATAL_FILE_WRITE_FAILED                 = RC_FATAL_BASE + 42;   /* a write/flush/close of a data or sentinel file failed */
+constexpr auto FATAL_MERGE_VERIFY_FAILED               = RC_FATAL_BASE + 43;   /* a merge output failed its integrity check     */
+constexpr auto FATAL_STALE_FILES                       = RC_FATAL_BASE + 44;   /* leftover files that would contaminate a level */
 
 /* Utility Implementation errors */
 constexpr auto UTIL_RC_Success                    = RC_SUCCESS;

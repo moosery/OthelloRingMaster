@@ -69,8 +69,11 @@ public:
     ** @brief  Enqueues job for a worker thread to run, blocking the caller
     **         if the queue is already at MAX_QUEUE_DEPTH.
     ** @param  job - the work to run; called as job(workerIndex) by whichever worker picks it up
+    ** @return true if the job was queued; false if the pool is shutting down and the job was
+    **         dropped. A caller that would wait for the job to finish MUST check this -- a
+    **         dropped job never runs, so waiting for it never ends.
     */
-    void QueueJob(const std::function<void(uint32_t)>& job);
+    bool QueueJob(const std::function<void(uint32_t)>& job);
 
     /*
     ** Method: Stop
@@ -180,3 +183,42 @@ static inline void WaitForPoolIdle(ThreadPool* pPool)
     while (pPool->IsBusy())
         Sleep(1);
 }
+
+/*
+** Function: CloseHandleOrFatal
+** @brief    Closes a handle; stops the process (naming pszWhat) if the close fails,
+**           since that means a double close or an invalid handle.
+** @param    hHandle - the handle to close
+** @param    pszWhat - what the handle was, for the failure message
+*/
+void CloseHandleOrFatal(HANDLE hHandle, const char* pszWhat);
+
+/*
+** Function: CreateEventOrFatal
+** @brief    Creates an unnamed event; stops the process (naming pszWhat) if creation fails.
+** @param    manualReset  - TRUE for a manual-reset event, FALSE for auto-reset
+** @param    initialState - TRUE to create the event already signaled
+** @param    pszWhat      - what the event is for, for the failure message
+** @return   The new event handle (never NULL).
+*/
+HANDLE CreateEventOrFatal(BOOL manualReset, BOOL initialState, const char* pszWhat);
+
+/*
+** Function: SetEventOrFatal
+** @brief    Signals an event; stops the process (naming pszWhat) if the signal fails.
+** @param    hEvent  - the event to signal
+** @param    pszWhat - what the event is for, for the failure message
+*/
+void SetEventOrFatal(HANDLE hEvent, const char* pszWhat);
+
+/*
+** Function: WaitForEventsOrFatal
+** @brief    Waits until every handle is signaled. Waits in one-minute slices and logs a
+**           "still waiting on <pszWhat>" note after 15 minutes (then every 30); stops the
+**           process if the wait itself fails (invalid handle etc.) rather than letting the
+**           caller carry on while the awaited work is still running.
+** @param    pHandles - the handles to wait on (all must be signaled)
+** @param    count    - number of handles
+** @param    pszWhat  - what is being waited for, for log/failure messages
+*/
+void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat);
