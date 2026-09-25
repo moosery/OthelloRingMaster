@@ -7,9 +7,12 @@
 **     - Error()/ErrorGetLast()/ErrorGetLastReason()/ErrorPrint() record a
 **       recoverable error plus a formatted reason string, thread-locally, so
 **       a caller can report or react to it without immediately terminating.
-**     - Fatal() prints a message and terminates the process immediately, for
-**       conditions where continuing to run is unsafe (corrupted state, a
-**       failed I/O the caller cannot recover from, etc.).
+**     - Fatal() prints a message (on stderr and in the log file) and
+**       terminates the process immediately, for conditions where continuing
+**       to run is unsafe (corrupted state, a failed I/O the caller cannot
+**       recover from, etc.).
+**     - CrashHandlerInstall() makes a native crash leave a readable record
+**       in the log instead of a log that just stops.
 **   RC is the shared return/error-code type. Each subsystem is given its own
 **   10000-wide numeric range (RC_BOARD_BASE, RC_BP_BASE, ...) so error codes
 **   from different subsystems never collide, and FATAL_* codes below
@@ -128,3 +131,16 @@ void ErrorPrint(FILE* fpOut);
 ** @param    ...         - format arguments for pszReasonFmt
 */
 __declspec(noreturn) void Fatal(RC rc, const char* pszReasonFmt, ...);
+
+/*
+** Function: CrashHandlerInstall
+** @brief    Arranges for a native crash (access violation, invalid handle,
+**           heap corruption...), an uncaught C++ exception, a C runtime
+**           invalid-parameter failure or an abort() to leave a readable
+**           record -- time, thread, exception, fault address as
+**           module+offset, registers and a stack scan -- in the log file
+**           and on stderr. The normal crash dump is still produced.
+**           Call once, right after the log file is opened.
+** @param    pszLogPath - path of the log file the record is appended to; may be nullptr for console only
+*/
+void CrashHandlerInstall(const char* pszLogPath);

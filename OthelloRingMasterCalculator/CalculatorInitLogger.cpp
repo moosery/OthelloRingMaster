@@ -25,5 +25,12 @@ void CalculatorInitLogger(POthelloRingMasterCalculatorConfig pConfig, POthelloRi
     snprintf(pState->logFileName, MAX_FULL_PATH_NAME, "%s\\log_%dx%d_%s.txt",
              pConfig->cacheDirName, pConfig->boardSize, pConfig->boardSize, dateStr);
     LoggerInit(pState->logFileName);
+
+    /* From here on a native crash (or an uncaught exception, abort, or C
+    ** runtime invalid-parameter failure) appends a readable record to
+    ** this same log -- without it, a crash leaves a log that just stops.
+    */
+    CrashHandlerInstall(pState->logFileName);
+
     LoggerLog("OthelloRingMasterCalculator! (Version %s)\n", CALCULATOR_VERSION);
 }

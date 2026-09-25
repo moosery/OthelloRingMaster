@@ -85,12 +85,21 @@ int main(int argc, char* argv[])
     }
 
     WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    int     wsaResult = WSAStartup(MAKEWORD(2, 2), &wsa);   /* 0 on success, otherwise the Winsock error code */
+
+    /* Every later socket call depends on Winsock having started; without
+    ** this check a failure here surfaces as a confusing "socket() failed".
+    */
+    if (wsaResult != 0)
+    {
+        fprintf(stderr, "WSAStartup failed (error %d)\n", wsaResult);
+        return 1;
+    }
 
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET)
     {
-        fprintf(stderr, "socket() failed\n");
+        fprintf(stderr, "socket() failed (WSA error %d)\n", WSAGetLastError());
         WSACleanup();
         return 1;
     }
@@ -98,7 +107,17 @@ int main(int argc, char* argv[])
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons((u_short)port);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    /* inet_pton returns 1 on success; anything else leaves addr unset, and
+    ** connecting to an unset address would fail in a misleading way.
+    */
+    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1)
+    {
+        fprintf(stderr, "inet_pton failed for 127.0.0.1\n");
+        closesocket(s);
+        WSACleanup();
+        return 1;
+    }
 
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0)
     {
@@ -109,7 +128,17 @@ int main(int argc, char* argv[])
     }
 
     const char* cmd = doStop ? "STOP\n" : (doConsol ? "CONSOL\n" : (doCheckpt ? "CHECKPT\n" : "STATUS\n"));
-    send(s, cmd, (int)strlen(cmd), 0);
+    /* A failed send means the command never reached the solver -- for
+    ** --stop especially, silently carrying on would look like a request
+    ** that was ignored.
+    */
+    if (send(s, cmd, (int)strlen(cmd), 0) == SOCKET_ERROR)
+    {
+        fprintf(stderr, "Failed to send the command to OthelloRingMaster (WSA error %d)\n", WSAGetLastError());
+        closesocket(s);
+        WSACleanup();
+        return 1;
+    }
 
     /* Timestamp the query on the client side -- the solver's response
     ** doesn't carry one, and this makes it clear how fresh the printed
@@ -130,6 +159,19 @@ int main(int argc, char* argv[])
     {
         buf[got] = '\0';
         printf("%s", buf);
+    }
+
+    /* recv returns 0 when the solver finished its reply and closed the
+    ** connection (normal) and SOCKET_ERROR when the link failed partway --
+    ** the second means the printed status may be cut short.
+    */
+    if (got == SOCKET_ERROR)
+    {
+        fprintf(stderr, "\nConnection error while reading the reply (WSA error %d) -- the status above may be incomplete\n",
+                WSAGetLastError());
+        closesocket(s);
+        WSACleanup();
+        return 1;
     }
 
     closesocket(s);

@@ -197,13 +197,38 @@ static void HandleClient(SOCKET client, PCalculatorContext pCtx)
 static void RunCalculatorStatsListenerJob(uint32_t /*thdIdx*/, PCalculatorContext pCtx)
 {
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
+    int     wsaResult         = 0;   /* WSAStartup's result: 0 on success, otherwise the Winsock error code      */
+    int     selectErrorStreak = 0;   /* consecutive select() failures, to tell a passing glitch from a dead socket */
+    int     acceptFailures    = 0;   /* accept() failures so far, so a repeating failure does not flood the log  */
+
+    /* Every startup failure below is logged: this thread is the only
+    ** source of the STATUS display, and returning silently would leave
+    ** no clue why the status client cannot connect.
+    */
+    wsaResult = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (wsaResult != 0)
+    {
+        LoggerLog("Calculator stats listener: WSAStartup failed (error %d) -- the STATUS display is unavailable for this run\n", wsaResult);
+        return;
+    }
 
     SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSock == INVALID_SOCKET) { WSACleanup(); return; }
+    if (listenSock == INVALID_SOCKET)
+    {
+        LoggerLog("Calculator stats listener: cannot create the listening socket (WSA error %d) -- the STATUS display is unavailable for this run\n",
+                  WSAGetLastError());
+        WSACleanup();
+        return;
+    }
 
+    /* SO_REUSEADDR lets the listener rebind a port still in TIME_WAIT after a
+    ** quick restart. Failing to set it is not fatal -- bind below is the real
+    ** test -- but it is the likely reason a bind then fails, so say so.
+    */
     BOOL reuse = TRUE;
-    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+    if (setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse)) == SOCKET_ERROR)
+        LoggerLog("Calculator stats listener: warning -- could not set SO_REUSEADDR (WSA error %d); binding may fail right after a restart\n",
+                  WSAGetLastError());
 
     sockaddr_in addr = {};
     addr.sin_family      = AF_INET;
@@ -229,12 +254,51 @@ static void RunCalculatorStatsListenerJob(uint32_t /*thdIdx*/, PCalculatorContex
         FD_SET(listenSock, &readSet);
         timeval tv = { 0, 50000 };   /* 50 ms */
 
-        if (select(0, &readSet, nullptr, nullptr, &tv) <= 0)
+        int selectResult = select(0, &readSet, nullptr, nullptr, &tv);   /* 0 = timeout, >0 = a client is waiting, SOCKET_ERROR = failure */
+
+        /* An error is not a timeout. Treating both as "nothing to do" made a
+        ** dead listening socket spin here forever, silently, at full CPU.
+        ** A short run of errors is logged once and retried with a pause;
+        ** a persistent one stops the listener with an explanation instead
+        ** of pretending to run.
+        */
+        if (selectResult == SOCKET_ERROR)
+        {
+            selectErrorStreak++;
+            if (selectErrorStreak == 1)
+                LoggerLog("Calculator stats listener: select failed (WSA error %d)\n", WSAGetLastError());
+
+            if (selectErrorStreak >= 100)
+            {
+                LoggerLog("Calculator stats listener: select failed %d times in a row -- giving up; the STATUS display is unavailable until the calculator restarts\n",
+                          selectErrorStreak);
+                break;
+            }
+
+            Sleep(50);
+            continue;
+        }
+        selectErrorStreak = 0;
+
+        /* A plain timeout: no client this interval, look again. */
+        if (selectResult == 0)
             continue;
 
         SOCKET client = accept(listenSock, nullptr, nullptr);
-        if (client != INVALID_SOCKET)
+        if (client == INVALID_SOCKET)
+        {
+            /* Log the first failure and then every hundredth, so a
+            ** repeating failure is visible without flooding the log.
+            */
+            acceptFailures++;
+            if (acceptFailures == 1 || acceptFailures % 100 == 0)
+                LoggerLog("Calculator stats listener: accept failed (WSA error %d; %d failure(s) so far)\n",
+                          WSAGetLastError(), acceptFailures);
+        }
+        else
+        {
             HandleClient(client, pCtx);
+        }
     }
 
     closesocket(listenSock);

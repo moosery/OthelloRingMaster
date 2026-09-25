@@ -38,6 +38,19 @@
 */
 static const int64_t DRIVE_AUDIT_TOLERANCE_BYTES = 4LL * 1024 * 1024 * 1024;
 
+/* How many consecutive failed free-space queries on one drive are ridden out
+** silently before the first warning, and how often the warning repeats after
+** that. A single failed query is routine (a network share momentarily
+** unreachable) and reconciliation simply tries again next pass; a run of
+** them means the drive really is not answering and reconciliation for it has
+** silently stopped, which is worth saying out loud.
+*/
+static const int DRIVE_AUDIT_QUIET_FAILURES  = 3;
+static const int DRIVE_AUDIT_REPEAT_FAILURES = 30;
+
+/* Globals */
+static int g_queryFailStreak[26] = { 0 };   /* consecutive failed free-space queries per drive letter (A..Z); reset on success */
+
 /* Functions */
 
 /*
@@ -78,8 +91,33 @@ static void reconcileOneDrive(PSolveContext pCtx, char driveLetter, int writerId
 
     char root[4] = { driveLetter, ':', '\\', '\0' };
     ULARGE_INTEGER freeAvail = {};
+    int  driveIdx = (driveLetter >= 'A' && driveLetter <= 'Z') ? (driveLetter - 'A') : 0;   /* slot in g_queryFailStreak for this drive */
+
     if (!GetDiskFreeSpaceExA(root, &freeAvail, nullptr, nullptr))
-        return;   /* transient failure (e.g. a NAS drive momentarily unreachable) -- try again next pass */
+    {
+        /* Transient failure (e.g. a NAS drive momentarily unreachable) -- try
+        ** again next pass. But count the failures: a few in a row are
+        ** routine and stay quiet, a persistent run means reconciliation for
+        ** this drive has silently stopped, so say so (first at the quiet
+        ** threshold, then periodically).
+        */
+        DWORD queryError = GetLastError();   /* Windows error from the failed query, captured before any other call */
+
+        g_queryFailStreak[driveIdx]++;
+        if (g_queryFailStreak[driveIdx] == DRIVE_AUDIT_QUIET_FAILURES ||
+            (g_queryFailStreak[driveIdx] > DRIVE_AUDIT_QUIET_FAILURES &&
+             (g_queryFailStreak[driveIdx] - DRIVE_AUDIT_QUIET_FAILURES) % DRIVE_AUDIT_REPEAT_FAILURES == 0))
+            LoggerLog("WARNING DriveSpaceAuditor: %c: free-space query has failed %d passes in a row (Windows error %lu) -- "
+                      "space reconciliation for this drive is not running until it answers again\n",
+                      driveLetter, g_queryFailStreak[driveIdx], (unsigned long)queryError);
+        return;
+    }
+
+    /* The drive answered. If it had been reported as failing, say it is back. */
+    if (g_queryFailStreak[driveIdx] >= DRIVE_AUDIT_QUIET_FAILURES)
+        LoggerLog("DriveSpaceAuditor: %c: free-space query is working again after %d failed passes\n",
+                  driveLetter, g_queryFailStreak[driveIdx]);
+    g_queryFailStreak[driveIdx] = 0;
 
     /* Value each in-flight write by how much of its reservation is NOT YET on
     ** disk: (reservedBytes - bytesWrittenSoFar). OS free space already reflects

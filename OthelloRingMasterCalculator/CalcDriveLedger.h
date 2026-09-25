@@ -49,7 +49,34 @@ static inline void CalcDriveInitLedger(POthelloRingMasterCalculatorState pState,
     char           root[4] = { letter, ':', '\\', '\0' };
     ULARGE_INTEGER freeAvail = {};
 
-    GetDiskFreeSpaceExA(root, &freeAvail, nullptr, nullptr);
+    /* The query's result MUST be checked: a failure leaves freeAvail at zero,
+    ** which would silently seed this drive's ledger as completely full and
+    ** send every later reservation down the out-of-space path for a reason
+    ** that has nothing to do with space. A drive that is only briefly
+    ** unreachable (a network share reconnecting) gets a few spaced retries
+    ** first; if it stays unreachable, stopping here with the real cause is
+    ** far clearer than the misleading out-of-space failure that would
+    ** otherwise follow.
+    */
+    BOOL  queried   = FALSE;   /* true once the free-space query has succeeded     */
+    DWORD lastError = 0;       /* Windows error code from the most recent failure */
+
+    for (int attempt = 0; attempt < 5 && !queried; attempt++)
+    {
+        if (attempt > 0)
+            Sleep(5000);
+
+        queried = GetDiskFreeSpaceExA(root, &freeAvail, nullptr, nullptr);
+        if (!queried)
+            lastError = GetLastError();
+    }
+
+    if (!queried)
+        Fatal(FATAL_DRIVE_SPACE,
+              "CalcDriveInitLedger: cannot query free space on %c: (Windows error %lu) after 5 attempts -- "
+              "the drive may be disconnected. Refusing to continue with an unknown amount of free space.\n",
+              letter, (unsigned long)lastError);
+
     int64_t available = (int64_t)freeAvail.QuadPart - (int64_t)CALC_DRIVE_SPACE_LOW_BYTES;
     if (available < 0) available = 0;
     InterlockedExchange64(

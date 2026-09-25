@@ -315,6 +315,28 @@ a large level into a minutes/hours re-merge. Every stored and reported figure is
 straight-through solve. (A pre-this-version zero-byte `_merging` sentinel with no stats payload
 falls back to the old full re-solve.)
 
+### Failure reporting
+
+A multi-day run has to say why it died, on its own. The run's log file (`log_<N>x<N>_<start>.txt`
+in the cache directory) is the place to look, and every way the solver can stop leaves a record in
+it:
+
+- **A deliberate stop (`Fatal`)** prints its reason on the console *and* appends it to the log as
+  a `FATAL (exit code N): ...` line.
+- **A native crash** (access violation, invalid handle, heap corruption, uncaught C++ exception,
+  `abort()`, C runtime invalid-parameter failure) appends a `*** NATIVE CRASH ***` /
+  `*** ABNORMAL TERMINATION ***` record: time, thread, exception code and name, fault address as
+  `module+offset`, key registers, and a stack scan of the program's own return addresses as
+  `exe+offset` (resolve them with the `.pdb` from the exact build that crashed). The crash
+  handler uses only raw Win32 calls, so it works even when the heap or C runtime is damaged, and
+  Windows Error Reporting still writes its normal dump. To capture full memory for deeper
+  analysis, set `DumpType` = 2 under
+  `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\OthelloRingMaster.exe`.
+- **A dying log itself** is reported: a failed write to the log or console is announced once on
+  stderr (a full disk otherwise makes a dead run look quiet).
+- A `.bat` launcher can append the process exit code and a timestamp to a file after the run, so a
+  run that ended without a trace is still unmistakable.
+
 ### Retrograde calculator
 
 ```

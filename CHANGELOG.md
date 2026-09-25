@@ -4,6 +4,57 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.7] - 2026-09-25
+
+### Failures now say why: `Fatal()` in the log, a native crash record, checked log writes, checked drive-space and socket calls
+
+Prompted by a real silent death. On 2026-09-24 a multi-day solve stopped with a native crash
+(`0xC0000008` inside `RtlLeaveCriticalSection`, called from `fclose` of a merge input) and the
+log simply ended -- no reason anywhere in it. Reading the crash dump took a hand-built stack
+scanner. The audit that followed also found that even the failures the solver raises on purpose
+(`Fatal()`) never reached the log file, only the console. This release closes those gaps.
+
+- **`Fatal()` now also writes to the log file** as a `FATAL (exit code N): <timestamp> <reason>`
+  line. Previously the reason existed only on the console window (the 9/23 log ends at the retry
+  lines without the failure that ended the run). New `LoggerLogFileOnly()` does the file write
+  without repeating the console output.
+- **New `CrashHandlerInstall()`** (Utility `Error.cpp`), called right after the log opens in the
+  solver and the calculator. A native crash, an uncaught C++ exception (`std::terminate`), a C
+  runtime invalid-parameter failure or an `abort()` now appends a readable record to the log and
+  stderr: time, thread id, exception code and name, fault address as `module+offset`, key
+  registers, and a stack scan listing the program's own return addresses as `exe+offset`
+  (resolvable later against the `.pdb` of the exact build). It uses only raw Win32 calls and
+  static buffers -- no heap, no printf, no stdio -- because the crash it was written for was a
+  corrupted stdio lock, and anything that allocates or takes a C runtime lock could fail again
+  exactly when its output is needed. It declines the exception afterward, so Windows Error
+  Reporting still writes the crash dump as before. (`__fastfail` cannot be intercepted by any
+  handler; `Fatal()` covers the failures the project raises deliberately.)
+- **`LoggerLog()` checks its writes.** A failed stdout or log-file write (full disk, dropped
+  share, broken handle) is reported once on stderr instead of leaving a log that quietly stops.
+  It also now writes to stdout even when no log file is open, as `Logger.h` always documented
+  (before, output before `LoggerInit` was dropped without a trace).
+- **Drive-space queries are checked.** `DriveInitLedger` / `CalcDriveInitLedger` ignored
+  `GetDiskFreeSpaceExA`'s result, so a failure silently seeded that drive's ledger as *full* and
+  sent everything down the out-of-space path for a reason that had nothing to do with space. They
+  now retry (5 tries, 5 s apart, to ride out a share reconnecting) and then `Fatal` naming the
+  drive and the Windows error. The drive-space auditor now reports a drive whose query keeps
+  failing (after 3 passes, then periodically) and reports when it recovers, instead of skipping it
+  silently forever.
+- **Stats listeners** (solver and calculator): `WSAStartup` and `socket` failures are logged
+  (they returned silently, leaving no STATUS display and no clue why); `select()` errors are no
+  longer confused with timeouts (a dead listening socket used to spin at full CPU, silently) -- a
+  short run is logged and retried, a persistent one stops the listener with an explanation;
+  `accept()` failures are logged (first, then every 100th); `SO_REUSEADDR` failure is logged.
+- **Status client tools** (`OthelloRingMasterStatus`, `OthelloRingMasterCalculatorStatus`): check
+  `WSAStartup`, `inet_pton` and the `send` of the command (a lost `--stop` used to look like an
+  ignored request) and detect a receive error versus a normal end of reply. These were the only
+  two ignored-result warnings Visual Studio's Code Analysis (C6031) reported.
+- **`CALCULATOR_VERSION` re-synced** to the solution-wide version (it had drifted at 0.33.9 while
+  `VERSION` advanced to 1.4.6).
+- README: new "Failure reporting" section describing where a run's failure reasons go.
+- (Outside the repo: `doit6.bat` now appends a start line and `exited with code N` to
+  `C:\OthelloRingMaster\Cache\exit_log.txt`.)
+
 ## [1.4.6] - 2026-09-19
 
 ### Default segment target lowered to 100MB -- real, measured ~4.3x lookup speedup
