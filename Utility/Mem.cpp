@@ -2,10 +2,20 @@
 ** Filename:  Mem.cpp
 **
 ** Purpose:
-**   Implements MemMalloc/MemFree/MemSize/MemStatsPrint/MemCheck (declared in
-**   Mem.h). Two compile-time modes, selected by the NOTRACK define below:
-**     - NOTRACK defined (the default): a thin, zero-overhead wrapper
-**       straight to malloc/free (still zero-initializing on alloc).
+**   Implements MemMalloc/MemFree/MemSize/MemStatsPrint/MemCheck/MemCheckBlock
+**   (declared in Mem.h). Compile-time modes, selected by the defines below:
+**     - LOOKFOROVERWRITE defined (the default; requires NOTRACK): every block
+**       is laid out as [32-byte header][user bytes][16-byte trailer]. The
+**       header's magic word and the trailer are both derived from the block's
+**       own address, so a stray write, a block copied to another address, or
+**       a pointer that never came from MemMalloc all fail the check. MemFree
+**       (and MemCheckBlock) verify both and stop the process on a mismatch,
+**       naming the block's tag, size and address; a freed block's header is
+**       stamped so freeing it again is reported as a double free. No list and
+**       no lock, so it costs a few dozen bytes per block and nothing on the
+**       hot paths.
+**     - NOTRACK defined without LOOKFOROVERWRITE: a thin, zero-overhead
+**       wrapper straight to malloc/free (still zero-initializing on alloc).
 **     - NOTRACK undefined: every allocation is wrapped in a MEMORY_NODE,
 **       linked into a doubly-linked list, and followed by a known
 **       "overwrite check" string, so MemCheck can later detect a buffer
@@ -22,11 +32,14 @@
 #include <shared_mutex>
 #include <windows.h>
 #include <memoryapi.h>
+#include <stdint.h>
+#include "Error.h"
 
 using namespace std;
 
 /* Macros and Defines */
 #define NOTRACK 1
+#define LOOKFOROVERWRITE 1   /* guard header + trailer on every block; see the file Purpose */
 //#define MEMDEBUG 1
 
 #define NAMESIZE 31
@@ -71,6 +84,97 @@ PMEMORY_NODE pLastNode       = NULL;   /* tail of the live-allocation list (trac
 MyMallocLock myMallocLock;             /* guards pFirstNode/pLastNode/totalAllocated            */
 size_t       totalAllocated = 0;       /* running total of bytes allocated and not yet freed    */
 
+#ifdef LOOKFOROVERWRITE
+#ifndef NOTRACK
+#error LOOKFOROVERWRITE replaces the tracking list and requires NOTRACK
+#endif
+
+/* Guard-mode block layout: [MemGuardHeader][user bytes][MEM_GUARD_TRAILER_BYTES].
+** The header is 32 bytes so the user pointer keeps malloc's 16-byte alignment.
+*/
+struct MemGuardHeader
+{
+    uint64_t magic;      /* MEM_GUARD_LIVE_KEY ^ user address while live; MEM_GUARD_FREED once freed */
+    uint64_t size;       /* requested user size                                                       */
+    char     tag[16];    /* first 15 characters of the caller's tag (not NUL-guaranteed when damaged) */
+};
+static_assert(sizeof(MemGuardHeader) == 32, "guard header must stay 32 bytes to preserve 16-byte alignment");
+
+const uint64_t MEM_GUARD_LIVE_KEY       = 0x4D454D4C49564531ull;   /* "MEMLIVE1" */
+const uint64_t MEM_GUARD_FREED          = 0x4D454D4652454544ull;   /* "MEMFREED" */
+const size_t   MEM_GUARD_TRAILER_BYTES  = 16;
+
+/*
+** Function: memGuardTrailer
+** @brief    Computes the two-word trailer expected just past a block's user
+**           bytes. Derived from the block's own address and size, so it can't
+**           be matched by an ordinary data pattern (zeros, a repeated fill)
+**           and differs for every block.
+** @param    pUser - the block's user pointer
+** @param    size  - the block's user size
+** @param    out   - out: the two expected trailer words
+*/
+static void memGuardTrailer(const void* pUser, uint64_t size, uint64_t out[2])
+{
+    uint64_t a = ((uint64_t)(uintptr_t)pUser * 0x9E3779B97F4A7C15ull) ^ size;
+    out[0] = a;
+    out[1] = ~a ^ 0xA5A5A5A5A5A5A5A5ull;
+}
+
+/*
+** Function: memGuardFail
+** @brief    Stops the process with a full description of a damaged block.
+** @param    pszWhere - call site that found the problem
+** @param    pszWhat  - what was wrong
+** @param    pHdr     - the block's header (contents may themselves be damaged)
+** @param    pUser    - the block's user pointer
+** @param    detail   - extra number to print (first damaged trailer byte offset, or the bad magic word)
+*/
+static void memGuardFail(const char* pszWhere, const char* pszWhat, const MemGuardHeader* pHdr,
+                         const void* pUser, uint64_t detail)
+{
+    Fatal(FATAL_MEMORY_CORRUPTED,
+          "Memory corruption found by %s: %s -- block at %p, tag '%.16s', recorded size %llu, detail 0x%llX. "
+          "(A write ran past this block's end or before its start, the block was freed twice, or the "
+          "pointer never came from MemMalloc.)",
+          pszWhere, pszWhat, pUser, pHdr->tag, (unsigned long long)pHdr->size, (unsigned long long)detail);
+}
+
+/*
+** Function: memGuardVerify
+** @brief    Checks one block's header and trailer; stops the process on a mismatch.
+** @param    pUser    - pointer returned by MemMalloc
+** @param    pszWhere - call site, for the failure message
+*/
+static void memGuardVerify(const void* pUser, const char* pszWhere)
+{
+    const MemGuardHeader* pHdr = ((const MemGuardHeader*)pUser) - 1;
+
+    if (pHdr->magic != (MEM_GUARD_LIVE_KEY ^ (uint64_t)(uintptr_t)pUser))
+    {
+        if (pHdr->magic == MEM_GUARD_FREED)
+            memGuardFail(pszWhere, "block was already freed (double free or use after free)", pHdr, pUser, pHdr->magic);
+        else
+            memGuardFail(pszWhere, "guard header damaged, or pointer not from MemMalloc", pHdr, pUser, pHdr->magic);
+    }
+
+    uint64_t expect[2];
+    memGuardTrailer(pUser, pHdr->size, expect);
+
+    uint8_t actual[MEM_GUARD_TRAILER_BYTES];
+    memcpy(actual, (const uint8_t*)pUser + pHdr->size, sizeof(actual));
+
+    if (memcmp(actual, expect, sizeof(actual)) != 0)
+    {
+        size_t firstBad = 0;
+        while (firstBad < sizeof(actual) && actual[firstBad] == ((const uint8_t*)expect)[firstBad])
+            firstBad++;
+        memGuardFail(pszWhere, "guard trailer overwritten (something wrote past the end of the block)",
+                     pHdr, pUser, (uint64_t)firstBad);
+    }
+}
+#endif
+
 /* "Canary" string written just past each tracked allocation's user data;
 ** MemCheck compares it back to catch a write that ran past the buffer's end.
 */
@@ -93,7 +197,30 @@ const char THE_MEMORY_OVERWRITE_CHECK_STR[52] = "Now is the time to see if the d
 */
 void* MemMalloc(const char* pStr, size_t sizeToAlloc)
 {
-#ifdef NOTRACK
+#ifdef LOOKFOROVERWRITE
+    if (sizeToAlloc > SIZE_MAX - sizeof(MemGuardHeader) - MEM_GUARD_TRAILER_BYTES)
+        return NULL;
+
+    MemGuardHeader* pHdr = (MemGuardHeader*)malloc(sizeof(MemGuardHeader) + sizeToAlloc + MEM_GUARD_TRAILER_BYTES);
+    if (pHdr == NULL)
+        return NULL;
+
+    uint8_t* pUser = (uint8_t*)(pHdr + 1);
+
+    pHdr->magic = MEM_GUARD_LIVE_KEY ^ (uint64_t)(uintptr_t)pUser;
+    pHdr->size  = sizeToAlloc;
+    memset(pHdr->tag, 0, sizeof(pHdr->tag));
+    if (pStr != NULL)
+        strncpy(pHdr->tag, pStr, sizeof(pHdr->tag) - 1);
+
+    memset(pUser, 0, sizeToAlloc);
+
+    uint64_t trailer[2];
+    memGuardTrailer(pUser, sizeToAlloc, trailer);
+    memcpy(pUser + sizeToAlloc, trailer, sizeof(trailer));
+
+    return pUser;
+#elif defined(NOTRACK)
     void* result = (void*)malloc(sizeToAlloc);
 
     if (result != NULL)
@@ -160,7 +287,17 @@ void MemFree(void* pPtr)
 {
     if (pPtr == NULL)
         return;
-#ifdef NOTRACK
+#ifdef LOOKFOROVERWRITE
+    memGuardVerify(pPtr, "MemFree");
+
+    /* Stamp the header so a second free of this block is recognised as one
+    ** (the CRT heap may reuse the memory afterward, but a later check of a
+    ** still-stamped header is what catches the common immediate double free).
+    */
+    MemGuardHeader* pHdr = ((MemGuardHeader*)pPtr) - 1;
+    pHdr->magic = MEM_GUARD_FREED;
+    free(pHdr);
+#elif defined(NOTRACK)
     free(pPtr);
 #else
     PMEMORY_NODE pTmp = (PMEMORY_NODE)pPtr;
@@ -330,5 +467,20 @@ void MemCheck(FILE* fpOut, const char* pszStr)
             pNode = pNode->pNextNode;
         }
     }
+#endif
+}
+
+/*
+** Function: MemCheckBlock
+** @brief    See Mem.h.
+*/
+void MemCheckBlock(const void* pPtr, const char* pszWhere)
+{
+#ifdef LOOKFOROVERWRITE
+    if (pPtr != NULL)
+        memGuardVerify(pPtr, pszWhere);
+#else
+    (void)pPtr;
+    (void)pszWhere;
 #endif
 }

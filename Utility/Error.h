@@ -87,6 +87,7 @@ constexpr auto FATAL_FILE_DELETE_FAILED                = RC_FATAL_BASE + 41;   /
 constexpr auto FATAL_FILE_WRITE_FAILED                 = RC_FATAL_BASE + 42;   /* a write/flush/close of a data or sentinel file failed */
 constexpr auto FATAL_MERGE_VERIFY_FAILED               = RC_FATAL_BASE + 43;   /* a merge output failed its integrity check     */
 constexpr auto FATAL_STALE_FILES                       = RC_FATAL_BASE + 44;   /* leftover files that would contaminate a level */
+constexpr auto FATAL_MEMORY_CORRUPTED                  = RC_FATAL_BASE + 45;   /* a MemMalloc block's guard words were overwritten, or it was freed twice */
 
 /* Utility Implementation errors */
 constexpr auto UTIL_RC_Success                    = RC_SUCCESS;

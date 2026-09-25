@@ -126,6 +126,39 @@ struct MergeHeadGreater
 */
 
 /*
+** Function: CheckMergePopOrder
+** @brief    Stops the run if a k-way merge pops a key smaller than the one it
+**           popped before -- proof that some input was not actually sorted.
+** @details  A merge of sorted inputs pops keys in non-decreasing order, so a
+**           key that goes backwards means at least one input is out of order.
+**           The merge would carry on without complaint and write an output
+**           that is itself out of order (and whose deduplication silently
+**           misses duplicates), and the inputs are deleted right afterward.
+**           Equal keys are legal -- they are the duplicates the merge exists
+**           to remove. One comparison per popped record, on values already in
+**           registers.
+** @param    hasPrev - true once a previous key exists
+** @param    prevHi  - previous popped key, high word
+** @param    prevLo  - previous popped key, low word
+** @param    hi      - key just popped, high word
+** @param    lo      - key just popped, low word
+** @param    pszWhere  - which merge (for the message)
+** @param    pszSource - the input that supplied the key (path or description)
+*/
+static inline void CheckMergePopOrder(bool hasPrev, uint64_t prevHi, uint64_t prevLo,
+                                      uint64_t hi, uint64_t lo,
+                                      const char* pszWhere, const char* pszSource)
+{
+    if (hasPrev && (hi < prevHi || (hi == prevHi && lo < prevLo)))
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "%s: input out of order -- popped key (0x%llX, 0x%llX) after (0x%llX, 0x%llX); "
+              "the input '%s' is not sorted. Nothing was deleted.",
+              pszWhere,
+              (unsigned long long)hi, (unsigned long long)lo,
+              (unsigned long long)prevHi, (unsigned long long)prevLo, pszSource);
+}
+
+/*
 ** Function: EnumerateByPattern
 ** @brief    Enumerates all RSF files matching fullPattern (e.g.
 **           "D:\dir\writer_black_*.rsf"), extracting the directory
@@ -296,6 +329,9 @@ uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath
         MergeHead top = heap.top();
         heap.pop();
 
+        CheckMergePopOrder(hasLast, lastKey.hi, lastKey.lo, top.key.hi, top.key.lo,
+                           "KWayMergeFiles", RSFReaderPath(top.pReader));
+
         if (pProgressBytes)
             InterlockedAdd64((volatile LONG64*)pProgressBytes, (LONG64)sizeof(UINT64_PAIR));
 
@@ -388,6 +424,9 @@ static uint64_t KWayMergeFilesToRingIndex(char** inputPaths, int numInputs, Ring
 
         MergeHead top = heap.top();
         heap.pop();
+
+        CheckMergePopOrder(hasLast, lastKey.hi, lastKey.lo, top.key.hi, top.key.lo,
+                           "KWayMergeFilesToRingIndex", RSFReaderPath(top.pReader));
 
         if (pProgressBytes)
             InterlockedAdd64((volatile LONG64*)pProgressBytes, (LONG64)sizeof(UINT64_PAIR));
@@ -499,6 +538,10 @@ static uint64_t MergeRingGroupsIntoBuilder(RingNestedIndexPullReader* pReaders, 
 
         RingGroupMergeHead top = heap.top();
         heap.pop();
+
+        CheckMergePopOrder(hasLast, lastKey.ullCellsInUse, lastKey.ullCellColors,
+                           top.key.ullCellsInUse, top.key.ullCellColors,
+                           "MergeRingGroupsIntoBuilder", "a ring-format cascade group (see the cascade temp files in the merge directories)");
 
         if (pProgressBytes)
             InterlockedAdd64((volatile LONG64*)pProgressBytes, (LONG64)sizeof(UINT64_PAIR));
@@ -1094,6 +1137,9 @@ void MergePoolToWriter(
     while (!heap.empty() && !*pTerminate)
     {
         PoolMergeHead top = heap.top(); heap.pop();
+        CheckMergePopOrder(hasLast, lastKey.hi, lastKey.lo, top.key.hi, top.key.lo,
+                           "MergePoolToWriter",
+                           top.reader ? RSFReaderPath(top.reader) : "the live uncompressed staging buffer");
         bool dup = hasLast && top.key.hi == lastKey.hi && top.key.lo == lastKey.lo;
         if (!dup) { RSFWriterRecord(pw, &top.key); lastKey = top.key; hasLast = true; }
         if (pProgressBytes)

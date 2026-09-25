@@ -4,6 +4,45 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.5.0] - 2026-09-25
+
+### Corruption detectors: merge order checks and a guarded allocator (`LOOKFOROVERWRITE`)
+
+The 2026-09-24 native crash was a fault inside `fclose` on a thread-private reader -- the
+signature of memory that something else had overwritten. Nothing in the code audit explains
+what wrote it. These two additions do not fix a known bug; they turn a silent, delayed,
+unattributable corruption into an immediate stop that names the culprit.
+
+- **Every k-way merge now checks that keys come out in order.** `KWayMergeFiles`,
+  `KWayMergeFilesToRingIndex`, `MergeRingGroupsIntoBuilder` and `MergePoolToWriter` each compare
+  the key they just popped against the previous one (one comparison per record, on values already
+  in registers). A merge of sorted inputs can only pop non-decreasing keys; a key that goes
+  backwards proves an input was not sorted -- from a disk fault, a decompress error, or memory
+  damage -- and the merge would otherwise carry on, write an out-of-order output whose dedup
+  silently misses duplicates, and then delete its inputs. It now stops before anything is deleted
+  and names the input (`RSFReaderPath`, new) that supplied the bad key. Equal keys are the
+  duplicates the merge removes, and stay legal.
+- **`LOOKFOROVERWRITE` allocator mode (on by default).** `MemMalloc` lays every block out as a
+  32-byte header, the user bytes, and a 16-byte trailer. The header's magic word and the trailer
+  are both computed from the block's own address (and size), so an ordinary data pattern cannot
+  match them and a block copied elsewhere fails. `MemFree` verifies both and stops the process on
+  a mismatch, naming the block's tag, address and recorded size, and which trailer byte was hit; a
+  freed block's header is stamped so freeing it again is reported as a double free instead of
+  corrupting the heap. No list, no lock: the cost is 48 bytes per block. The previous behaviour is
+  one define away (`NOTRACK` alone), and the old list-tracking mode is unchanged.
+- **`MemCheckBlock(ptr, where)`** verifies one block on demand. It is called right after the
+  statements that write into a buffer through a computed length: the `fread` into a reader's
+  compressed buffer, `LZ4F_decompress` into its decode buffer, and `LZ4F_compressUpdate` into a
+  writer's output buffer -- each also checks the reader/writer state block next to them, so an
+  overrun is reported at the call that caused it rather than at some later free. New
+  `FATAL_MEMORY_CORRUPTED` exit code.
+
+Before enabling the allocator mode every allocator in the solution was audited: no `MemMalloc`
+pointer is ever passed to a raw `free`, no non-`MemMalloc` pointer to `MemFree`, nothing relies on
+alignment above 16 bytes, and the CUDA pinned buffers come from `cudaHostAlloc`, not `MemMalloc`.
+
+---
+
 ## [1.4.9] - 2026-09-25
 
 ### Data integrity: no input is deleted until its merged output is proven complete; every close, delete and marker write is checked

@@ -349,6 +349,11 @@ has been safely replaced:
   is reopened and its record counts are checked against what the merge reported (and, for the
   end-of-level merge, against the index builder's own counts) before a single input is removed.
   A merge cut short by a stop request keeps every input.
+- **Merges check their own ordering, and memory is guarded.** Every k-way merge stops if a key comes
+  out smaller than the one before it (an input was not sorted). Every `MemMalloc` block carries a
+  guard header and trailer derived from its address; `MemFree` (and explicit `MemCheckBlock` calls
+  after decompress/read/compress steps) stop the run, naming the block, if either was overwritten
+  or the block is freed twice.
 - **A level that starts from scratch must start clean.** If any writer or imerge file for the level
   already exists, the run stops and lists them instead of merging them in.
 

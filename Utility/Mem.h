@@ -4,12 +4,16 @@
 ** Purpose:
 **   Declares a heap allocator wrapper (MemMalloc/MemFree) meant to be used
 **   throughout the solution in place of raw malloc/free, plus MemSize/
-**   MemStatsPrint/MemCheck for reporting and corruption-checking. Whether
-**   allocations are actually tracked (a linked list of live allocations
-**   with an overwrite-guard string after each block, to catch buffer
-**   overruns and report per-tag allocation counts) or just thin-wrapped
-**   straight to malloc/free is a compile-time choice made in Mem.cpp
-**   (the NOTRACK/MEMDEBUG defines there).
+**   MemStatsPrint/MemCheck for reporting and corruption-checking. How much
+**   checking the allocator does is a compile-time choice made in Mem.cpp:
+**     - LOOKFOROVERWRITE: every block gets a guard header and a guard trailer;
+**       a block found damaged (or freed twice) at MemFree, or at an explicit
+**       MemCheckBlock call, stops the process and names the block. No list,
+**       no lock -- cheap enough to leave on for a production run.
+**     - NOTRACK: a thin wrapper straight to malloc/free.
+**     - neither: a linked list of live allocations with an overwrite-guard
+**       string after each block, reporting per-tag counts (slow; global lock).
+**   (MEMDEBUG additionally prints every alloc/free in the list mode.)
 */
 
 #pragma once
@@ -61,3 +65,18 @@ void MemStatsPrint(FILE* fpOut);
 ** @param    pszStr - caller-supplied tag included in any corruption message, to identify the call site
 */
 void MemCheck(FILE* fpOut, const char* pszStr);
+
+/*
+** Function: MemCheckBlock
+** @brief    Verifies one MemMalloc block's guard header and trailer right now,
+**           stopping the process (naming the block) if either was overwritten.
+**           A no-op unless Mem.cpp is built with LOOKFOROVERWRITE.
+** @details  Call it immediately after code that writes into a block through a
+**           computed length -- a decompress, a read into a buffer, a memcpy of
+**           a variable size -- so an overrun is caught at the statement that
+**           caused it instead of at some later free. pPtr must be exactly a
+**           pointer returned by MemMalloc (never an offset into one).
+** @param    pPtr     - a pointer returned by MemMalloc
+** @param    pszWhere - short description of the call site, for the failure message
+*/
+void MemCheckBlock(const void* pPtr, const char* pszWhere);

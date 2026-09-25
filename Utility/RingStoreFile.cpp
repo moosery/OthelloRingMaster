@@ -186,6 +186,9 @@ static void FlushVarBuf(RSFWriter* pw)
             Fatal(FATAL_FILE_OPEN,
                   "FlushVarBuf: LZ4 compress failed on '%s': %s",
                   pw->path, LZ4F_getErrorName(compSize));
+        MemCheckBlock(pw->lz4OutBuf, "FlushVarBuf: after LZ4F_compressUpdate into the output buffer");
+        MemCheckBlock(pw->varBuf,    "FlushVarBuf: varint buffer after LZ4F_compressUpdate");
+        MemCheckBlock(pw,            "FlushVarBuf: writer state after LZ4F_compressUpdate");
         if (compSize > 0)
         {
             WriteOut(pw, pw->lz4OutBuf, compSize);
@@ -728,6 +731,11 @@ static size_t RSFRefillCompBuf(RSFReader* r, size_t toRead)
         size_t got = r->f ? fread(r->compBuf, 1, toRead, r->f) : 0;
         if (got > 0)
         {
+            /* fread just wrote `got` bytes into a buffer of a fixed size; if the
+            ** count or the buffer were ever wrong, the damage is caught here, at
+            ** the read that caused it. (Only file-backed readers refill.) */
+            MemCheckBlock(r->compBuf, "RSFRefillCompBuf: after fread into the compressed buffer");
+            MemCheckBlock(r,          "RSFRefillCompBuf: reader state after fread");
             if (attempt > 0)
                 LoggerLog("RSFRefillCompBuf: recovered after %d retr%s -- '%s'\n",
                           attempt, attempt == 1 ? "y" : "ies", r->path);
@@ -818,6 +826,12 @@ static uint8_t RSFZReadByte(RSFReader* r)
                       "RSFZReadByte: LZ4 decompress error: %s -- '%s' (%llu/%llu bytes consumed)",
                       LZ4F_getErrorName(ret), r->path,
                       (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal);
+            /* The decompressor just wrote dstSize bytes into lz4DecBuf; catch a
+            ** bad size at the call that produced it, not at some later free. */
+            MemCheckBlock(r->lz4DecBuf, "RSFZReadByte: after LZ4F_decompress into the decode buffer");
+            if (!r->memMode)
+                MemCheckBlock(r->compBuf, "RSFZReadByte: compressed buffer after LZ4F_decompress");
+            MemCheckBlock(r,            "RSFZReadByte: reader state after LZ4F_decompress");
             r->compBufPos        += srcSize;
             r->compBytesConsumed += srcSize;
             r->lz4DecBufPos       = 0;
@@ -1253,6 +1267,15 @@ int RSFReadShaped(RSFReader* r, void* pOut, int maxCount)
 const RSFTrailer* RSFReaderTrailer(const RSFReader* r)
 {
     return &r->trailer;
+}
+
+/*
+** Function: RSFReaderPath
+** @brief    See RingStoreFile.h.
+*/
+const char* RSFReaderPath(const RSFReader* r)
+{
+    return r ? r->path : "(no reader)";
 }
 
 /*

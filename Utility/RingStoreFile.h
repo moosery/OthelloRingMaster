@@ -254,6 +254,16 @@ int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount);
 const RSFTrailer* RSFReaderTrailer(const RSFReader* r);
 
 /*
+** Function: RSFReaderPath
+** @brief    Returns the path (file-backed reader) or descriptive placeholder
+**           (memory-backed reader) this reader was opened on -- so a failure
+**           found mid-merge can name the exact source that caused it.
+** @param    r - the reader to query
+** @return   Pointer to a NUL-terminated string, valid until RSFClose(r).
+*/
+const char* RSFReaderPath(const RSFReader* r);
+
+/*
 ** Function: RSFClose
 ** @brief    Closes and frees a reader, and nulls the caller's pointer to it.
 ** @param    ppReader - address of the reader pointer to close
