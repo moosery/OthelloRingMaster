@@ -188,7 +188,7 @@ int main(int argc, char* argv[])
                             "read yet. This is expected, not corruption; try an earlier level or wait.\n",
                     config.ring34BitStatsLevel, storeDir);
             if (fpOut != stdout)
-                fclose(fpOut);
+                FileCloseOrFatal(fpOut, config.outputPath);
             return 1;
         }
 
@@ -205,7 +205,7 @@ int main(int argc, char* argv[])
         StoreStatsPrintRing34BitStats(fpOut, config.ring34BitStatsLevel, &stats);
 
         if (fpOut != stdout)
-            fclose(fpOut);
+            FileCloseOrFatal(fpOut, config.outputPath);
         return 0;
     }
 
@@ -215,7 +215,7 @@ int main(int argc, char* argv[])
         fprintf(stderr, "No completed levels found under '%s' for board size %dx%d.\n",
                 storeDir, config.boardSize, config.boardSize);
         if (fpOut != stdout)
-            fclose(fpOut);
+            FileCloseOrFatal(fpOut, config.outputPath);
         return 1;
     }
 
@@ -233,7 +233,7 @@ int main(int argc, char* argv[])
     }
 
     if (fpOut != stdout)
-        fclose(fpOut);
+        FileCloseOrFatal(fpOut, config.outputPath);
 
     return 0;
 }

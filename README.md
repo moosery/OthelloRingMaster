@@ -337,6 +337,21 @@ it:
 - A `.bat` launcher can append the process exit code and a timestamp to a file after the run, so a
   run that ended without a trace is still unmistakable.
 
+### Data-integrity checks
+
+The solver never trusts that a file operation worked, and never deletes anything it cannot prove
+has been safely replaced:
+
+- **Closes, deletes and marker writes are checked.** A failed `fclose`, delete, sentinel or
+  checkpoint write stops the run immediately, naming the file and the Windows error. Deletes retry
+  through short locks (antivirus scanners) for about 90 seconds first.
+- **Merge inputs are deleted last.** After a consolidation, iMerge or end-of-level merge, the output
+  is reopened and its record counts are checked against what the merge reported (and, for the
+  end-of-level merge, against the index builder's own counts) before a single input is removed.
+  A merge cut short by a stop request keeps every input.
+- **A level that starts from scratch must start clean.** If any writer or imerge file for the level
+  already exists, the run stops and lists them instead of merging them in.
+
 ### Retrograde calculator
 
 ```

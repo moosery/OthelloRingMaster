@@ -20,6 +20,7 @@
 
 /* Includes */
 #include "RSFFileName.h"
+#include "FileAndDirUtils.h"
 #include "CalculatorTypes.h"   /* CalculatorLevelStats */
 #include <windows.h>
 
@@ -82,13 +83,9 @@ static inline void CalcSentinelNameComplete(char* out, size_t outSize,
 */
 static inline void WriteCalcSentinelStats(const char* path, const CalculatorLevelStats* ls)
 {
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
     uint64_t magic = CALC_SENTINEL_STATS_MAGIC;
-    DWORD nw;
-    WriteFile(h, &magic, (DWORD)sizeof(magic), &nw, NULL);
-    WriteFile(h, ls,     (DWORD)sizeof(*ls),    &nw, NULL);
-    CloseHandle(h);
+    FileWriteSentinelOrFatal(path, &magic, sizeof(magic), ls, sizeof(*ls),
+                             "the calculator _complete sentinel");
 }
 
 /*

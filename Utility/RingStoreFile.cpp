@@ -577,7 +577,16 @@ uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes)
     }
 
     WriteOut(pw, &trailer, sizeof(trailer));
-    if (pw->f) fclose(pw->f);
+
+    /* For a file-backed writer the trailer just written may still be sitting
+    ** in the stdio buffer; the flush and close are where a full disk or a
+    ** dropped share actually shows up. The result MUST be checked: a failed
+    ** close leaves a file with no trailer (readers reject it as incomplete),
+    ** yet callers treat a returned count as "written" and go on to delete the
+    ** inputs this file was built from.
+    */
+    if (pw->f)
+        FileCloseOrFatal(pw->f, pw->path);
 
     uint64_t count = pw->count;
     MemFree(pw);
@@ -1063,6 +1072,21 @@ int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount)
     if (!r->compressed)
     {
         int got = (int)fread(pOut, sizeof(UINT64_PAIR), (size_t)want, r->f);
+
+        /* want was capped at the records the trailer says remain, so a short
+        ** read here is NOT end of file: it is an I/O error or a truncated
+        ** file. Returning the short count would let every caller read it as
+        ** "0 means EOF", finish its merge with records missing, and then
+        ** delete the inputs. (The compressed path below already stops the
+        ** process on a short read.)
+        */
+        if (got != want)
+            Fatal(FATAL_READ_FAILED,
+                  "RSFRead: short read on '%s' -- wanted %d records, got %d (ferror=%d, feof=%d, errno=%d); "
+                  "%llu of %llu records already read. The file is truncated or the storage returned an I/O error.\n",
+                  r->path, want, got, ferror(r->f), feof(r->f), errno,
+                  (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
+
         r->recordsRead += (uint64_t)got;
         return got;
     }

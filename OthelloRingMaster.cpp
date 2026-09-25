@@ -35,6 +35,7 @@
 #include "Checkpoint.h"
 #include "StatsListener.h"
 #include "RSFFileName.h"
+#include "FileAndDirUtils.h"
 #include "RingConversion.h"
 #include <windows.h>
 #include <ctype.h>
@@ -245,14 +246,12 @@ static void ParseArgs(int argc, char* argv[])
 */
 static void WriteSentinelStats(const char* path, const LevelStats* ls)
 {
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
+    /* This file is the only record that the level finished, so a failed write
+    ** must stop the run rather than leave a completed level looking unfinished.
+    */
     uint64_t magic = RSF_SENTINEL_STATS_MAGIC;
-    DWORD nw;
-    WriteFile(h, &magic, (DWORD)sizeof(magic), &nw, NULL);
-    WriteFile(h, ls,     (DWORD)sizeof(*ls),   &nw, NULL);
-    CloseHandle(h);
+    FileWriteSentinelOrFatal(path, &magic, sizeof(magic), ls, sizeof(*ls),
+                             "the _complete sentinel");
 }
 
 /*
@@ -491,6 +490,15 @@ int main(int argc, char* argv[])
         if (!resumingThisLevelFromDisk)
             for (int i = 0; i < g_state.numMergeWriters; i++)
                 RegistryResetForLevel(&g_state, i);
+
+        /* A level that starts from scratch must find no writer or imerge files
+        ** on disk: the end-of-level merge finds its inputs by scanning these
+        ** directories, so any survivor of an earlier run (or of a delete that
+        ** failed) would be merged silently into this level. Runs before any
+        ** worker thread starts, so the file set cannot change underneath it.
+        */
+        if (!resumingThisLevelFromDisk)
+            AssertNoStaleLevelFiles(&ctx, level);
 
         g_state.consolidatorFreeCount = CONSOLIDATOR_POOL_THREADS;
         for (int w = 0; w < CONSOLIDATOR_POOL_THREADS; w++)

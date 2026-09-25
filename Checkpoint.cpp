@@ -31,6 +31,7 @@
 #include "RingStoreFile.h"
 #include "Logger.h"
 #include "Error.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <time.h>
 #include <string.h>
@@ -159,14 +160,9 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
 
     char path[MAX_FULL_PATH_NAME];
     SentinelNameCheckpoint(path, sizeof(path), pSt->storeDirectory, cp.boardSize, level);
-    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        Fatal(FATAL_FILE_OPEN, "PerformMidLevelCheckpoint: cannot create checkpoint file '%s'", path);
     uint64_t magic = CHECKPOINT_STATS_MAGIC;
-    DWORD    nw;
-    WriteFile(h, &magic, (DWORD)sizeof(magic), &nw, NULL);
-    WriteFile(h, &cp,    (DWORD)sizeof(cp),    &nw, NULL);
-    CloseHandle(h);
+    FileWriteSentinelOrFatal(path, &magic, sizeof(magic), &cp, sizeof(cp),
+                             "the mid-level checkpoint file");
     MemFree(cpPtr);
 
     LoggerLog("Checkpoint: wrote '%s'\n", path);
@@ -306,8 +302,10 @@ void DeleteLevelCheckpoint(PSolveContext pCtx, int level)
 
     char path[MAX_FULL_PATH_NAME];
     SentinelNameCheckpoint(path, sizeof(path), pSt->storeDirectory, pCfg->boardSize, level);
+    /* A checkpoint that survives its level would send a later restart back into
+    ** a level that has already finished, so the delete must not fail quietly. */
     if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES)
-        DeleteFileA(path);
+        FileDeleteOrFatal(path, "a level checkpoint file");
 }
 
 /*
@@ -414,7 +412,7 @@ static void cpValidateDir(const char* dir, char patterns[][MAX_FULL_PATH_NAME], 
                 if (forceRestart)
                 {
                     LoggerLog("Checkpoint restart: removing crash-partial file (no valid trailer): %s\n", full);
-                    DeleteFileA(full);
+                    FileDeleteOrFatal(full, "a crash-partial writer/imerge file");
                 }
                 else
                 {

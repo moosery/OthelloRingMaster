@@ -79,6 +79,33 @@ void MergePoolToWriter(
     volatile int64_t* pProgressBytes = nullptr);
 
 /*
+** Function: VerifyMergedFile
+** @brief    Confirms a freshly merged flat file is complete before the inputs
+**           it was built from are deleted; stops the process if it is not.
+** @details  Reopens outPath (which checks the trailer is present), compares its
+**           trailer record count to what the merge reported writing, and checks
+**           that count falls in the only possible range for merging sorted,
+**           duplicate-free inputs: no fewer records than the largest input and
+**           no more than all inputs summed.
+** @param    outPath          - the merged output file
+** @param    unique           - record count the merge reported writing
+** @param    sumInputRecords  - total records across all inputs
+** @param    maxInputRecords  - record count of the largest single input
+** @param    what             - short label for the failure message (e.g. "iMerge")
+*/
+void VerifyMergedFile(const char* outPath, uint64_t unique, uint64_t sumInputRecords,
+                      uint64_t maxInputRecords, const char* what);
+
+/*
+** Function: AssertNoStaleLevelFiles
+** @brief    Stops the run if any writer or imerge file for a level already
+**           exists when that level is about to start from scratch.
+** @param    pCtx  - solve context
+** @param    level - level about to start
+*/
+void AssertNoStaleLevelFiles(PSolveContext pCtx, int level);
+
+/*
 ** Function: DoEndOfLevelMerge
 ** @brief    Consolidates every remaining writer file (NVMe) and intermediate
 **           merge file (medium drives) into a single sorted, deduped store

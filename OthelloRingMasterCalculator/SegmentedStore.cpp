@@ -10,6 +10,7 @@
 /* Includes */
 #include "SegmentedStore.h"
 #include "CalcDriveLedger.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -81,7 +82,12 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
     if (!pWriter->pCurrentFile) return;
 
     FlushWriteBuffer(pWriter);
-    fclose(pWriter->pCurrentFile);
+
+    /* The segment's last buffered bytes reach the disk at flush/close; a failure
+    ** there must stop the run, not be discarded -- the calculator's counts for
+    ** this level are read back from these files.
+    */
+    FileCloseOrFatal(pWriter->pCurrentFile, pWriter->currentPath);
     pWriter->pCurrentFile = nullptr;
 
     /* ReserveNextScratchDrive deliberately over-reserves (a whole drive's
@@ -107,7 +113,7 @@ static void CloseCurrentSegment(SegmentedStoreWriter* pWriter)
         ** all) -- discard the empty file rather than recording a
         ** zero-record segment.
         */
-        DeleteFileA(pWriter->currentPath);
+        FileDeleteOrFatal(pWriter->currentPath, "an empty scratch segment");
         return;
     }
 
@@ -361,6 +367,6 @@ void DeleteSegments(POthelloRingMasterCalculatorState pState, const SegmentList&
                     const ScratchPlan& plan)
 {
     for (const auto& seg : segments)
-        DeleteFileA(seg.path);
+        FileDeleteOrFatal(seg.path, "a consumed scratch segment");
     ReleaseScratchPlan(pState, plan);
 }

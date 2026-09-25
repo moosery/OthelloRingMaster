@@ -20,6 +20,7 @@
 #include "RingNestedIndex.h"
 #include "Logger.h"
 #include "Mem.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 
 /* Functions */
@@ -98,7 +99,5 @@ void CreateSeedFile(POthelloRingMasterConfig pConfig, POthelloRingMasterState pS
     /* Level 0 has no end-of-level merge, so write its complete sentinel here. */
     char sentPath[MAX_FULL_PATH_NAME];
     SentinelNameComplete(sentPath, sizeof(sentPath), pState->storeDirectory, boardSize, 0);
-    HANDLE hs = CreateFileA(sentPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hs != INVALID_HANDLE_VALUE) CloseHandle(hs);
+    FileWriteSentinelOrFatal(sentPath, nullptr, 0, nullptr, 0, "the level-0 _complete sentinel");
 }

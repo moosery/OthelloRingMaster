@@ -24,6 +24,7 @@
 #include "CalculatorStatsListener.h"
 #include "CalcDriveLedger.h"
 #include "CounterWidthConfig.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -66,7 +67,7 @@ static void PurgeCalculatorOutput(const char* countsDir, int boardSize)
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         char fullPath[MAX_FULL_PATH_NAME];
         snprintf(fullPath, sizeof(fullPath), "%s\\%s", countsDir, fd.cFileName);
-        DeleteFileA(fullPath);
+        FileDeleteOrFatal(fullPath, "an existing sentinel/counts file (--force)");
         deleted++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);

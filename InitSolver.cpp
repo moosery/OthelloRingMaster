@@ -73,31 +73,45 @@ static void createMergeWriterDirectoryName(char driveLetter, const char* pStoreD
 /*
 ** Function: DeleteDirRecursive
 ** @brief    Recursively deletes a directory and everything under it.
+** @details  Every file delete is retried (antivirus scanners briefly lock big
+**           files) and any file that still cannot be removed is logged by name
+**           and counted. A leftover file is not harmless: the end-of-level
+**           merge finds its inputs by scanning these directories, so a survivor
+**           from the previous run would be merged into this one.
 ** @param    dir - directory to delete
+** @return   Number of files that could not be deleted (0 = everything is gone).
 */
-static void DeleteDirRecursive(const char* dir)
+static int DeleteDirRecursive(const char* dir)
 {
     char pattern[MAX_FULL_PATH_NAME];
     snprintf(pattern, sizeof(pattern), "%s\\*", dir);
 
+    int failures = 0;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return 0;
     do
     {
         if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
         char full[MAX_FULL_PATH_NAME];
         snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            DeleteDirRecursive(full);
+            failures += DeleteDirRecursive(full);
         else
         {
-            SetFileAttributesA(full, FILE_ATTRIBUTE_NORMAL);
-            DeleteFileA(full);
+            unsigned long err = 0;
+            if (!FileDeleteWithRetry(full, 4, &err))
+            {
+                LoggerLog("  COULD NOT DELETE '%s' (Windows error %lu)\n", full, err);
+                failures++;
+            }
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    RemoveDirectoryA(dir);
+    if (!RemoveDirectoryA(dir) && failures == 0)
+        LoggerLog("  Note: could not remove now-empty directory '%s' (Windows error %lu); "
+                  "it will be reused.\n", dir, (unsigned long)GetLastError());
+    return failures;
 }
 
 /*
@@ -359,7 +373,7 @@ static void deletePlayerOutputFile(const char* storeDir, int level, int boardSiz
         if (nestedPaths[i] && GetFileAttributesA(nestedPaths[i]) != INVALID_FILE_ATTRIBUTES)
         {
             LoggerLog("  Deleting partial output '%s'\n", nestedPaths[i]);
-            DeleteFileA(nestedPaths[i]);
+            FileDeleteOrFatal(nestedPaths[i], "a partial store output");
         }
     }
 
@@ -376,7 +390,7 @@ static void deletePlayerOutputFile(const char* storeDir, int level, int boardSiz
         char fullPath[MAX_FULL_PATH_NAME];
         snprintf(fullPath, sizeof(fullPath), "%s\\%s", storeDir, fd.cFileName);
         LoggerLog("  Deleting partial output '%s'\n", fullPath);
-        DeleteFileA(fullPath);
+        FileDeleteOrFatal(fullPath, "a partial store output");
         break;
     }
 }
@@ -456,7 +470,7 @@ static LevelFileStatus checkLevelFile(const char* storeDir, int level, int board
         {
             LoggerLog("ScanForResumeLevel: corrupt level %d %s file, deleting '%s'\n",
                       level, player, flatPath);
-            DeleteFileA(flatPath);
+            FileDeleteOrFatal(flatPath, "a corrupt store file");
             return LFS_CORRUPT;
         }
         RSFClose(&r);
@@ -569,7 +583,7 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
                 ** re-solve of the level. */
                 LoggerLog("ScanForResumeLevel: level %d merge was interrupted but _merging carries no stats payload -- falling back to a full re-solve\n", level);
             }
-            DeleteFileA(sentPath);
+            FileDeleteOrFatal(sentPath, "an interrupted-merge sentinel");
             deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "black");
             deletePlayerOutputFile(pState->storeDirectory, level, boardSize, "white");
             return level;
@@ -614,6 +628,7 @@ static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineI
 {
     LoggerLog("Purging previous run data...\n");
 
+    int purgeFailures = 0;
     if (preserveWriterAndMergeDirs)
     {
         LoggerLog("  Preserving merge-writer/merge dirs -- %s for level %d.\n",
@@ -627,14 +642,14 @@ static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineI
         {
             if (GetFileAttributesA(pState->mwDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
             LoggerLog("  Deleting merge-writer dir: %s\n", pState->mwDirectory[i]);
-            DeleteDirRecursive(pState->mwDirectory[i]);
+            purgeFailures += DeleteDirRecursive(pState->mwDirectory[i]);
         }
 
         for (int i = 0; i < pState->numMergeDirs; i++)
         {
             if (GetFileAttributesA(pState->mergeDirectory[i]) == INVALID_FILE_ATTRIBUTES) continue;
             LoggerLog("  Deleting merge dir: %s\n", pState->mergeDirectory[i]);
-            DeleteDirRecursive(pState->mergeDirectory[i]);
+            purgeFailures += DeleteDirRecursive(pState->mergeDirectory[i]);
         }
     }
 
@@ -648,8 +663,14 @@ static void cleanUpDrives(POthelloRingMasterState pState, PMachineInfo pMachineI
         GetFileAttributesA(pState->storeMergeDirectory) != INVALID_FILE_ATTRIBUTES)
     {
         LoggerLog("  Deleting store merge dir: %s\n", pState->storeMergeDirectory);
-        DeleteDirRecursive(pState->storeMergeDirectory);
+        purgeFailures += DeleteDirRecursive(pState->storeMergeDirectory);
     }
+
+    if (purgeFailures > 0)
+        Fatal(FATAL_FILE_DELETE_FAILED,
+              "cleanUpDrives: %d file(s) from the previous run could not be deleted (listed above); "
+              "they would be merged into this run's levels. Remove them (or whatever is holding "
+              "them open) and restart.", purgeFailures);
 
     if (pState->resumeLevel > 0)
         LoggerLog("  Resuming from level %d (levels 0..%d already in store).\n",

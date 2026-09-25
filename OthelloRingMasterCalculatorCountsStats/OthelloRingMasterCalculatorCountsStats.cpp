@@ -154,7 +154,7 @@ int main(int argc, char* argv[])
         fprintf(stderr, "No completed levels found under '%s' for board size %dx%d.\n",
                 countsDir, config.boardSize, config.boardSize);
         if (fpOut != stdout)
-            fclose(fpOut);
+            FileCloseOrFatal(fpOut, config.outputPath);
         return 1;
     }
 
@@ -165,12 +165,19 @@ int main(int argc, char* argv[])
     for (int level = 0; level <= deepest; level++)
     {
         LevelCountsStats stats;
-        CountsStatsScanLevel(countsDir, config.boardSize, level, &stats);
+
+        /* A level whose counts cannot be read still gets a row (its fields
+        ** come out blank), so say so -- otherwise a blank row looks like
+        ** "no data" rather than "could not read".
+        */
+        if (!CountsStatsScanLevel(countsDir, config.boardSize, level, &stats))
+            fprintf(stderr, "WARNING: level %d: could not read the counts stats -- its row is blank
+", level);
         CountsStatsWriteCsvRow(fpOut, &stats);
     }
 
     if (fpOut != stdout)
-        fclose(fpOut);
+        FileCloseOrFatal(fpOut, config.outputPath);
 
     return 0;
 }

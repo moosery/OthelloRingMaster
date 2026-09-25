@@ -39,6 +39,7 @@
 #include "ThreadPool.h"
 #include "Logger.h"
 #include "Mem.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <mutex>
 #include <thread>
@@ -418,12 +419,20 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     ** trailer only). Computed against the FINAL file set (post-shrink, if
     ** any), so it always matches what's actually about to be merged.
     */
+    int64_t totalRecs = 0;
+    int64_t maxRecs   = 0;
     {
-        int64_t totalRecs = 0;
         for (int i = 0; i < numFiles; i++)
         {
             RSFReader* r = RSFOpen(paths[i]);
-            if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+            if (!r)
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "IMergeRunSession: cannot open input '%s' (missing, incomplete, or corrupt trailer)",
+                      paths[i]);
+            int64_t recs = (int64_t)RSFReaderTrailer(r)->recordCount;
+            totalRecs += recs;
+            if (recs > maxRecs) maxRecs = recs;
+            RSFClose(&r);
         }
         pSt->imergeTotalInputBytes[player] = totalRecs * (int64_t)sizeof(UINT64_PAIR);
     }
@@ -477,6 +486,37 @@ void IMergeRunSession(PSolveContext pCtx, int player)
 
         unique = KWayMergeFiles(paths, numFiles, outPath, &pSt->imergeDoneInputBytes[player],
                                  compress, &pSt->terminateThreads);
+
+        /* A stop request ends the merge early, but the writer still closes the
+        ** output with a valid trailer -- so it looks like a finished file while
+        ** holding only part of the data. Deleting the inputs after that would
+        ** lose whatever was not yet merged. Instead discard the partial output
+        ** and leave every input exactly where it was, released back to the
+        ** registry for the next run. The flag only ever goes false-to-true, so
+        ** if it is still clear here the merge ran to completion.
+        */
+        if (pSt->terminateThreads)
+        {
+            FileDeleteOrFatal(outPath, "a partial iMerge output");
+            DriveReclaim(pSt, destDriveLetter, totalBytes);
+            for (int i = 0; i < numFiles; i++)
+            {
+                RegistryUnreserveOne(pSt, writerOf[i], nodes[i]);
+                MemFree(paths[i]);
+            }
+            MemFree(paths); MemFree(sizes); MemFree(nodes); MemFree(writerOf);
+
+            LoggerLog("IMergeRunSession: %s stopped mid-merge -- partial output discarded, "
+                      "%d inputs kept\n", RSFPlayerStr(player), numFiles);
+
+            pSt->imergeActive[player]          = 0;
+            pSt->imergeTotalInputBytes[player] = 0;
+            ConsolidationMasterWake(pCtx);
+            return;
+        }
+
+        /* The inputs are deleted below, so make sure the output really holds them. */
+        VerifyMergedFile(outPath, unique, (uint64_t)totalRecs, (uint64_t)maxRecs, "iMerge");
     }
 
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
@@ -495,7 +535,7 @@ void IMergeRunSession(PSolveContext pCtx, int player)
     for (int i = 0; i < numFiles; i++)
     {
         DriveReclaim(pSt, pSt->mwDirectory[writerOf[i]][0], sizes[i]);
-        DeleteFileA(paths[i]);
+        FileDeleteOrFatal(paths[i], "an iMerged input");
         RegistryRemoveNode(pSt, writerOf[i], nodes[i]);
         MemFree(paths[i]);
     }

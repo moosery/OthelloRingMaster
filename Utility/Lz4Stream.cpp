@@ -8,6 +8,7 @@
 /* Includes */
 #include "Lz4Stream.h"
 #include "Error.h"
+#include "FileAndDirUtils.h"
 #include "Mem.h"
 #include "lz4frame.h"
 #include <stdio.h>
@@ -32,6 +33,7 @@
 struct __Lz4StreamWriter
 {
     FILE*       f;
+    char        path[MAX_FULL_PATH_NAME];   /* the file being written, so the close can name it if the final flush fails */
     LZ4F_cctx*  cctx;
     uint8_t*    inBuf;
     size_t      inBufPos;
@@ -75,6 +77,7 @@ Lz4StreamWriter* Lz4StreamWriterOpen(const char* path)
     if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "Lz4StreamWriterOpen: cannot allocate writer"); }
     memset(pw, 0, sizeof(*pw));
     pw->f = f;
+    snprintf(pw->path, sizeof(pw->path), "%s", path);
 
     if (LZ4F_isError(LZ4F_createCompressionContext(&pw->cctx, LZ4F_VERSION)))
         Fatal(FATAL_ALLOCATION_FAILED, "Lz4StreamWriterOpen: LZ4 context create failed");
@@ -141,7 +144,13 @@ void Lz4StreamWriterClose(Lz4StreamWriter* pw)
         Fatal(FATAL_FILE_OPEN, "Lz4StreamWriterClose: trailer write failed");
 
     LZ4F_freeCompressionContext(pw->cctx);
-    fclose(pw->f);
+
+    /* The frame's end mark and checksum may still be in the stdio buffer;
+    ** the flush and close are where a full disk or dropped share shows up.
+    ** A missing end mark makes the whole stream unreadable, so a failure
+    ** here must stop the run rather than be discarded.
+    */
+    FileCloseOrFatal(pw->f, pw->path);
     MemFree(pw->inBuf);
     MemFree(pw->outBuf);
     MemFree(pw);

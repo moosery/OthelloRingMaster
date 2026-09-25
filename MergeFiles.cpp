@@ -53,9 +53,11 @@
 #include "RingNestedIndex.h"
 #include "Logger.h"
 #include "Mem.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <stdio.h>
 #include <algorithm>
+#include <functional>
 #include <queue>
 #include <thread>
 #include <vector>
@@ -189,6 +191,40 @@ static int CountByPattern(const char* fullPattern)
     do { count++; } while (FindNextFileA(h, &fd));
     FindClose(h);
     return count;
+}
+
+/*
+** Function: VerifyMergedFile
+** @brief    See MergeFiles.h.
+*/
+void VerifyMergedFile(const char* outPath, uint64_t unique, uint64_t sumInputRecords,
+                      uint64_t maxInputRecords, const char* what)
+{
+    RSFReader* r = RSFOpen(outPath);
+    if (!r)
+        Fatal(FATAL_MERGE_VERIFY_FAILED,
+              "%s: merged output '%s' was just written but cannot be reopened (truncated or "
+              "missing trailer); the inputs were NOT deleted", what, outPath);
+
+    uint64_t onDisk = RSFReaderTrailer(r)->recordCount;
+    RSFClose(&r);
+
+    if (onDisk != unique)
+        Fatal(FATAL_MERGE_VERIFY_FAILED,
+              "%s: merged output '%s' holds %llu records but the merge wrote %llu; "
+              "the inputs were NOT deleted",
+              what, outPath, (unsigned long long)onDisk, (unsigned long long)unique);
+
+    /* Every input is itself sorted and duplicate-free, so the merged unique
+    ** count can be no smaller than the largest input and no larger than all
+    ** inputs added together. Outside that range, records were lost or invented.
+    */
+    if (unique > sumInputRecords || unique < maxInputRecords)
+        Fatal(FATAL_MERGE_VERIFY_FAILED,
+              "%s: merged output '%s' has %llu unique records, outside the possible range "
+              "[%llu (largest input), %llu (all inputs summed)]; the inputs were NOT deleted",
+              what, outPath, (unsigned long long)unique,
+              (unsigned long long)maxInputRecords, (unsigned long long)sumInputRecords);
 }
 
 /*
@@ -749,10 +785,10 @@ static uint64_t CascadeGroupsToRingIndex(char** inputPaths, int numInputs,
     {
         const RingCascadeGroupPaths& gp = groupPaths[i];
         if (pSt) DriveReclaim(pSt, groupDriveLetter[i], groupActualBytes[i]);
-        DeleteFileA(gp.cellsInUse);
-        if (hasRing1) DeleteFileA(gp.ring1);
-        if (hasRing2) DeleteFileA(gp.ring2);
-        DeleteFileA(gp.ring34);
+        FileDeleteOrFatal(gp.cellsInUse, "a cascade group CellsInUse temp");
+        if (hasRing1) FileDeleteOrFatal(gp.ring1, "a cascade group Ring_1 temp");
+        if (hasRing2) FileDeleteOrFatal(gp.ring2, "a cascade group Ring_2 temp");
+        FileDeleteOrFatal(gp.ring34, "a cascade group Ring_3_4 temp");
     }
 
     return unique;
@@ -955,7 +991,7 @@ static uint64_t CascadingMerge(char** inputPaths, int numInputs,
     {
         /* Use tempPaths[i][0] (drive letter from path) -- temps may be on different drives. */
         if (pSt) DriveReclaim(pSt, tempPaths[i][0], tempActualSizes[i]);
-        DeleteFileA(tempPaths[i]);
+        FileDeleteOrFatal(tempPaths[i], "a cascade temp file");
         MemFree(tempPaths[i]);
     }
     MemFree(tempPaths);
@@ -1217,11 +1253,76 @@ struct PlayerData
 };
 
 /*
+** Function: ForEachEndOfLevelPattern
+** @brief    Calls fn once with every file-name pattern that can hold an
+**           end-of-level merge input for one player: writer files per merge
+**           writer directory, imerge files per merge directory, and imerge
+**           files in the store-merge directory, each in every compression
+**           tier the current config could have produced.
+** @details  This is the ONE definition of "which files belong to a level's
+**           merge". The input count, the input enumeration, and the
+**           level-start stale-file check all walk it, so they can never
+**           disagree about what counts.
+** @param    pCtx   - solve context
+** @param    level  - level being merged
+** @param    player - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    fn     - called with each full glob pattern, in a fixed order
+*/
+static void ForEachEndOfLevelPattern(PSolveContext pCtx, int level, int player,
+                                     const std::function<void(const char*)>& fn)
+{
+    POthelloRingMasterState  pSt  = pCtx->pState;
+    POthelloRingMasterConfig pCfg = pCtx->pConfig;
+    char                     pat[MAX_FULL_PATH_NAME];
+
+    for (int i = 0; i < pSt->numMergeWriters; i++)
+    {
+        RSFPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+        fn(pat);
+        if (pCfg->compressMode == COMPRESS_ALL)
+        {
+            RSFZPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+            fn(pat);
+            if (pCfg->lz4Drives[0])
+            {
+                RSFZLPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
+                fn(pat);
+            }
+        }
+    }
+    for (int i = 0; i < pSt->numMergeDirs; i++)
+    {
+        RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+        fn(pat);
+        if (pCfg->compressMode == COMPRESS_ALL)
+        {
+            RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+            fn(pat);
+            if (pCfg->lz4Drives[0])
+            {
+                RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
+                fn(pat);
+            }
+        }
+    }
+    RSFPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+    fn(pat);
+    if (pCfg->compressMode == COMPRESS_ALL)
+    {
+        RSFZPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+        fn(pat);
+        if (pCfg->lz4Drives[0])
+        {
+            RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
+            fn(pat);
+        }
+    }
+}
+
+/*
 ** Function: CountEndOfLevelInputFiles
 ** @brief    Counts exactly how many on-disk files DoEndOfLevelMerge's Phase 1
-**           will enumerate for one player, across every writer directory,
-**           merge directory, and the store-merge directory, in every
-**           compression tier the current config could have produced.
+**           will enumerate for one player (see ForEachEndOfLevelPattern).
 ** @details  Safe to size an allocation from: DoEndOfLevelMerge only ever runs
 **           after both WaitForPoolIdle calls and FlushAllMergeWriterBuffers
 **           (see OthelloRingMaster.cpp's main loop), so no thread can still
@@ -1235,54 +1336,61 @@ struct PlayerData
 */
 static int CountEndOfLevelInputFiles(PSolveContext pCtx, int level, int player)
 {
-    POthelloRingMasterState  pSt  = pCtx->pState;
-    POthelloRingMasterConfig pCfg = pCtx->pConfig;
-    char                     pat[MAX_FULL_PATH_NAME];
-    int                      count = 0;
-
-    for (int i = 0; i < pSt->numMergeWriters; i++)
-    {
-        RSFPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
-        count += CountByPattern(pat);
-        if (pCfg->compressMode == COMPRESS_ALL)
-        {
-            RSFZPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
-            count += CountByPattern(pat);
-            if (pCfg->lz4Drives[0])
-            {
-                RSFZLPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
-                count += CountByPattern(pat);
-            }
-        }
-    }
-    for (int i = 0; i < pSt->numMergeDirs; i++)
-    {
-        RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-        count += CountByPattern(pat);
-        if (pCfg->compressMode == COMPRESS_ALL)
-        {
-            RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-            count += CountByPattern(pat);
-            if (pCfg->lz4Drives[0])
-            {
-                RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-                count += CountByPattern(pat);
-            }
-        }
-    }
-    RSFPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-    count += CountByPattern(pat);
-    if (pCfg->compressMode == COMPRESS_ALL)
-    {
-        RSFZPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-        count += CountByPattern(pat);
-        if (pCfg->lz4Drives[0])
-        {
-            RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-            count += CountByPattern(pat);
-        }
-    }
+    int count = 0;
+    ForEachEndOfLevelPattern(pCtx, level, player,
+        [&](const char* pat) { count += CountByPattern(pat); });
     return count;
+}
+
+/*
+** Function: AssertNoStaleLevelFiles
+** @brief    Stops the run if any writer or imerge file for this level already
+**           exists at the moment the level starts from scratch.
+** @details  The end-of-level merge finds its inputs by scanning directories,
+**           so a leftover file from an earlier run (or from a delete that
+**           failed) would be silently merged into this level and corrupt it.
+**           A level that starts fresh must start with none.
+** @param    pCtx  - solve context
+** @param    level - level about to start (its files carry this level number)
+*/
+void AssertNoStaleLevelFiles(PSolveContext pCtx, int level)
+{
+    int  total = 0;
+    char first[8][MAX_FULL_PATH_NAME];
+    int  nFirst = 0;
+
+    for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
+    {
+        ForEachEndOfLevelPattern(pCtx, level, player, [&](const char* pat)
+        {
+            WIN32_FIND_DATAA fd;
+            HANDLE h = FindFirstFileA(pat, &fd);
+            if (h == INVALID_HANDLE_VALUE) return;
+
+            char dir[MAX_FULL_PATH_NAME];
+            strncpy_s(dir, sizeof(dir), pat, _TRUNCATE);
+            char* lastSlash = strrchr(dir, '\\');
+            if (lastSlash) *lastSlash = '\0';
+
+            do
+            {
+                total++;
+                if (nFirst < 8)
+                    snprintf(first[nFirst++], MAX_FULL_PATH_NAME, "%s\\%s", dir, fd.cFileName);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        });
+    }
+
+    if (total == 0) return;
+
+    for (int i = 0; i < nFirst; i++)
+        LoggerLog("  stale level-%d file: %s\n", level, first[i]);
+    Fatal(FATAL_STALE_FILES,
+          "AssertNoStaleLevelFiles: %d writer/imerge file(s) for level %d already exist "
+          "although this level is starting from scratch (first %d listed in the log). "
+          "Merging them would corrupt the level; remove them and restart.",
+          total, level, nFirst);
 }
 
 /*
@@ -1367,89 +1475,16 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
 
         int      numFiles    = 0;
         uint64_t playerBytes = 0;
-        char     pat[MAX_FULL_PATH_NAME];
 
-        for (int i = 0; i < pSt->numMergeWriters && numFiles < kMaxInputFiles; i++)
+        ForEachEndOfLevelPattern(pCtx, level, player, [&](const char* pat)
         {
+            if (numFiles >= kMaxInputFiles) return;
             uint64_t d = 0;
-            RSFPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
             numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
                                            kMaxInputFiles - numFiles, &d,
                                            data[player].inputSizes + numFiles);
             playerBytes += d;
-            if (pCfg->compressMode == COMPRESS_ALL && numFiles < kMaxInputFiles)
-            {
-                d = 0;
-                RSFZPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
-                numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                               kMaxInputFiles - numFiles, &d,
-                                               data[player].inputSizes + numFiles);
-                playerBytes += d;
-                if (numFiles < kMaxInputFiles && pCfg->lz4Drives[0])
-                {
-                    d = 0;
-                    RSFZLPatternWriterFiles(pat, sizeof(pat), pSt->mwDirectory[i], player);
-                    numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                                   kMaxInputFiles - numFiles, &d,
-                                                   data[player].inputSizes + numFiles);
-                    playerBytes += d;
-                }
-            }
-        }
-        for (int i = 0; i < pSt->numMergeDirs && numFiles < kMaxInputFiles; i++)
-        {
-            uint64_t d = 0;
-            RSFPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-            numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                           kMaxInputFiles - numFiles, &d,
-                                           data[player].inputSizes + numFiles);
-            playerBytes += d;
-            if (pCfg->compressMode == COMPRESS_ALL && numFiles < kMaxInputFiles)
-            {
-                d = 0;
-                RSFZPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-                numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                               kMaxInputFiles - numFiles, &d,
-                                               data[player].inputSizes + numFiles);
-                playerBytes += d;
-                if (numFiles < kMaxInputFiles && pCfg->lz4Drives[0])
-                {
-                    d = 0;
-                    RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->mergeDirectory[i], level, player);
-                    numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                                   kMaxInputFiles - numFiles, &d,
-                                                   data[player].inputSizes + numFiles);
-                    playerBytes += d;
-                }
-            }
-        }
-        if (numFiles < kMaxInputFiles)
-        {
-            uint64_t d = 0;
-            RSFPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-            numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                           kMaxInputFiles - numFiles, &d,
-                                           data[player].inputSizes + numFiles);
-            playerBytes += d;
-            if (pCfg->compressMode == COMPRESS_ALL && numFiles < kMaxInputFiles)
-            {
-                d = 0;
-                RSFZPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-                numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                               kMaxInputFiles - numFiles, &d,
-                                               data[player].inputSizes + numFiles);
-                playerBytes += d;
-                if (numFiles < kMaxInputFiles && pCfg->lz4Drives[0])
-                {
-                    d = 0;
-                    RSFZLPatternImergeFiles(pat, sizeof(pat), pSt->storeMergeDirectory, level, player);
-                    numFiles += EnumerateByPattern(pat, data[player].inputPaths + numFiles,
-                                                   kMaxInputFiles - numFiles, &d,
-                                                   data[player].inputSizes + numFiles);
-                    playerBytes += d;
-                }
-            }
-        }
+        });
 
         /* Should never happen -- CountEndOfLevelInputFiles just counted the
         ** same static file set plus a pad. Hitting the cap means that
@@ -1685,6 +1720,33 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         for (uint8_t* buf : pd.poolTempBufs) MemFree(buf);
         pd.poolTempBufs.clear();
 
+        /* The merge and the index builder count the same boards two different
+        ** ways. Any disagreement means boards were lost or duplicated on the
+        ** way into the store -- and the inputs are deleted right after this
+        ** returns, so this is the last moment the mistake is still fixable.
+        ** Skipped on a stop request: the output is then deliberately partial
+        ** and the inputs are kept for the merge-resume.
+        */
+        const bool mergeComplete = !pSt->terminateThreads;
+        if (mergeComplete)
+        {
+            if (builder.stats.totalBoards != pd.unique)
+                Fatal(FATAL_MERGE_VERIFY_FAILED,
+                      "EndOfLevelMerge: level %d %s -- the merge reports %llu unique boards but the "
+                      "index builder received %llu; inputs kept on disk",
+                      level, RSFPlayerStr(player),
+                      (unsigned long long)pd.unique, (unsigned long long)builder.stats.totalBoards);
+            if (builder.stats.ring34Records != builder.stats.totalBoards ||
+                builder.stats.ring34GroupsWithCountNot1 != 0)
+                Fatal(FATAL_MERGE_VERIFY_FAILED,
+                      "EndOfLevelMerge: level %d %s -- Ring_3_4 holds %llu records for %llu boards "
+                      "(%llu groups with a count other than 1); inputs kept on disk",
+                      level, RSFPlayerStr(player),
+                      (unsigned long long)builder.stats.ring34Records,
+                      (unsigned long long)builder.stats.totalBoards,
+                      (unsigned long long)builder.stats.ring34GroupsWithCountNot1);
+        }
+
         /* Total on-disk bytes across the (up to) 4 ring files just written. */
         int64_t actual = 0;
         {
@@ -1708,11 +1770,11 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
         */
         uint64_t uncompBytes = 0;
         {
-            struct { const char* path; bool shaped; RSFRecordShape shape; int width; } parts[4] = {
-                { cellsInUsePath, false, RSF_SHAPE_PAIR64,     16 },
-                { ring1Path,      true,  RSF_SHAPE_RING_LEVEL, 12 },
-                { ring2Path,      true,  RSF_SHAPE_RING_LEVEL, 12 },
-                { ring34Path,     true,  RSF_SHAPE_LEAF16,      2 },
+            struct { const char* path; bool shaped; RSFRecordShape shape; int width; uint64_t expectRecords; } parts[4] = {
+                { cellsInUsePath, false, RSF_SHAPE_PAIR64,     16, builder.stats.cellsInUseRecords },
+                { ring1Path,      true,  RSF_SHAPE_RING_LEVEL, 12, builder.stats.ring1Records      },
+                { ring2Path,      true,  RSF_SHAPE_RING_LEVEL, 12, builder.stats.ring2Records      },
+                { ring34Path,     true,  RSF_SHAPE_LEAF16,      2, builder.stats.ring34Records     },
             };
             for (int i = 0; i < 4; i++)
             {
@@ -1725,7 +1787,14 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
                           "EndOfLevelMerge: level %d %s -- '%s' was just written but its trailer "
                           "could not be read back (corrupt or truncated)",
                           level, RSFPlayerStr(player), parts[i].path);
-                uncompBytes += RSFReaderTrailer(pReader)->recordCount * (uint64_t)parts[i].width;
+                uint64_t onDiskRecords = RSFReaderTrailer(pReader)->recordCount;
+                if (mergeComplete && onDiskRecords != parts[i].expectRecords)
+                    Fatal(FATAL_MERGE_VERIFY_FAILED,
+                          "EndOfLevelMerge: level %d %s -- '%s' holds %llu records on disk but the "
+                          "index builder wrote %llu; inputs kept on disk",
+                          level, RSFPlayerStr(player), parts[i].path,
+                          (unsigned long long)onDiskRecords, (unsigned long long)parts[i].expectRecords);
+                uncompBytes += onDiskRecords * (uint64_t)parts[i].width;
                 RSFClose(&pReader);
             }
         }
@@ -1782,16 +1851,14 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     char sentMerging[MAX_FULL_PATH_NAME];
     SentinelNameMerging(sentMerging, sizeof(sentMerging), pSt->storeDirectory, boardSize, level + 1);
     {
-        HANDLE hs = CreateFileA(sentMerging, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                                FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hs != INVALID_HANDLE_VALUE)
-        {
-            uint64_t magic = RSF_SENTINEL_STATS_MAGIC;
-            DWORD    nw;
-            WriteFile(hs, &magic, (DWORD)sizeof(magic), &nw, NULL);
-            WriteFile(hs, &pSt->levelStats[level], (DWORD)sizeof(LevelStats), &nw, NULL);
-            CloseHandle(hs);
-        }
+        /* Without this marker a crash mid-merge would look like a finished
+        ** level and the inputs would be lost to a restart, so a failure to
+        ** write it must stop the run before any merging starts.
+        */
+        uint64_t magic = RSF_SENTINEL_STATS_MAGIC;
+        FileWriteSentinelOrFatal(sentMerging, &magic, sizeof(magic),
+                                 &pSt->levelStats[level], sizeof(LevelStats),
+                                 "the _merging sentinel");
     }
 
     std::thread blackThread([&] { mergePlayer(RSF_PLAYER_BLACK); pSt->mergeEndTickMs[RSF_PLAYER_BLACK] = GetTickCount64(); });
@@ -1813,7 +1880,12 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
     */
     if (!pSt->terminateThreads)
     {
-        DeleteFileA(sentMerging);
+        /* Every delete here is checked. If the sentinel could not be removed
+        ** the level would be treated as unfinished and re-merged on restart;
+        ** if an input could not be removed it would be picked up by the next
+        ** level's directory scan. Either way, stop now and say which file.
+        */
+        FileDeleteOrFatal(sentMerging, "the _merging sentinel");
         for (int player = RSF_PLAYER_WHITE; player <= RSF_PLAYER_BLACK; player++)
         {
             PlayerData& pd = data[player];
@@ -1821,7 +1893,7 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
             {
                 if (!pd.yInputsPreReclaimed || pd.inputPaths[i][0] != pCfg->storeDrive)
                     DriveReclaim(pSt, pd.inputPaths[i][0], (int64_t)pd.inputSizes[i]);
-                DeleteFileA(pd.inputPaths[i]);
+                FileDeleteOrFatal(pd.inputPaths[i], "a merged end-of-level input");
                 for (int w = 0; w < pSt->numMergeWriters; w++)
                     if (pSt->mwDirectory[w][0] == pd.inputPaths[i][0])
                     {

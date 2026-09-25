@@ -25,6 +25,7 @@
 #include "RingStoreFile.h"
 #include "Logger.h"
 #include "Mem.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 #include <mutex>
 
@@ -110,10 +111,18 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
     */
     ConsolidatorSlotStats* ps = &pSt->consolSlot[slot];
     int64_t totalRecs = 0;
+    int64_t maxRecs   = 0;
     for (int i = 0; i < count; i++)
     {
         RSFReader* r = RSFOpen(paths[i]);
-        if (r) { totalRecs += (int64_t)RSFReaderTrailer(r)->recordCount; RSFClose(&r); }
+        if (!r)
+            Fatal(FATAL_MERGE_LOGIC_ERROR,
+                  "ConsolidatorWorkerBody: cannot open input '%s' (missing, incomplete, or corrupt trailer)",
+                  paths[i]);
+        int64_t recs = (int64_t)RSFReaderTrailer(r)->recordCount;
+        totalRecs += recs;
+        if (recs > maxRecs) maxRecs = recs;
+        RSFClose(&r);
     }
     ps->writerIdx   = wi;
     ps->player      = player;
@@ -144,7 +153,7 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
         ** (unreserve, not remove -- the real files are untouched), no
         ** self-chain (the level is ending).
         */
-        DeleteFileA(outPath);
+        FileDeleteWithRetry(outPath, 5, nullptr);   /* best effort: a partial output is abandoned scratch, and the level is ending */
         RegistryAbandonNew(pSt, wi, outNode);
         DriveReclaim(pSt, driveLetter, reserveBytes);
         for (int i = 0; i < count; i++)
@@ -157,6 +166,9 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
         ConsolidationMasterWake(pCtx);
         return;
     }
+
+    /* The inputs are deleted below, so make sure the output really holds them. */
+    VerifyMergedFile(outPath, unique, (uint64_t)totalRecs, (uint64_t)maxRecs, "consolidation merge");
 
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
     int64_t actual = 0;
@@ -171,7 +183,7 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
     {
         inputTotal += nodes[i]->physfilesize;
         DriveReclaim(pSt, driveLetter, nodes[i]->physfilesize);
-        DeleteFileA(paths[i]);
+        FileDeleteOrFatal(paths[i], "a consolidated input");
         RegistryRemoveNode(pSt, wi, nodes[i]);
         MemFree(paths[i]);
     }

@@ -435,7 +435,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     ** -- a run that gets killed partway through must never leave a
     ** manifest that still looks valid over an incomplete segment set.
     */
-    DeleteFileA(manifestPath);
+    FileDeleteOrFatal(manifestPath, "the stale ring manifest");
     PurgeExistingSegments(ringSegmentDir);
 
     printf("\n=== %s ===\n", ringName);
@@ -657,7 +657,12 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     if (trailerWritten != RSF_MANIFEST_TRAILER_WIDTH)
         Fatal(FATAL_FILE_OPEN, "Manifest trailer for '%s' wrote %d bytes, expected exactly %d -- fixed-width guarantee broken",
               manifestPath, trailerWritten, RSF_MANIFEST_TRAILER_WIDTH);
-    fclose(mf);
+
+    /* Every lookup binary-searches this file, and its trailer is the last thing
+    ** written -- so the flush and close MUST be checked. A manifest cut short by a
+    ** full disk would look valid until the first lookup failed against it.
+    */
+    FileCloseOrFatal(mf, manifestPath);
 
     char totalStr[32], origStr[32], avgStr[32], minStr[32], maxStr[32];
     FormatBytes(totalSegmentBytes, totalStr, sizeof(totalStr));

@@ -582,7 +582,8 @@ static void BenchmarkOneDrive(
 {
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%c:\\drv_bench_tmp.dat", letter);
-    DeleteFileA(path);
+    if (!FileDeleteWithRetry(path, 3, nullptr))
+        LoggerLog("    WARNING: cannot remove leftover benchmark file '%s'; %c: benchmark may be unreliable\n", path, letter);
 
     void* buf = BenchAlloc(BENCH_CHUNK);
     if (!buf) {
@@ -615,7 +616,8 @@ static void BenchmarkOneDrive(
             LoggerLog("      pass %d: write %.0f MB/s  read %.0f MB/s\n", pass + 1, w, r);
     }
 
-    DeleteFileA(path);
+    if (!FileDeleteWithRetry(path, 3, nullptr))
+        LoggerLog("    WARNING: cannot remove benchmark file '%s' -- delete it by hand to reclaim the space\n", path);
     BenchFree(buf);
 
     double writeMBs = BenchMedian(writeResults);

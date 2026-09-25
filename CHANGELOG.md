@@ -4,6 +4,70 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.4.9] - 2026-09-25
+
+### Data integrity: no input is deleted until its merged output is proven complete; every close, delete and marker write is checked
+
+The 2026-09-24 audit found a family of places where the solver discarded the result of a file
+operation and carried on. Each one is harmless while the disk behaves and a silent data-loss or
+data-corruption path the day it does not. The rule applied throughout: a failed close, delete or
+write stops the run at once, naming the file and the Windows error, *before* anything that depended
+on it is destroyed.
+
+**Real bugs fixed**
+
+- **iMerge could delete its inputs after a merge that was cut short.** When a stop request
+  arrived mid-merge, `KWayMergeFiles` stopped early but still closed its output with a valid
+  trailer -- a partial file that looked complete -- and the session then deleted every input.
+  Whatever had not yet been merged was gone. A stopped iMerge now discards the partial output,
+  gives back its drive-space reservation, releases the inputs to the registry untouched, and
+  returns without deleting anything.
+- **Deleting merged inputs was never checked** (end-of-level merge, consolidation, iMerge, the
+  cascade temp files). A file that could not be removed (antivirus lock, sharing violation) stayed
+  in the directory and was silently merged into the *next* level by the directory scan. Every one
+  of these deletes now retries through short locks (10 attempts over ~90 s) and stops the run
+  naming the file if it will not go. The same applies to stale-checkpoint removal, crash-partial
+  file removal, partial-store-output removal, `--force` cleanup and the calculator's scratch
+  segments.
+- **The end-of-level `_merging` sentinel's create/write result was ignored**, and so was the delete
+  that commits the merge. Without the sentinel a crash mid-merge would look like a finished level
+  and the inputs would be lost to the restart. Both are now checked (with a flush to disk).
+- **Checkpoint, `_complete` and calculator sentinel writes were unchecked**, and the log said
+  `Checkpoint: wrote ...` regardless. They now go through one checked writer (create, both writes,
+  flush to disk, close); a half-written marker is removed rather than left behind, and the log line
+  only appears after the write succeeded.
+- **`RSFWriterClose` (and the Lz4 stream writer, the calculator's segment writer, the level-indexer
+  manifest, and the StoreStats/CountsStats CSV writers) ignored `fclose`.** With a buffered stream
+  the trailer can still be in the C runtime's buffer when `fwrite` returns; a full disk or dropped
+  share shows up only at flush/close. All now flush and close through `FileCloseOrFatal`.
+- **An uncompressed `RSFRead` treated a short read as end-of-file**, which would silently truncate
+  a file on a read error. It now stops with an error. (The store itself is all compressed and was
+  unaffected.)
+- **The startup purge ignored delete failures**, then logged `Purge complete.` A run could start
+  on top of the previous run's leftovers. Each file is now retried, failures are listed by name,
+  and the purge stops the run rather than claiming success.
+
+**New verification (nothing is deleted on faith)**
+
+- `VerifyMergedFile`: after a consolidation or iMerge merge, and before its inputs are deleted,
+  the output is reopened, its trailer record count must equal what the merge reported writing, and
+  that count must lie within the only possible range for merging sorted, duplicate-free inputs:
+  at least the largest input, at most all inputs summed.
+- **End-of-level merge**: the index builder's own counts are checked against the merge result
+  (boards received == unique boards merged; one Ring_3_4 record per board; no Ring_3_4 group with a
+  count other than 1), and each of the (up to four) output files must hold exactly the number of
+  records the builder wrote. The inputs are deleted only after all of that passes.
+- **Level-start stale-file check** (`AssertNoStaleLevelFiles`): a level that starts from scratch
+  must find no writer or imerge file for that level anywhere on disk; otherwise the run stops
+  and lists the first few. The merge, the input count and this check all use one shared
+  pattern walker (`ForEachEndOfLevelPattern`), so they cannot disagree about what counts as an
+  input.
+
+New helpers in `Utility/FileAndDirUtils`: `FileCloseOrFatal`, `FileDeleteWithRetry`,
+`FileDeleteOrFatal`, `FileWriteSentinel`, `FileWriteSentinelOrFatal`.
+
+---
+
 ## [1.4.8] - 2026-09-25
 
 ### Every event create, wait, signal and close is checked; waits are bounded and say what they are waiting for

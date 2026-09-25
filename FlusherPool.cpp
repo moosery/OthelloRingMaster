@@ -25,6 +25,7 @@
 #include "DriveLedger.h"
 #include "RSFFileName.h"
 #include "Logger.h"
+#include "FileAndDirUtils.h"
 #include <windows.h>
 
 /* Functions */
@@ -146,7 +147,7 @@ static void FlushOneColor(PSolveContext pCtx, int ti, int player)
     if (unique == 0)
     {
         /* Genuinely empty result -- no real file to keep. */
-        DeleteFileA(path);
+        FileDeleteOrFatal(path, "an empty flush output");
         RegistryAbandonNew(pSt, ti, pNode);
         DriveReclaim(pSt, driveLetter, reserveBytes);
         InterlockedDecrement((volatile LONG*)&pSt->activeFlushWriters);
