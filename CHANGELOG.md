@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.3] - 2026-09-25
+
+### Fix: clean shutdown (Ctrl+C) no longer ends in an uncaught exception
+
+- `CleanupSolver` called `join()` unconditionally on the consolidation master, registry auditor and drive-space auditor threads. `join()` on a thread that is not joinable throws `std::system_error`; the consolidation master has normally already been joined by the last level's `ConsolidationMasterStop`, so every graceful shutdown ended in an uncaught C++ exception -> `terminate()`. Before v1.4.7 that was invisible (an abnormal exit code with no log line); with the crash handler and `DumpType=2` it showed up as a `*** NATIVE CRASH ***` record (exception 0xE06D7363) and a ~50 GB full dump after the "Ctrl+C received - requesting graceful shutdown" and the final level history had already printed. Each join is now guarded with `joinable()`. No data is affected: the exception happened after all work had stopped.
+
+---
+
 ## [1.6.2] - 2026-09-25
 
 ### Fix: false "short read" on the drive cache and counter-width config

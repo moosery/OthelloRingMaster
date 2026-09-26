@@ -1017,9 +1017,20 @@ void CleanupSolver(POthelloRingMasterState pState)
         pState->consolidationMasterWake = true;
     }
     pState->consolidationMasterCV.notify_all();
-    pState->consolidationMasterThread.join();
-    pState->registryAuditorThread.join();
-    pState->driveSpaceAuditorThread.join();
+
+    /* join() on a thread that is not joinable throws std::system_error. The
+    ** consolidation master is normally already joined by then (each level's
+    ** end calls ConsolidationMasterStop), and any of the three may never have
+    ** been started -- so an unguarded join here threw an exception nothing
+    ** catches, turning every clean shutdown (Ctrl+C included) into a
+    ** terminate() / native-crash report and a multi-gigabyte crash dump.
+    */
+    if (pState->consolidationMasterThread.joinable())
+        pState->consolidationMasterThread.join();
+    if (pState->registryAuditorThread.joinable())
+        pState->registryAuditorThread.join();
+    if (pState->driveSpaceAuditorThread.joinable())
+        pState->driveSpaceAuditorThread.join();
 
     pState->pConsolidatorPool->Stop();
     delete pState->pConsolidatorPool;
