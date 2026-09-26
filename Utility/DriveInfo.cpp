@@ -738,15 +738,19 @@ void GetDriveInformation(
             else if (sz > 0) {
                 cacheText = (char*)malloc((size_t)sz + 1);
                 if (cacheText) {
+                    /* The file is opened in text mode, so each CRLF is read back as
+                    ** one LF: fewer bytes come back than ftell reported, and that is
+                    ** normal. Only a read error (or nothing at all from a non-empty
+                    ** file) means the read really failed. */
                     size_t got = fread(cacheText, 1, (size_t)sz, fc);
-                    if (got != (size_t)sz) {
-                        LoggerLog("DriveInfo: short read of the drive cache '%s' (%zu of %ld bytes); drives will be re-benchmarked\n",
-                                  cachePath, got, sz);
+                    if (ferror(fc) || got == 0) {
+                        LoggerLog("DriveInfo: could not read the drive cache '%s' (%zu of %ld bytes, read error %d); drives will be re-benchmarked\n",
+                                  cachePath, got, sz, ferror(fc));
                         free(cacheText);
                         cacheText = nullptr;
                     }
                     else
-                        cacheText[sz] = '\0';
+                        cacheText[got] = '\0';
                 }
                 else
                     LoggerLog("DriveInfo: cannot allocate %ld bytes to read the drive cache; drives will be re-benchmarked\n", sz);

@@ -122,16 +122,19 @@ void CounterWidthConfigLoad(CounterWidthConfig* pConfig, const char* cacheDir, i
         text = (char*)malloc((size_t)sz + 1);
         if (text)
         {
+            /* Text-mode file: CRLF comes back as LF, so fewer bytes than ftell
+            ** reported is normal. Only a read error, or nothing from a non-empty
+            ** file, is a failed read. */
             size_t got = fread(text, 1, (size_t)sz, f);
-            if (got != (size_t)sz)
+            if (ferror(f) || got == 0)
             {
-                LoggerLog("CounterWidthConfigLoad: short read of '%s' (%zu of %ld bytes); using default widths\n",
-                          path, got, sz);
+                LoggerLog("CounterWidthConfigLoad: could not read '%s' (%zu of %ld bytes, read error %d); using default widths\n",
+                          path, got, sz, ferror(f));
                 free(text);
                 text = nullptr;
             }
             else
-                text[sz] = '\0';
+                text[got] = '\0';
         }
         else
             LoggerLog("CounterWidthConfigLoad: cannot allocate %ld bytes to read '%s'; using default widths\n", sz, path);

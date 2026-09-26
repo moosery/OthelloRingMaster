@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.2] - 2026-09-25
+
+### Fix: false "short read" on the drive cache and counter-width config
+
+- The v1.6.0 short-read checks on `driveinfo.json` and the calculator's counter-width config compared the bytes `fread` returned with the size `ftell` reported. Both files are opened in text mode, where Windows turns each CRLF into one LF, so `fread` always returns fewer bytes than `ftell` reports. The check therefore fired on every start ("813 of 850 bytes"), threw the cache away, and re-benchmarked every drive each launch (~1.5 minutes). A read now counts as failed only on a real read error or when nothing at all comes back from a non-empty file, and the text is terminated at the count actually read.
+
+---
+
 ## [1.6.1] - 2026-09-25
 
 ### Build fix
