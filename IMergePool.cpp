@@ -108,7 +108,16 @@ static void RunBothColorIMerge(PSolveContext pCtx)
             SetEventOrFatal(events[RSF_PLAYER_BLACK], "a black iMerge session skipped at shutdown");
     }
 
-    WaitForEventsOrFatal(events, 2, "the white and black iMerge sessions (a space-relief sweep)");
+    WaitForEventsOrFatal(events, 2, "the white and black iMerge sessions (a space-relief sweep)",
+        [pSt](uint64_t* pDone, uint64_t* pTotal)
+        {
+            int64_t done  = pSt->imergeDoneInputBytes[RSF_PLAYER_WHITE]  + pSt->imergeDoneInputBytes[RSF_PLAYER_BLACK];
+            int64_t total = pSt->imergeTotalInputBytes[RSF_PLAYER_WHITE] + pSt->imergeTotalInputBytes[RSF_PLAYER_BLACK];
+            if (total <= 0) return false;
+            *pDone  = (uint64_t)done;
+            *pTotal = (uint64_t)total;
+            return true;
+        });
     CloseHandleOrFatal(events[RSF_PLAYER_WHITE], "the white iMerge-session-complete event");
     CloseHandleOrFatal(events[RSF_PLAYER_BLACK], "the black iMerge-session-complete event");
 }

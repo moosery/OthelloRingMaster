@@ -212,13 +212,31 @@ HANDLE CreateEventOrFatal(BOOL manualReset, BOOL initialState, const char* pszWh
 void SetEventOrFatal(HANDLE hEvent, const char* pszWhat);
 
 /*
+** Type:    WaitProgressProbe
+** @brief   Optional callback a waiter supplies so the wait can judge how long the
+**          awaited work SHOULD take. Called about once a minute from the waiting
+**          thread; fills *pDone / *pTotal with the work's progress in any one
+**          consistent unit (bytes, records) and returns true, or returns false when
+**          no progress information is available right now.
+*/
+typedef std::function<bool(uint64_t* pDone, uint64_t* pTotal)> WaitProgressProbe;
+
+/*
 ** Function: WaitForEventsOrFatal
-** @brief    Waits until every handle is signaled. Waits in one-minute slices and logs a
-**           "still waiting on <pszWhat>" note after 15 minutes (then every 30); stops the
-**           process if the wait itself fails (invalid handle etc.) rather than letting the
-**           caller carry on while the awaited work is still running.
+** @brief    Waits until every handle is signaled, reporting only when the wait looks
+**           wrong, and stopping the process if the wait itself fails (invalid handle
+**           etc.) rather than letting the caller carry on while the awaited work is
+**           still running.
+** @details  Waits in one-minute slices. With a progress probe, the wait works out its
+**           own ETA from the observed rate and logs a note only if (a) it has run more
+**           than an hour past that ETA, or (b) the progress counter has not moved for
+**           30 minutes -- so a legitimately long flush stays quiet and a stuck one does
+**           not. Without a probe (or until one yields an estimate) it falls back to a
+**           plain "still waiting" note after 15 minutes, then every 30.
 ** @param    pHandles - the handles to wait on (all must be signaled)
 ** @param    count    - number of handles
 ** @param    pszWhat  - what is being waited for, for log/failure messages
+** @param    probe    - optional progress probe (see WaitProgressProbe)
 */
-void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat);
+void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat,
+                          const WaitProgressProbe& probe = nullptr);

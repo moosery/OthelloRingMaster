@@ -32,8 +32,12 @@ using namespace std;
 
 /* Macros and Defines */
 #define WAIT_SLICE_MS          60000ULL                /* how long one wait blocks before it re-checks and may report              */
-#define WAIT_FIRST_REPORT_MS   (15ULL * 60 * 1000)     /* first "still waiting" note appears once a wait has lasted this long       */
-#define WAIT_REPEAT_REPORT_MS  (30ULL * 60 * 1000)     /* after that, the note repeats every this long                              */
+#define WAIT_FIRST_REPORT_MS   (15ULL * 60 * 1000)     /* no-probe fallback: first "still waiting" note once a wait has lasted this long */
+#define WAIT_REPEAT_REPORT_MS  (30ULL * 60 * 1000)     /* no-probe fallback: the note then repeats every this long                  */
+#define WAIT_ETA_MIN_SAMPLE_MS (5ULL * 60 * 1000)      /* with a probe: measure this long before trusting a rate for an ETA         */
+#define WAIT_OVERDUE_SLACK_MS  (60ULL * 60 * 1000)     /* with a probe: report once the wait is this far past its own ETA           */
+#define WAIT_OVERDUE_REPEAT_MS (60ULL * 60 * 1000)     /* with a probe: the overdue note then repeats every this long               */
+#define WAIT_STALL_MS          (30ULL * 60 * 1000)     /* with a probe: report if progress has not moved for this long              */
 
 /* Functions */
 
@@ -390,10 +394,14 @@ void SetEventOrFatal(HANDLE hEvent, const char* pszWhat)
 **           long waits and stopping the process if the wait itself fails.
 ** @details  Waits in one-minute slices instead of INFINITE. A timed-out
 **           slice just means the work is still running (flushing many
-**           gigabytes legitimately takes minutes), so the wait continues --
-**           but once it has lasted 15 minutes, and every 30 after that, a
-**           line in the log says what it is still waiting for, so a wait that
-**           will never end no longer looks the same as a quiet run. Any
+**           gigabytes legitimately takes minutes), so the wait continues.
+**           When the caller supplies a progress probe the wait computes its
+**           own ETA from the observed rate (after a 5-minute sample) and
+**           logs a note only if it runs an hour past that ETA, or if the
+**           progress counter has not moved for 30 minutes. With no probe it
+**           falls back to a plain note after 15 minutes, then every 30.
+**           Either way a wait that will never end no longer looks the same
+**           as a quiet run, and a long-but-healthy one stays quiet. Any
 **           result other than "all signaled" or "timed out" (an invalid
 **           handle, an abandoned wait) is a bug: continuing would let the
 **           caller run on while the waited-for work is still using shared
@@ -401,13 +409,25 @@ void SetEventOrFatal(HANDLE hEvent, const char* pszWhat)
 ** @param    pHandles - the handles to wait on (all of them must be signaled)
 ** @param    count    - number of handles
 ** @param    pszWhat  - what is being waited for, for log/failure messages
+** @param    probe    - optional progress probe; see the header
 */
-void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat)
+void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat, const WaitProgressProbe& probe)
 {
-    uint64_t waitedMs   = 0;                     /* total time spent waiting so far                               */
-    uint64_t nextNoteMs = WAIT_FIRST_REPORT_MS;  /* waited time at which the next "still waiting" note is due    */
-    DWORD    waitResult = 0;                     /* result of the most recent wait slice                          */
-    DWORD    waitError  = 0;                     /* Windows error captured right after a failed wait              */
+    const uint64_t startTickMs = GetTickCount64();   /* when this wait began                                                      */
+    uint64_t waitedMs          = 0;                  /* total time spent waiting so far                                           */
+    uint64_t nextNoteMs        = WAIT_FIRST_REPORT_MS; /* no-probe fallback: waited time at which the next note is due            */
+    DWORD    waitResult        = 0;                  /* result of the most recent wait slice                                      */
+    DWORD    waitError         = 0;                  /* Windows error captured right after a failed wait                          */
+
+    /* Progress tracking, used only when a probe is supplied and answers. */
+    bool     haveProgress      = false;   /* the probe has answered at least once with a usable total                            */
+    uint64_t baseDone          = 0;       /* progress at the start of the current measuring window                               */
+    uint64_t baseMs            = 0;       /* waitedMs at the start of the current measuring window                               */
+    uint64_t lastDone          = 0;       /* progress at the previous slice                                                      */
+    uint64_t lastMoveMs        = 0;       /* waitedMs when progress last increased                                               */
+    uint64_t promisedTotalMs   = 0;       /* the total wait time this wait predicted for itself once it had a stable rate (0 = none yet) */
+    uint64_t nextOverdueMs     = 0;       /* waitedMs at which the next overdue note is due (0 = not overdue yet)                */
+    uint64_t nextStallMs       = WAIT_STALL_MS;   /* waitedMs at which a no-progress note is next allowed                       */
 
     for (;;)
     {
@@ -417,17 +437,74 @@ void WaitForEventsOrFatal(HANDLE* pHandles, DWORD count, const char* pszWhat)
         if (waitResult == WAIT_OBJECT_0)
             return;
 
-        /* Just this slice timing out: the work is still running. Note it
-        ** if the wait has become unusually long, then keep waiting.
+        /* Just this slice timing out: the work is still running. Decide
+        ** whether it is running suspiciously, then keep waiting.
         */
         if (waitResult == WAIT_TIMEOUT)
         {
-            waitedMs += WAIT_SLICE_MS;
-            if (waitedMs >= nextNoteMs)
+            waitedMs = GetTickCount64() - startTickMs;
+
+            uint64_t done = 0, total = 0;
+            const bool probed = probe && probe(&done, &total) && total > 0;
+
+            if (!probed)
             {
-                LoggerLog("Still waiting on %s after %llu minutes (this is normal for a very large flush or merge, but report it if the run looks stuck)\n",
-                          pszWhat, (unsigned long long)(waitedMs / 60000ULL));
-                nextNoteMs += WAIT_REPEAT_REPORT_MS;
+                /* No progress information: all that can be said is how long it has been. */
+                if (waitedMs >= nextNoteMs)
+                {
+                    LoggerLog("Still waiting on %s after %llu minutes (no progress information is available for this wait; "
+                              "long flushes and merges are normal, but report it if the run looks stuck)\n",
+                              pszWhat, (unsigned long long)(waitedMs / 60000ULL));
+                    nextNoteMs = waitedMs + WAIT_REPEAT_REPORT_MS;
+                }
+                continue;
+            }
+
+            /* Progress went backwards: another flush or session took over the
+            ** counters. Start measuring afresh rather than trusting an old rate.
+            */
+            if (!haveProgress || done < lastDone)
+            {
+                haveProgress    = true;
+                baseDone        = done;
+                baseMs          = waitedMs;
+                lastMoveMs      = waitedMs;
+                promisedTotalMs = 0;
+                nextOverdueMs   = 0;
+            }
+            else if (done > lastDone)
+                lastMoveMs = waitedMs;
+            lastDone = done;
+
+            const double pct = (total > 0) ? 100.0 * (double)done / (double)total : 0.0;
+
+            /* (b) Nothing has moved for a long time: this is the "stuck" signal. */
+            if (waitedMs - lastMoveMs >= WAIT_STALL_MS && waitedMs >= nextStallMs)
+            {
+                LoggerLog("NO PROGRESS on %s for %llu minutes (waited %llu minutes in all, %.1f%% done) -- report this if the run looks stuck\n",
+                          pszWhat, (unsigned long long)((waitedMs - lastMoveMs) / 60000ULL),
+                          (unsigned long long)(waitedMs / 60000ULL), pct);
+                nextStallMs = waitedMs + WAIT_STALL_MS;
+            }
+
+            /* (a) Work out this wait's own ETA once the rate has had time to settle,
+            ** and only speak up when it runs well past it.
+            */
+            if (promisedTotalMs == 0 && waitedMs - baseMs >= WAIT_ETA_MIN_SAMPLE_MS && done > baseDone)
+            {
+                const double rate      = (double)(done - baseDone) / (double)(waitedMs - baseMs);   /* progress units per ms */
+                const double remaining = (total > done) ? (double)(total - done) / rate : 0.0;      /* ms                    */
+                promisedTotalMs        = waitedMs + (uint64_t)remaining;
+            }
+
+            if (promisedTotalMs != 0 && waitedMs >= promisedTotalMs + WAIT_OVERDUE_SLACK_MS &&
+                (nextOverdueMs == 0 || waitedMs >= nextOverdueMs))
+            {
+                LoggerLog("Still waiting on %s after %llu minutes -- it predicted about %llu minutes and is now over an hour past that (%.1f%% done); "
+                          "report it if the run looks stuck\n",
+                          pszWhat, (unsigned long long)(waitedMs / 60000ULL),
+                          (unsigned long long)(promisedTotalMs / 60000ULL), pct);
+                nextOverdueMs = waitedMs + WAIT_OVERDUE_REPEAT_MS;
             }
             continue;
         }

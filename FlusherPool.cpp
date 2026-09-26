@@ -263,7 +263,18 @@ void FlushMergeWriterBuffer(int ti, PSolveContext pCtx)
             SkipDroppedFlush(pSt, events[RSF_PLAYER_WHITE], "white");
     }
 
-    WaitForEventsOrFatal(events, 2, "the black and white flush jobs of a merge-writer buffer");
+    /* Progress of this buffer's two flush jobs, so the wait can judge how long
+    ** they should take instead of guessing. */
+    WaitForEventsOrFatal(events, 2, "the black and white flush jobs of a merge-writer buffer",
+        [pSt, ti](uint64_t* pDone, uint64_t* pTotal)
+        {
+            int64_t done  = pSt->mwFlushDoneBytes[ti][RSF_PLAYER_BLACK]  + pSt->mwFlushDoneBytes[ti][RSF_PLAYER_WHITE];
+            int64_t total = pSt->mwFlushTotalBytes[ti][RSF_PLAYER_BLACK] + pSt->mwFlushTotalBytes[ti][RSF_PLAYER_WHITE];
+            if (total <= 0) return false;
+            *pDone  = (uint64_t)done;
+            *pTotal = (uint64_t)total;
+            return true;
+        });
     CloseHandleOrFatal(events[RSF_PLAYER_BLACK], "the black flush-complete event");
     CloseHandleOrFatal(events[RSF_PLAYER_WHITE], "the white flush-complete event");
 

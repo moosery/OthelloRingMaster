@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.4] - 2026-09-26
+
+### "Still waiting" notes now use the work's own ETA instead of a fixed 15 minutes
+
+The bounded waits added in 1.4.8 logged "Still waiting on ..." after a fixed 15 minutes and every 30 after that. On level 24 the merge-writer flushes legitimately take 20-60 minutes (hundreds of GB at ~290 MB/s), so a healthy run produced dozens of these lines and the real signal was buried.
+
+- `WaitForEventsOrFatal` takes an optional progress probe. The flush wait (`FlushMergeWriterBuffer`), the GPU-to-host wait (`FlushAccumulator`, which queues behind the running flushes) and the iMerge sweep wait now supply one, reading the existing `mwFlushDoneBytes/TotalBytes` and `imergeDoneInputBytes/TotalInputBytes` counters.
+- With a probe the wait measures the observed rate for 5 minutes, predicts its own total time, and logs only if (a) it runs **more than an hour past its own ETA** (repeating hourly), or (b) the progress counter has **not moved for 30 minutes** (`NO PROGRESS on ...`). A counter that goes backwards (another flush took over) restarts the measurement.
+- With no probe, or while none answers, the old behaviour remains as a fallback (15 minutes, then every 30), worded to say no progress information was available.
+
+---
+
 ## [1.6.3] - 2026-09-25
 
 ### Fix: clean shutdown (Ctrl+C) no longer ends in an uncaught exception

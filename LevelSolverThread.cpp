@@ -532,7 +532,28 @@ static void FlushAccumulator(GpuAccumulator* pAccum, PSolveContext pCtx)
     ** after compression), so this wait is normally brief; it is bounded in
     ** slices and reports if it ever runs long.
     */
-    WaitForEventsOrFatal(&pDesc->hDoneEvent, 1, "the merge-writer job's GPU-to-host copy");
+    /* This wait normally ends in moments, but the merge-writer job it waits on
+    ** queues behind whatever flush each merge-writer thread is still running.
+    ** Progress of all active flushes is the best available measure of when one
+    ** of them will free up (the sum overstates the time, which only makes the
+    ** "overdue" note more patient). */
+    POthelloRingMasterState pStForProbe = pCtx->pState;
+    WaitForEventsOrFatal(&pDesc->hDoneEvent, 1, "the merge-writer job's GPU-to-host copy",
+        [pStForProbe](uint64_t* pDone, uint64_t* pTotal)
+        {
+            int64_t done = 0, total = 0;
+            for (int t = 0; t < pStForProbe->numMergeWriters; t++)
+                for (int pl = 0; pl < 2; pl++)
+                    if (pStForProbe->mwFlushActive[t][pl])
+                    {
+                        done  += pStForProbe->mwFlushDoneBytes[t][pl];
+                        total += pStForProbe->mwFlushTotalBytes[t][pl];
+                    }
+            if (total <= 0) return false;
+            *pDone  = (uint64_t)done;
+            *pTotal = (uint64_t)total;
+            return true;
+        });
     CloseHandleOrFatal(pDesc->hDoneEvent, "the GPU flush's device-to-host-copy-done event");
 
     GpuFlushReset(pAccum);
