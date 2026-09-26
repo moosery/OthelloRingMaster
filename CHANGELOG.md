@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.1] - 2026-09-25
+
+### Build fix
+
+- `Utility/ThreadPool.cpp`: moving Utility to C++17 (v1.6.0) made `<codecvt>` / `std::wstring_convert` a deprecation error (STL4017). The worker-thread name conversion now uses `MultiByteToWideChar`. This was the only compile error in the 1.6.0 build; because Utility failed, that build's solver exe was linked against the previous Utility library and should not be run.
+
+---
+
 ## [1.6.0] - 2026-09-25
 
 ### Hardening sweep: the remaining unchecked results, the latent hazards from the reader audit, and compiler enforcement

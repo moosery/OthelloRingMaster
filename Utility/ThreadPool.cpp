@@ -21,7 +21,8 @@
 /* Includes */
 #include "ThreadPool.h"
 #include <Windows.h>
-#include <codecvt>
+#include <string>
+#include <wchar.h>
 #include "Error.h"
 #include "Logger.h"
 
@@ -256,8 +257,20 @@ size_t ThreadPool::QueueDepth()
 */
 void ThreadPool::ThreadLoop(uint32_t idx)
 {
-    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-    std::wstring  wide   = converter.from_bytes(m_threadName);
+    /* UTF-8 name -> UTF-16 for SetThreadDescription. (<codecvt> is deprecated in
+    ** C++17; the Windows call does the same job.) A name that fails to convert
+    ** just leaves the thread unnamed -- SetThreadDescription then gets an empty string.
+    */
+    std::wstring  wide;
+    int           wideLen = MultiByteToWideChar(CP_UTF8, 0, m_threadName.c_str(), -1, nullptr, 0);
+    if (wideLen > 0)
+    {
+        wide.resize((size_t)wideLen);
+        if (MultiByteToWideChar(CP_UTF8, 0, m_threadName.c_str(), -1, &wide[0], wideLen) > 0)
+            wide.resize(wcslen(wide.c_str()));
+        else
+            wide.clear();
+    }
     LPCWSTR       result = wide.c_str();
     HRESULT       r      = SetThreadDescription(GetCurrentThread(), result);
 
