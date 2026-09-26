@@ -4,6 +4,14 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.5.1] - 2026-09-25
+
+### Build fix
+
+- `OthelloRingMasterCalculatorCountsStats.cpp`: a warning message added in 1.4.9 had a literal line break inside its string (C2001), so that one tool failed to build. Every other project, including the solver, built cleanly on 1.5.0.
+
+---
+
 ## [1.5.0] - 2026-09-25
 
 ### Corruption detectors: merge order checks and a guarded allocator (`LOOKFOROVERWRITE`)

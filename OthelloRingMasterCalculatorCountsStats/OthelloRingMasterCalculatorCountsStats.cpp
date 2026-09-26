@@ -171,8 +171,7 @@ int main(int argc, char* argv[])
         ** "no data" rather than "could not read".
         */
         if (!CountsStatsScanLevel(countsDir, config.boardSize, level, &stats))
-            fprintf(stderr, "WARNING: level %d: could not read the counts stats -- its row is blank
-", level);
+            fprintf(stderr, "WARNING: level %d: could not read the counts stats -- its row is blank\n", level);
         CountsStatsWriteCsvRow(fpOut, &stats);
     }
 
