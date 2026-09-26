@@ -135,7 +135,7 @@ void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count);
 ** @param    path - file path to create (overwritten if it exists)
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpen(const char* path);
+[[nodiscard]] RSFWriter* RSFWriterOpen(const char* path);
 
 /*
 ** Function: RSFWriterOpenZ
@@ -144,7 +144,7 @@ RSFWriter* RSFWriterOpen(const char* path);
 ** @param    path - file path to create (overwritten if it exists)
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpenZ(const char* path);
+[[nodiscard]] RSFWriter* RSFWriterOpenZ(const char* path);
 
 /*
 ** Function: RSFWriterOpenZL
@@ -155,7 +155,7 @@ RSFWriter* RSFWriterOpenZ(const char* path);
 ** @param    path - file path to create (overwritten if it exists)
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpenZL(const char* path);
+[[nodiscard]] RSFWriter* RSFWriterOpenZL(const char* path);
 
 /*
 ** Function: RSFWriterOpenZMem
@@ -223,7 +223,7 @@ uint64_t RSFWriterClose(RSFWriter* pw, uint64_t* pFileBytes = nullptr);
 ** @param    path - file path to open for reading
 ** @return   A new RSFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
 */
-RSFReader* RSFOpen(const char* path);
+[[nodiscard]] RSFReader* RSFOpen(const char* path);
 
 /*
 ** Function: RSFReaderOpenZMem
@@ -233,7 +233,7 @@ RSFReader* RSFOpen(const char* path);
 ** @param    recordCount - number of UINT64_PAIR records the segment decompresses to
 ** @return   A new RSFReader.
 */
-RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_t recordCount);
+[[nodiscard]] RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_t recordCount);
 
 /*
 ** Function: RSFRead
@@ -243,7 +243,7 @@ RSFReader* RSFReaderOpenZMem(const uint8_t* compBuf, uint64_t compBytes, uint64_
 ** @param    maxCount - maximum number of records to read
 ** @return   Number of records actually read; 0 means EOF.
 */
-int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount);
+[[nodiscard]] int RSFRead(RSFReader* r, UINT64_PAIR* pOut, int maxCount);
 
 /*
 ** Function: RSFReaderTrailer
@@ -289,7 +289,7 @@ void RSFClose(RSFReader** ppReader);
 ** @param    shape - the record layout this writer will accept
 ** @return   A new RSFWriter. Fatals on failure (never returns nullptr).
 */
-RSFWriter* RSFWriterOpenZLShaped(const char* path, RSFRecordShape shape);
+[[nodiscard]] RSFWriter* RSFWriterOpenZLShaped(const char* path, RSFRecordShape shape);
 
 /*
 ** Function: RSFWriterRecordShaped
@@ -311,7 +311,7 @@ void RSFWriterRecordShaped(RSFWriter* pw, const void* pRecord);
 ** @param    shape - the record layout stored in this file
 ** @return   A new RSFReader, or nullptr if the file is missing, incomplete, or corrupt. Does NOT fatal.
 */
-RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape);
+[[nodiscard]] RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape);
 
 /*
 ** Function: RSFReadShaped

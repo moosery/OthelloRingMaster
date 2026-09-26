@@ -446,7 +446,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     if (alignToBoundary)
     {
         printf("Opening boundary source for streaming: '%s'\n", boundaryParentPath);
-        fflush(stdout);
+        (void)fflush(stdout);
         GroupBoundaryStreamOpen(boundaryParentPath, boundaryParentShape, &boundaryStream);
         haveNextBoundary = GroupBoundaryStreamNext(&boundaryStream, &nextBoundary);
         if (!haveNextBoundary)
@@ -497,7 +497,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
     uint64_t startTickMs = GetTickCount64();
 
     printf("Building %s segments in '%s'...\n", ringName, ringSegmentDir);
-    fflush(stdout);
+    (void)fflush(stdout);
 
     while ((n = RSFReadShaped(pReader, batch.data(), STREAM_BATCH)) > 0)
     {
@@ -586,7 +586,7 @@ static SegmentRingResult SegmentOneRing(const char* ringName, const char* source
                 printf("  [%s] %d%% (%llu / %llu records, %llu segments so far)  elapsed=%.0fs  eta=%.0fs\n",
                        ringName, bucket, (unsigned long long)processed, (unsigned long long)totalRecords,
                        (unsigned long long)segmentCount, elapsedS, etaS);
-                fflush(stdout);
+                (void)fflush(stdout);
             }
         }
     }

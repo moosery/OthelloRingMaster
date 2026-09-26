@@ -167,7 +167,7 @@ static void HandleClient(SOCKET client, PCalculatorContext pCtx)
     if (_stricmp(cmd, "STOP") == 0)
     {
         const char* msg = "Stopping...\n";
-        send(client, msg, (int)strlen(msg), 0);
+        (void)send(client, msg, (int)strlen(msg), 0);
         LoggerLog("STOP command received via stats port -- requesting graceful shutdown before the next level starts...\n");
         pCtx->pState->terminateThreads = true;
     }

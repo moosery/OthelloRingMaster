@@ -100,7 +100,7 @@ int GpuFlushPrepare(GpuAccumulator* pAccum);
 ** @param    maxCount - maximum number of records to read
 ** @return   Count actually copied.
 */
-int GpuFlushRead(GpuAccumulator* pAccum, int player, size_t offset,
+[[nodiscard]] int GpuFlushRead(GpuAccumulator* pAccum, int player, size_t offset,
                  UINT64_PAIR* pOut, int maxCount);
 
 /*

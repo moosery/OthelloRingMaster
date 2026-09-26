@@ -339,7 +339,7 @@ struct RingNestedIndexReader
 **           termination also returns true (not corruption) -- callers that care must check
 **           *pTerminate themselves to distinguish the two.
 */
-bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
+[[nodiscard]] bool RingNestedIndexStreamAll(const char* cellsInUsePath, const char* ring1Path, const char* ring2Path,
                               const char* ring34Path, const std::function<void(const BOARD_KEY& key)>& onBoard,
                               const volatile bool* pTerminate = nullptr);
 

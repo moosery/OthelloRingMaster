@@ -107,6 +107,6 @@ static inline bool ReadCalcSentinelStats(const char* path, CalculatorLevelStats*
               && magic == CALC_SENTINEL_STATS_MAGIC
               && ReadFile(h, out, (DWORD)sizeof(*out), &nr, NULL)
               && nr == sizeof(*out);
-    CloseHandle(h);
+    (void)CloseHandle(h);
     return ok;
 }

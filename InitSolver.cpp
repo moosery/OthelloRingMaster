@@ -774,6 +774,9 @@ void InitSolver(POthelloRingMasterConfig pConfig, POthelloRingMasterState pState
         ** CheckpointStats is small now (no manifest); MemMalloc/free kept for
         ** consistency. */
         CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+        if (!cpPtr)
+            Fatal(FATAL_ALLOCATION_FAILED, "InitSolver: cannot allocate the checkpoint stats buffer (%zu bytes)",
+                  sizeof(CheckpointStats));
         CheckpointStats& cp    = *cpPtr;
         haveValidCheckpoint = ReadValidCheckpoint(&tempCtx, pState->resumeLevel, &cp);
         if (haveValidCheckpoint)

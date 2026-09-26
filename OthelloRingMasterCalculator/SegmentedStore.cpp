@@ -275,7 +275,7 @@ bool SegmentedStoreReader::ReadAt(uint64_t globalPosition, void* pOutRecord) con
 
             bool ok = (_fseeki64(f, (int64_t)(localPos * (uint64_t)recordSize), SEEK_SET) == 0)
                       && (fread(pOutRecord, (size_t)recordSize, 1, f) == 1);
-            fclose(f);
+            (void)fclose(f);
             return ok;
         }
         base = cumulativeCounts[i];
@@ -333,7 +333,7 @@ bool SegmentedStoreReader::FindPatternInRange(uint64_t lo, uint64_t hi, const vo
         long long startIdx = (long long)(lo - loBase);
         long long count    = (long long)(hi - lo);
         long long idx = BinarySearchFile(f, (void*)pKey, scratch.data(), count, recordSize, pComp, pContext, startIdx);
-        fclose(f);
+        (void)fclose(f);
 
         if (idx < 0) return false;
         *pOutGlobalPosition = loBase + (uint64_t)idx;

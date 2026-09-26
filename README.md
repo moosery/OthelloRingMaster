@@ -354,6 +354,9 @@ has been safely replaced:
   guard header and trailer derived from its address; `MemFree` (and explicit `MemCheckBlock` calls
   after decompress/read/compress steps) stop the run, naming the block, if either was overwritten
   or the block is freed twice.
+- **Results are never ignored.** Functions whose result matters are `[[nodiscard]]` and a discarded
+  one is a build error (`Directory.Build.props`); the outside APIs the compiler cannot check are covered
+  by `python Tools/DiscardedResultScan.py`. A deliberate discard is written `(void)Call(...)`.
 - **A level that starts from scratch must start clean.** If any writer or imerge file for the level
   already exists, the run stops and lists them instead of merging them in.
 

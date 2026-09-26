@@ -10,6 +10,7 @@
 
 /* Includes */
 #include "CounterWidthConfig.h"
+#include "Logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,9 +102,19 @@ void CounterWidthConfigLoad(CounterWidthConfig* pConfig, const char* cacheDir, i
     if (!f)
         return;
 
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    /* The file exists, so any failure to read it is worth saying: silently
+    ** falling back to defaults would throw away a learned configuration
+    ** without a trace.
+    */
+    long sz = -1;
+    if (fseek(f, 0, SEEK_END) == 0)
+        sz = ftell(f);
+    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0)
+    {
+        (void)fclose(f);
+        LoggerLog("CounterWidthConfigLoad: cannot size '%s'; using default widths\n", path);
+        return;
+    }
 
     char* text = nullptr;
     if (sz > 0)
@@ -111,14 +122,26 @@ void CounterWidthConfigLoad(CounterWidthConfig* pConfig, const char* cacheDir, i
         text = (char*)malloc((size_t)sz + 1);
         if (text)
         {
-            fread(text, 1, (size_t)sz, f);
-            text[sz] = '\0';
+            size_t got = fread(text, 1, (size_t)sz, f);
+            if (got != (size_t)sz)
+            {
+                LoggerLog("CounterWidthConfigLoad: short read of '%s' (%zu of %ld bytes); using default widths\n",
+                          path, got, sz);
+                free(text);
+                text = nullptr;
+            }
+            else
+                text[sz] = '\0';
         }
+        else
+            LoggerLog("CounterWidthConfigLoad: cannot allocate %ld bytes to read '%s'; using default widths\n", sz, path);
     }
-    fclose(f);
+    (void)fclose(f);
 
     if (!text)
         return;
+
+    bool usable = false;   /* set once the header passes; a file that never gets that far is reported below */
 
     do
     {
@@ -129,6 +152,8 @@ void CounterWidthConfigLoad(CounterWidthConfig* pConfig, const char* cacheDir, i
         int fileBoardSize = -1;
         if (!JsInt(text, "boardSize", &fileBoardSize) || fileBoardSize != boardSize)
             break;
+
+        usable = true;
 
         /* Walk each "{ ... }" block inside the "levels" array in file order. */
         const char* cursor = strstr(text, "\"levels\"");
@@ -163,6 +188,9 @@ void CounterWidthConfigLoad(CounterWidthConfig* pConfig, const char* cacheDir, i
         }
     } while (false);
 
+    if (!usable)
+        LoggerLog("CounterWidthConfigLoad: '%s' has a different version or board size (or is unreadable); using default widths\n", path);
+
     free(text);
 }
 
@@ -192,7 +220,7 @@ void CounterWidthConfigSave(const CounterWidthConfig* pConfig, const char* cache
     }
 
     fprintf(f, "\n  ]\n}\n");
-    fclose(f);
+    (void)fclose(f);
 }
 
 /*

@@ -201,7 +201,7 @@ Lz4StreamReader* Lz4StreamReaderOpen(const char* path)
 
     if (LZ4F_isError(LZ4F_createDecompressionContext(&r->dctx, LZ4F_VERSION)))
     {
-        fclose(f);
+        (void)fclose(f);
         MemFree(r);
         Fatal(FATAL_ALLOCATION_FAILED, "Lz4StreamReaderOpen: LZ4 decomp context failed");
     }
@@ -285,7 +285,7 @@ void Lz4StreamReaderClose(Lz4StreamReader** ppReader)
     if (!ppReader || !*ppReader) return;
     Lz4StreamReader* r = *ppReader;
     if (r->dctx) LZ4F_freeDecompressionContext(r->dctx);
-    fclose(r->f);
+    (void)fclose(r->f);
     MemFree(r->compBuf);
     MemFree(r->decBuf);
     MemFree(r);

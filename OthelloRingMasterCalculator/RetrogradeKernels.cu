@@ -97,8 +97,8 @@ static void RetrogradeKernels_InitRingPermutationTables()
         inverseArr[i] = inverse[i];
     }
 
-    cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr));
-    cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr));
+    RETRO_GPU_CHECK(cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr)));
+    RETRO_GPU_CHECK(cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr)));
 }
 
 /*

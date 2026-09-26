@@ -26,6 +26,7 @@
 #include "RingNestedIndex.h"
 #include "RingStoreFile.h"
 #include "FileAndDirUtils.h"
+#include "Error.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -178,14 +179,18 @@ struct BitWriter
     FILE*    file          = nullptr;
     uint8_t  chunk[CHUNK_SIZE];
     size_t   chunkUsed      = 0;
+    char     path[MAX_FULL_PATH_NAME] = {};   /* kept only so a failed write/close can name the file */
     uint32_t accum          = 0;
     int      accumBits      = 0;
     uint64_t recordsWritten = 0;
     uint64_t bytesWritten   = 0;
 
-    void Open(const char* path)
+    void Open(const char* pathIn)
     {
+        snprintf(path, sizeof(path), "%s", pathIn);
         file = fopen(path, "wb");
+        if (!file)
+            Fatal(FATAL_FILE_OPEN, "Ring34PopcountBandCheck: cannot create '%s'", path);
     }
 
     void PushByte(uint8_t b)
@@ -199,7 +204,8 @@ struct BitWriter
     {
         if (chunkUsed > 0)
         {
-            if (file) fwrite(chunk, 1, chunkUsed, file);
+            if (file && fwrite(chunk, 1, chunkUsed, file) != chunkUsed)
+                Fatal(FATAL_FILE_WRITE_FAILED, "Ring34PopcountBandCheck: write failed on '%s'", path);
             bytesWritten += chunkUsed;
             chunkUsed = 0;
         }
@@ -226,7 +232,7 @@ struct BitWriter
             accumBits = 0;
         }
         FlushChunk();
-        if (file) { fclose(file); file = nullptr; }
+        if (file) { FileCloseOrFatal(file, path); file = nullptr; }
     }
 };
 
@@ -313,7 +319,9 @@ int main(int argc, char* argv[])
 
     uint64_t totalRecords = RSFReaderTrailer(pReader)->recordCount;
     WIN32_FILE_ATTRIBUTE_DATA fad = {};
-    GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad);
+    if (!GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad))
+        Fatal(FATAL_FILE_OPEN, "Ring34PopcountBandCheck: cannot read the size of '%s' (Windows error %lu)",
+              srcPath, (unsigned long)GetLastError());
     uint64_t origOnDiskBytes = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
     uint64_t origFlatUncompressedBytes = totalRecords * 2;
 
@@ -327,7 +335,9 @@ int main(int argc, char* argv[])
     ** flat (17 x 1MB) regardless of how many records this level has,
     ** instead of the earlier version's whole-band-in-RAM approach.
     */
-    CreateDirectoryA(outDir, NULL);
+    if (!CreateDirectoryA(outDir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        Fatal(FATAL_CREATE_DIR_FAILED, "Ring34PopcountBandCheck: cannot create '%s' (Windows error %lu)",
+              outDir, (unsigned long)GetLastError());
     std::vector<BitWriter> bands(17);
     for (int k = 0; k <= 16; k++)
     {

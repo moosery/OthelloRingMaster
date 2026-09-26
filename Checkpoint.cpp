@@ -130,6 +130,9 @@ void PerformMidLevelCheckpoint(PSolveContext pCtx, int activeSubPass, uint64_t r
     ** is small now; it zero-fills and is freed after the file is written below.
     */
     CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+    if (!cpPtr)
+        Fatal(FATAL_ALLOCATION_FAILED, "Checkpoint: cannot allocate the checkpoint stats buffer (%zu bytes)",
+              sizeof(CheckpointStats));
     CheckpointStats& cp    = *cpPtr;
     cp.boardSize                = pCfg->boardSize;
     cp.level                    = (uint8_t)level;
@@ -199,6 +202,9 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
     ** Fatal paths intentionally don't, since Fatal ends the process).
     */
     CheckpointStats* cpPtr = (CheckpointStats*)MemMalloc("checkpointStats", sizeof(CheckpointStats));
+    if (!cpPtr)
+        Fatal(FATAL_ALLOCATION_FAILED, "Checkpoint: cannot allocate the checkpoint stats buffer (%zu bytes)",
+              sizeof(CheckpointStats));
     CheckpointStats& cp    = *cpPtr;
     DWORD           nr    = 0;
     bool ok = ReadFile(h, &magic, (DWORD)sizeof(magic), &nr, NULL)
@@ -206,7 +212,7 @@ bool ReadValidCheckpoint(PSolveContext pCtx, int level, CheckpointStats* out)
               && magic == CHECKPOINT_STATS_MAGIC
               && ReadFile(h, &cp, (DWORD)sizeof(cp), &nr, NULL)
               && nr == sizeof(cp);
-    CloseHandle(h);
+    (void)CloseHandle(h);
 
     if (!ok)
     {
@@ -325,7 +331,7 @@ static bool cpTrailerIsValid(const char* fullPath)
     LARGE_INTEGER size;
     if (!GetFileSizeEx(h, &size) || size.QuadPart < (LONGLONG)sizeof(RSFTrailer))
     {
-        CloseHandle(h);
+        (void)CloseHandle(h);
         return false;
     }
 
@@ -333,14 +339,14 @@ static bool cpTrailerIsValid(const char* fullPath)
     off.QuadPart = size.QuadPart - (LONGLONG)sizeof(RSFTrailer);
     if (!SetFilePointerEx(h, off, NULL, FILE_BEGIN))
     {
-        CloseHandle(h);
+        (void)CloseHandle(h);
         return false;
     }
 
     RSFTrailer tr;
     DWORD nr = 0;
     bool okRead = ReadFile(h, &tr, (DWORD)sizeof(tr), &nr, NULL) && nr == sizeof(tr);
-    CloseHandle(h);
+    (void)CloseHandle(h);
     if (!okRead)
         return false;
 

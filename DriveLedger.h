@@ -100,7 +100,7 @@ static inline void DriveInitLedger(POthelloRingMasterState pSt, char letter,
 ** @param    bytes  - number of bytes to reserve
 ** @return   true on success; false (ledger unchanged) if insufficient space.
 */
-static inline bool DriveReserve(POthelloRingMasterState pSt, char letter, int64_t bytes)
+[[nodiscard]] static inline bool DriveReserve(POthelloRingMasterState pSt, char letter, int64_t bytes)
 {
     volatile LONG64* p = (volatile LONG64*)&pSt->driveLedger[(unsigned char)(letter - 'A')];
     LONG64           old = InterlockedCompareExchange64(p, 0, 0);

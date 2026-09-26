@@ -280,7 +280,7 @@ static void SaveCacheJSON(const char* path, const PMachineDriveInfo pMDI)
     }
 
     fprintf(f, "\n  ]\n}\n");
-    fclose(f);
+    FileCloseOrFatal(f, path);
 }
 
 /*
@@ -352,7 +352,9 @@ static bool QueryDeviceProps(HANDLE hPhys, STORAGE_BUS_TYPE& outBusType,
     if (serial && serialSz > 0) {
         serial[0] = '\0';
         if (desc->SerialNumberOffset != 0 && desc->SerialNumberOffset < returned) {
-            strncpy_s(serial, serialSz, buf + desc->SerialNumberOffset, _TRUNCATE);
+            /* A serial number longer than the caller's field is only ever displayed,
+            ** so cutting it short (STRUNCATE) is acceptable and deliberate. */
+            (void)strncpy_s(serial, serialSz, buf + desc->SerialNumberOffset, _TRUNCATE);
             size_t len = strlen(serial);
             while (len > 0 && serial[len - 1] == ' ') serial[--len] = '\0';
         }
@@ -406,6 +408,9 @@ static void QueryOneDrive(char letter, DriveInformation* pOut)
         pOut->freeBytes   = freeBytesAvail.QuadPart;
         pOut->usableBytes = (pOut->freeBytes > DRIVE_SAFETY_MARGIN_BYTES)
                           ? pOut->freeBytes - DRIVE_SAFETY_MARGIN_BYTES : 0;
+    } else {
+        LoggerLog("  WARNING: %c: cannot read its size and free space (Windows error %lu); it will be reported unavailable\n",
+                  letter, (unsigned long)GetLastError());
     }
 
     /* NAS/network drives don't support IOCTL queries -- skip them. */
@@ -423,7 +428,7 @@ static void QueryOneDrive(char letter, DriveInformation* pOut)
 
     DWORD diskNums[16] = {};
     int   numExtents   = QueryDiskExtents(hVol, diskNums, 16);
-    CloseHandle(hVol);
+    (void)CloseHandle(hVol);
 
     if (numExtents < 1) {
         pOut->available = false;
@@ -440,15 +445,22 @@ static void QueryOneDrive(char letter, DriveInformation* pOut)
         return;
     }
 
+    /* These two queries are advisory (they only tune thread counts and
+    ** display), so a failure falls back to a safe default -- but says so.
+    */
     bool rotational = false;
-    QuerySeekPenalty(hPhys, rotational);
+    if (!QuerySeekPenalty(hPhys, rotational))
+        LoggerLog("  WARNING: %c: seek-penalty query failed (Windows error %lu); treating it as non-rotational\n",
+                  letter, (unsigned long)GetLastError());
     pOut->isRotational = rotational;
 
     STORAGE_BUS_TYPE busType = BusTypeUnknown;
-    QueryDeviceProps(hPhys, busType, pOut->serial, sizeof(pOut->serial));
+    if (!QueryDeviceProps(hPhys, busType, pOut->serial, sizeof(pOut->serial)))
+        LoggerLog("  WARNING: %c: device-property query failed (Windows error %lu); bus type and serial unknown, treating it as non-NVMe\n",
+                  letter, (unsigned long)GetLastError());
     pOut->isNvme = (busType == BusTypeNvme);
 
-    CloseHandle(hPhys);
+    (void)CloseHandle(hPhys);
     pOut->available = true;
 }
 
@@ -517,7 +529,7 @@ static double BenchWritePass(const char* path, void* buf, size_t fileBytes)
         rem -= written;
     }
     double elapsed = BenchNowSecs() - t0;
-    CloseHandle(h);
+    (void)CloseHandle(h);
     return (elapsed > 0.0 && rem == 0) ? (double)fileBytes / (1024.0 * 1024.0 * elapsed) : 0.0;
 }
 
@@ -543,7 +555,7 @@ static double BenchReadPass(const char* path, void* buf, size_t fileBytes)
         rem -= chunk;
     }
     double elapsed = BenchNowSecs() - t0;
-    CloseHandle(h);
+    (void)CloseHandle(h);
     return (elapsed > 0.0 && rem == 0) ? (double)fileBytes / (1024.0 * 1024.0 * elapsed) : 0.0;
 }
 
@@ -606,6 +618,16 @@ static void BenchmarkOneDrive(
         */
         if (pass == 0) {
             if (verbose) LoggerLog("      pass 1 (warmup) discarded\n");
+            continue;
+        }
+
+        /* A pass that failed reports 0.0. Folding that into the median would drag
+        ** it toward zero and hide the failure, so failed passes are dropped and
+        ** the drive is only judged on passes that really ran.
+        */
+        if (w <= 0.0 || r <= 0.0) {
+            LoggerLog("    WARNING: %c: benchmark pass %d failed (write %.0f MB/s, read %.0f MB/s) -- ignored\n",
+                      letter, pass + 1, w, r);
             continue;
         }
 
@@ -705,17 +727,31 @@ void GetDriveInformation(
         BuildCacheFilePath(pCacheDir, cachePath, sizeof(cachePath));
         FILE* fc = fopen(cachePath, "r");
         if (fc) {
-            fseek(fc, 0, SEEK_END);
-            long sz = ftell(fc);
-            fseek(fc, 0, SEEK_SET);
-            if (sz > 0) {
+            /* A cache that cannot be read completely is simply not used: the
+            ** drives are benchmarked again and the cache rewritten. Say so. */
+            long sz = -1;
+            if (fseek(fc, 0, SEEK_END) == 0)
+                sz = ftell(fc);
+            if (sz < 0 || fseek(fc, 0, SEEK_SET) != 0) {
+                LoggerLog("DriveInfo: cannot size the drive cache '%s'; drives will be re-benchmarked\n", cachePath);
+            }
+            else if (sz > 0) {
                 cacheText = (char*)malloc((size_t)sz + 1);
                 if (cacheText) {
-                    fread(cacheText, 1, (size_t)sz, fc);
-                    cacheText[sz] = '\0';
+                    size_t got = fread(cacheText, 1, (size_t)sz, fc);
+                    if (got != (size_t)sz) {
+                        LoggerLog("DriveInfo: short read of the drive cache '%s' (%zu of %ld bytes); drives will be re-benchmarked\n",
+                                  cachePath, got, sz);
+                        free(cacheText);
+                        cacheText = nullptr;
+                    }
+                    else
+                        cacheText[sz] = '\0';
                 }
+                else
+                    LoggerLog("DriveInfo: cannot allocate %ld bytes to read the drive cache; drives will be re-benchmarked\n", sz);
             }
-            fclose(fc);
+            (void)fclose(fc);
         }
     }
 

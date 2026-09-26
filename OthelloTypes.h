@@ -37,7 +37,7 @@
 #include <thread>
 
 /* Macros and Defines */
-#define VERSION "1.5.1"
+#define VERSION "1.6.0"
 
 /* Compression mode for RSF output files. */
 #define COMPRESS_NONE       0   /* all files uncompressed (.rsf)                              */
@@ -414,7 +414,7 @@ static inline bool ReadSentinelLevelStats(const char* path, LevelStats* out)
         }
     }
 
-    CloseHandle(h);
+    (void)CloseHandle(h);
     return ok;
 }
 

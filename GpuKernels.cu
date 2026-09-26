@@ -165,8 +165,8 @@ static void GpuKernels_InitRingPermutationTables()
         inverseArr[i] = inverse[i];
     }
 
-    cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr));
-    cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr));
+    GPU_CHECK(cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr)));
+    GPU_CHECK(cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr)));
 }
 
 /*
@@ -516,13 +516,13 @@ GpuAccumulator* GpuAccumulatorCreate(int batchSize, int maxMovesPerBoard, size_t
         cub::DoubleBuffer<uint64_t> kq(p->d_fieldA, p->d_fieldB);
         cub::DoubleBuffer<uint32_t> vq(p->d_indicesA, p->d_indicesB);
         p->sortTempBytes = 0;
-        cub::DeviceRadixSort::SortPairs(nullptr, p->sortTempBytes, kq, vq, (int)p->accumCapacity);
+        GPU_CHECK((cub::DeviceRadixSort::SortPairs(nullptr, p->sortTempBytes, kq, vq, (int)p->accumCapacity)));
         GPU_CHECK(cudaMalloc(&p->d_sortTemp, p->sortTempBytes));
     }
     {
         uint32_t* dummy = reinterpret_cast<uint32_t*>(p->d_fieldA);
         p->scanTempBytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, p->scanTempBytes, dummy, p->d_indicesB, (int)p->accumCapacity);
+        GPU_CHECK((cub::DeviceScan::ExclusiveSum(nullptr, p->scanTempBytes, dummy, p->d_indicesB, (int)p->accumCapacity)));
         GPU_CHECK(cudaMalloc(&p->d_scanTemp, p->scanTempBytes));
     }
 
@@ -538,7 +538,7 @@ GpuAccumulator* GpuAccumulatorCreate(int batchSize, int maxMovesPerBoard, size_t
 */
 void GpuAccumulatorDestroy(GpuAccumulator* pAccum)
 {
-    cudaStreamSynchronize(pAccum->stream);
+    (void)cudaStreamSynchronize(pAccum->stream);
     cudaStreamDestroy(pAccum->stream);
     cudaFree(pAccum->d_input);
     cudaFree(pAccum->d_blackWritePos);

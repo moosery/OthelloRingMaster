@@ -411,8 +411,17 @@ static void LogLevelSummary(int level, PSolveContext pCtx)
 int main(int argc, char* argv[])
 {
     ParseArgs(argc, argv);
-    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+    /* Without the handler, Ctrl+C kills the process abruptly instead of asking
+    ** the solver to stop cleanly, so a failure to install it is reported (in
+    ** the log too, once it exists) rather than ignored.
+    */
+    const bool ctrlHandlerInstalled = (SetConsoleCtrlHandler(CtrlHandler, TRUE) != 0);
+    const DWORD ctrlHandlerError    = ctrlHandlerInstalled ? 0 : GetLastError();
     InitLogger(&g_config, &g_state);
+    if (!ctrlHandlerInstalled)
+        LoggerLog("WARNING: could not install the Ctrl+C handler (Windows error %lu) -- "
+                  "Ctrl+C will end the run abruptly instead of stopping cleanly.\n",
+                  (unsigned long)ctrlHandlerError);
 
     /* Real correctness check, not the whole program's purpose: prove the
     ** ring<->row-major GPU boundary conversion is still valid on this

@@ -45,7 +45,7 @@
 ** @param    pszFullPath - the full path whose directory components should exist
 ** @return   true if the full path exists (or was created) afterward; false on failure.
 */
-bool CreateFullPath(const char* pszFullPath);
+[[nodiscard]] bool CreateFullPath(const char* pszFullPath);
 
 /*
 ** Function: FileDeleteWithRetry
@@ -56,7 +56,7 @@ bool CreateFullPath(const char* pszFullPath);
 ** @param    pLastError  - out (optional): the Windows error from the last failed attempt
 ** @return   true if the file no longer exists afterward; false if it could not be removed.
 */
-bool FileDeleteWithRetry(const char* pszPath, int maxAttempts, unsigned long* pLastError);
+[[nodiscard]] bool FileDeleteWithRetry(const char* pszPath, int maxAttempts, unsigned long* pLastError);
 
 /*
 ** Function: FileDeleteOrFatal
@@ -81,7 +81,7 @@ void FileDeleteOrFatal(const char* pszPath, const char* pszWhat);
 ** @param    pLastError - out (optional): the Windows error from the failing step
 ** @return   true if the whole file was written, flushed and closed; false otherwise.
 */
-bool FileWriteSentinel(const char* pszPath, const void* pPart1, size_t part1Bytes,
+[[nodiscard]] bool FileWriteSentinel(const char* pszPath, const void* pPart1, size_t part1Bytes,
                        const void* pPart2, size_t part2Bytes, unsigned long* pLastError);
 
 /*

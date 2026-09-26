@@ -30,6 +30,7 @@
 #include <exception>
 #include <windows.h>
 #include <intrin.h>
+#include <process.h>
 #include "Logger.h"
 
 /* Macros and Defines */
@@ -119,6 +120,11 @@ void ErrorPrint(FILE* fpOut)
 ** @brief    Prints a timestamp-prefixed, formatted message to stderr, also
 **           writes it to the log file, and terminates the process
 **           immediately with rc as the exit code. Never returns.
+**           Only one thread ever gets to report: a second Fatal() from another
+**           thread waits (the first is about to end the process), and the
+**           process is ended with _exit so no C runtime shutdown work -- closing
+**           every open stream, running static destructors -- runs underneath
+**           worker threads that are still in the middle of file I/O.
 ** @param    rc          - exit code to terminate with
 ** @param    pszReasonFmt - printf-style format string describing the fatal condition
 ** @param    ...         - format arguments for pszReasonFmt
@@ -140,6 +146,22 @@ __declspec(noreturn) void Fatal(RC rc, const char* pszReasonFmt, ...)
     int         prefixLen     = 0;    /* characters the timestamp prefix took                           */
     size_t      messageLen    = 0;    /* total characters in message, to test for a trailing newline    */
     va_list     argptr;               /* the caller's variable arguments                                */
+
+    /* One reporter at a time. If a second thread fails while the first is
+    ** still writing its report, it parks here until the first ends the
+    ** process. A Fatal() raised by this same thread while reporting (the
+    ** report path itself failing) cannot report again, so it just ends the
+    ** process with its own code.
+    */
+    static volatile LONG fatalOwnerThread = 0;
+    const LONG           thisThread       = (LONG)GetCurrentThreadId();
+    if (InterlockedCompareExchange(&fatalOwnerThread, thisThread, 0) != 0)
+    {
+        if (fatalOwnerThread == thisThread)
+            _exit((int)rc);
+        for (;;)
+            Sleep(1000);
+    }
 
     GetLocalTime(&st);
     prefixLen = snprintf(message, sizeof(message), "[%04d-%02d-%02d %02d:%02d:%02d] ",
@@ -180,7 +202,11 @@ __declspec(noreturn) void Fatal(RC rc, const char* pszReasonFmt, ...)
     */
     LoggerLogFileOnly("FATAL (exit code %d): %s", (int)rc, message);
 
-    exit((int)rc);
+    /* stdout may hold buffered output (a redirected console); push it out
+    ** first, then end the process without the CRT's exit-time stream teardown.
+    */
+    (void)fflush(stdout);
+    _exit((int)rc);
 }
 
 /*

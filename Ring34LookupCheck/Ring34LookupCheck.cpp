@@ -203,7 +203,7 @@ static RingCheckResult CheckOneRing(const char* ringName, const char* originalPa
 
     printf("\n=== %s ===\n", ringName);
     printf("Discovering segments in '%s'...\n", ringSegmentDir);
-    fflush(stdout);
+    (void)fflush(stdout);
     std::vector<SegmentInfo> segments;
     DiscoverSegments(ringSegmentDir, &segments);
     printf("Found %zu segments.\n\n", segments.size());
@@ -218,7 +218,7 @@ static RingCheckResult CheckOneRing(const char* ringName, const char* originalPa
         Fatal(FATAL_FILE_OPEN, "Source '%s' has zero records, nothing to verify", originalPath);
 
     printf("Source: '%s' -- %llu real records\n\n", originalPath, (unsigned long long)totalRecords);
-    fflush(stdout);
+    (void)fflush(stdout);
 
     /* Just the start-ordinal list, for binary search. */
     std::vector<uint64_t> segmentStarts(segments.size());
@@ -244,7 +244,7 @@ static RingCheckResult CheckOneRing(const char* ringName, const char* originalPa
     uint64_t startTickMs = GetTickCount64();
 
     printf("Verifying every %s record...\n", ringName);
-    fflush(stdout);
+    (void)fflush(stdout);
 
     while ((n = RSFReadShaped(pReader, batch.data(), BATCH)) > 0)
     {
@@ -327,7 +327,7 @@ static RingCheckResult CheckOneRing(const char* ringName, const char* originalPa
                 printf("  [%s] %d%% (%llu / %llu records verified, %llu segment loads so far)  elapsed=%.0fs  eta=%.0fs\n",
                        ringName, bucket, (unsigned long long)processed, (unsigned long long)totalRecords,
                        (unsigned long long)transitionCount, elapsedS, etaS);
-                fflush(stdout);
+                (void)fflush(stdout);
             }
         }
     }

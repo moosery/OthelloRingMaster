@@ -104,13 +104,13 @@ void ThreadPool::Stop()
 {
 #ifdef THREADPOOL_VERBOSE
     printf("Stopping thread pool:\n");
-    fflush(stdout);
+    (void)fflush(stdout);
 #endif
     isStarted = false;
     {
 #ifdef THREADPOOL_VERBOSE
         printf("Popping jobs: \n");
-        fflush(stdout);
+        (void)fflush(stdout);
 #endif
         unique_lock<mutex> lock(queue_mutex);
         should_terminate = true;
@@ -122,7 +122,7 @@ void ThreadPool::Stop()
 
 #ifdef THREADPOOL_VERBOSE
     printf("Joining threads: \n");
-    fflush(stdout);
+    (void)fflush(stdout);
 #endif
     for (thread& active_thread : threads)
     {
@@ -137,7 +137,7 @@ void ThreadPool::Stop()
     }
 #ifdef THREADPOOL_VERBOSE
     printf("Done Stopping: \n");
-    fflush(stdout);
+    (void)fflush(stdout);
 #endif
 }
 

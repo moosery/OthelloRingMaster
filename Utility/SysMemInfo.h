@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <windows.h>
+#include "Error.h"
 
 /* Structures and Types */
 
@@ -116,7 +117,14 @@ inline void CalcMemoryBudget(PMemoryInfo pMemInfo)
 {
     MEMORYSTATUSEX ms = {};
     ms.dwLength = sizeof(ms);
-    GlobalMemoryStatusEx(&ms);
+
+    /* A failed query leaves every field zero, which would silently resolve to a
+    ** zero-byte budget and surface later as an unrelated allocation failure.
+    */
+    if (!GlobalMemoryStatusEx(&ms))
+        Fatal(FATAL_INSUFFICIENT_MEMORY,
+              "CalcMemoryBudget: GlobalMemoryStatusEx failed (Windows error %lu) -- cannot determine free memory",
+              (unsigned long)GetLastError());
 
     uint64_t budget;
 

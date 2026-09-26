@@ -208,7 +208,7 @@ static bool LoadRingIndex(const char* levelDir, const char* ringName, RSFRecordS
     char trailer[RSF_MANIFEST_TRAILER_WIDTH + 1] = {};
     if (fread(trailer, 1, (size_t)RSF_MANIFEST_TRAILER_WIDTH, mf) != (size_t)RSF_MANIFEST_TRAILER_WIDTH)
         Fatal(FATAL_FILE_OPEN, "%s: could not read trailer from '%s'", ringName, idx->manifestPath);
-    fclose(mf);
+    (void)fclose(mf);
 
     unsigned long long totalRecordsHex = 0;
     if (sscanf(trailer, "totalRecords=%llx", &totalRecordsHex) != 1)
@@ -317,7 +317,7 @@ static bool SearchUnrestricted(RingIndex& idx, uint64_t targetPattern, FoundReco
         else if (targetPattern > e.maxPattern) lo = mid + 1;
         else { found = true; matchIndex = mid; match = e; break; }
     }
-    fclose(mf);
+    (void)fclose(mf);
 
     if (!found)
         return false;   /* falls in a real gap between segments' actual ranges -- genuinely absent */
@@ -376,7 +376,7 @@ static bool SearchRestricted(RingIndex& idx, uint64_t rangeStart, uint64_t range
 
     ManifestEntry matchEntry;
     ReadManifestEntry(idx, mf, entryIndex, &matchEntry);
-    fclose(mf);
+    (void)fclose(mf);
 
     char segPath[BOARD_LOOKUP_MAX_PATH];
     RSFNameRingSegmentFile(segPath, sizeof(segPath), idx.ringSegmentDir, matchEntry.startOrdinal);
@@ -429,7 +429,7 @@ static uint64_t ComputeGroupEnd(RingIndex& idx, const FoundRecord& found, uint64
             Fatal(FATAL_FILE_OPEN, "ComputeGroupEnd: could not open manifest '%s'", idx.manifestPath);
         ManifestEntry nextEntry;
         ReadManifestEntry(idx, mf, found.entryIndex + 1, &nextEntry);
-        fclose(mf);
+        (void)fclose(mf);
 
         char nextSegPath[BOARD_LOOKUP_MAX_PATH];
         RSFNameRingSegmentFile(nextSegPath, sizeof(nextSegPath), idx.ringSegmentDir, nextEntry.startOrdinal);

@@ -32,7 +32,7 @@
 ** @param    sizeToAlloc - number of bytes requested
 ** @return   Pointer to the allocated memory, or nullptr on failure.
 */
-void* MemMalloc(const char* pStr, size_t sizeToAlloc);
+[[nodiscard]] void* MemMalloc(const char* pStr, size_t sizeToAlloc);
 
 /*
 ** Function: MemFree

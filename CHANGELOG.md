@@ -4,6 +4,66 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.0] - 2026-09-25
+
+### Hardening sweep: the remaining unchecked results, the latent hazards from the reader audit, and compiler enforcement
+
+Closes out the 2026-09-24 crash follow-up list. Nothing here is a known bug fix for the crash itself;
+it removes the remaining places where a failure could pass silently or where a stale pointer / bad
+stream could do damage before anything noticed.
+
+**Unchecked results now checked**
+- Allocation null checks: the checkpoint-stats buffer (3 sites) and the stats listener's consolidation
+  snapshot stop with a clear message instead of dereferencing null.
+- `SetConsoleCtrlHandler` failure is reported (without the handler Ctrl+C kills the run abruptly).
+- The device-to-host copies in the merge-writer job now verify they returned the expected record count.
+- CUDA: every `cudaMemcpyToSymbol` (ring permutation tables, in the solver, the calculator and the
+  shared ring conversion), and the two CUB temp-size queries, are checked. The ring round-trip self-test
+  now checks every copy and the kernel launch -- a failed copy-back used to leave the failure counter at
+  0 and report a pass it had not earned.
+- `GlobalMemoryStatusEx` failure stops the run instead of resolving to a zero memory budget.
+- Drive detection: failed seek-penalty / device-property / size queries are logged with the fallback
+  taken. A failed benchmark pass is dropped (with a warning) instead of being folded into the median as
+  0 MB/s. An unreadable drive cache or counter-width config is reported and the defaults are used.
+- Path copies (`strncpy_s`) that could truncate a path now stop instead of silently cutting it.
+- `RSFWrite` (flat writer) checks its final close. The Ring34 tools check file creation, writes,
+  closes, sizes and directory creation. `DebugRW.txt` failure (debug build only) is announced.
+- RSFOpen / RSFOpenShaped check the seek and size query and say why they refused a file.
+
+**Latent hazards from the reader-ownership audit**
+- `RSFZReadVarInt`: a varint longer than 10 bytes (corrupt stream) stops with the file name and
+  position instead of shifting by 64 or more (undefined behaviour, silent garbage).
+- Uncompressed readers now set their buffer *before* any I/O (the file is reopened for that) --
+  `setvbuf` after a read or seek is undefined by the C standard. All `setvbuf` results are checked.
+- `extraReaders` ownership is now explicit: the merge closes every reader it is given and the caller
+  clears its list, so no dangling pointers remain. Null readers stop the merge. `MergePoolToWriter`
+  null-checks each pool segment reader. The dead `PeekRecordCount` (unchecked seek/read) is removed.
+- Registry: every operation that dereferences a stored node pointer now first confirms the pointer is
+  still in that drive's list (`RegistryRequireNodeLocked`), and removals of a node that is not in the
+  list are an error. A stale pointer stops the run instead of writing through freed memory.
+- Status listener: the `n += snprintf(buf + n, bufSize - n, ...)` accumulators (44 sites) are replaced
+  by a clamped `AppendF`, so an over-long report truncates instead of wrapping `bufSize - n` to a huge
+  size and writing past the buffer.
+- **`Fatal()` from a worker thread no longer runs the C runtime's exit-time teardown** while other
+  threads are still doing file I/O. Only one thread reports at a time (a second waits), then the process
+  ends with `_exit` after flushing stdout. The exit code is now the real `FATAL_*` code. (Side effect: a
+  Fatal no longer produces a Windows Event Viewer "crash" entry of its own; the reason is in the log.)
+
+**Compiler enforcement**
+- Functions whose result must never be ignored are marked `[[nodiscard]]`: file opens, deletes,
+  sentinel writes, path creation, job queueing, reservations, reads, allocation. The Utility project is
+  now C++17 so the attribute is a real feature there.
+- New `Directory.Build.props` makes warning C4834 (discarded `[[nodiscard]]` result) a build error in
+  every project, so a future change that drops one of these results cannot build. A deliberate discard
+  is written `(void)Call(...)`.
+- The Windows / C runtime calls that the compiler cannot check (`DeleteFile`, `WriteFile`,
+  `CloseHandle`, `fclose`, ...) are covered by the new `Tools/DiscardedResultScan.py` (run it after
+  changes; it reports any lone statement that throws such a result away). The 92 remaining
+  discards -- reads of read-only streams and handles, console flushes, error-path closes -- were each
+  reviewed and made explicit with `(void)`.
+
+---
+
 ## [1.5.1] - 2026-09-25
 
 ### Build fix

@@ -153,7 +153,7 @@ static void ConsolidatorWorkerBody(PSolveContext pCtx, int slot, int wi, int pla
         ** (unreserve, not remove -- the real files are untouched), no
         ** self-chain (the level is ending).
         */
-        FileDeleteWithRetry(outPath, 5, nullptr);   /* best effort: a partial output is abandoned scratch, and the level is ending */
+        (void)FileDeleteWithRetry(outPath, 5, nullptr);   /* best effort: a partial output is abandoned scratch, and the level is ending */
         RegistryAbandonNew(pSt, wi, outNode);
         DriveReclaim(pSt, driveLetter, reserveBytes);
         for (int i = 0; i < count; i++)

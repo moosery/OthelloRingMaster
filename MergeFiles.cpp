@@ -65,27 +65,6 @@
 /* Functions */
 
 /*
-** Function: PeekRecordCount
-** @brief    Returns the record count stored in an RSF file's trailer, or 0 on failure.
-** @details  Used to convert compressed file sizes to uncompressed-equivalent
-**           bytes for imerge progress tracking (KWayMergeFiles counts
-**           progress in sizeof(UINT64_PAIR) units).
-** @param    path - the RSF file to peek at
-** @return   Record count, or 0 if the file can't be read or has a bad magic.
-*/
-static int64_t PeekRecordCount(const char* path)
-{
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-    RSFTrailer trailer = {};
-    _fseeki64(f, -(int64_t)sizeof(trailer), SEEK_END);
-    fread(&trailer, sizeof(trailer), 1, f);
-    fclose(f);
-    if (trailer.magic != RSF_MAGIC && trailer.magic != RSFZ_MAGIC && trailer.magic != RSFZL_MAGIC) return 0;
-    return (int64_t)trailer.recordCount;
-}
-
-/*
 ** ============================================================
 ** Min-heap entry for file-based k-way merge (16-byte records)
 ** ============================================================
@@ -174,7 +153,8 @@ static int EnumerateByPattern(const char* fullPattern, char** outPaths, int maxP
                                uint64_t* pTotalBytes, uint64_t* outSizes = nullptr)
 {
     char dir[MAX_FULL_PATH_NAME];
-    strncpy_s(dir, sizeof(dir), fullPattern, _TRUNCATE);
+    if (strncpy_s(dir, sizeof(dir), fullPattern, _TRUNCATE) != 0)
+        Fatal(FATAL_MERGE_LOGIC_ERROR, "EnumerateByPattern: pattern too long (%zu characters)", strlen(fullPattern));
     char* lastSlash = strrchr(dir, '\\');
     if (!lastSlash) { *pTotalBytes = 0; return 0; }
     *lastSlash = '\0';
@@ -311,6 +291,8 @@ uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath
 
     for (RSFReader* r : extraReaders)
     {
+        if (!r)
+            Fatal(FATAL_MERGE_LOGIC_ERROR, "K-way merge: a null extra reader was passed in");
         UINT64_PAIR first;
         if (RSFRead(r, &first, 1) == 1)
             heap.push({ first, r });
@@ -407,6 +389,8 @@ static uint64_t KWayMergeFilesToRingIndex(char** inputPaths, int numInputs, Ring
 
     for (RSFReader* r : extraReaders)
     {
+        if (!r)
+            Fatal(FATAL_MERGE_LOGIC_ERROR, "K-way merge: a null extra reader was passed in");
         UINT64_PAIR first;
         if (RSFRead(r, &first, 1) == 1)
             heap.push({ first, r });
@@ -1119,6 +1103,8 @@ void MergePoolToWriter(
     {
         RSFReader* r = RSFReaderOpenZMem(mwBuf + segOffsets[s], segSizes[s],
                                          (uint64_t)segBoardCounts[s]);
+        if (!r)
+            Fatal(FATAL_MERGE_LOGIC_ERROR, "MergePoolToWriter: cannot open pool segment %d as a reader", s);
         readers.push_back(r);
         UINT64_PAIR first;
         if (RSFRead(r, &first, 1) > 0)
@@ -1414,7 +1400,8 @@ void AssertNoStaleLevelFiles(PSolveContext pCtx, int level)
             if (h == INVALID_HANDLE_VALUE) return;
 
             char dir[MAX_FULL_PATH_NAME];
-            strncpy_s(dir, sizeof(dir), pat, _TRUNCATE);
+            if (strncpy_s(dir, sizeof(dir), pat, _TRUNCATE) != 0)
+                Fatal(FATAL_MERGE_LOGIC_ERROR, "AssertNoStaleLevelFiles: pattern too long (%zu characters)", strlen(pat));
             char* lastSlash = strrchr(dir, '\\');
             if (lastSlash) *lastSlash = '\0';
 
@@ -1757,6 +1744,11 @@ void DoEndOfLevelMerge(PSolveContext pCtx)
                                     /*compressFinal=*/false, compressOutput, nullptr,
                                     pd.poolReaders, &builder);
         builder.Finish();
+
+        /* The merge took ownership of every pool reader and closed them all;
+        ** forget the (now dangling) pointers so nothing can touch them again.
+        */
+        pd.poolReaders.clear();
 
         RSFWriterClose(pCellsInUseWriter);
         if (pRing1Writer) RSFWriterClose(pRing1Writer);

@@ -42,6 +42,18 @@ thread_local unsigned long long  maxWriteLocked   = 0;
 size_t  debugWhat = DEBUG_LOCKS;
 FILE*   fpDebug   = fopen("D:\\DebugRW.txt", "w");
 
+/* If the debug file could not be opened every debug write below is silently
+** skipped; say so once at startup instead.
+*/
+static struct DebugFileOpenCheck
+{
+    DebugFileOpenCheck()
+    {
+        if (!fpDebug)
+            fprintf(stderr, "RWLock: cannot open D:\\DebugRW.txt -- lock debug logging is disabled\n");
+    }
+} debugFileOpenCheck;
+
 /* Guard struct: its destructor runs at program exit and closes fpDebug,
 ** since there is no explicit shutdown function for this module.
 */
@@ -106,7 +118,7 @@ void removeFromArray(PRWLock pLock, unsigned long long numHeld, LOCKSHELD locksH
     if (!found)
     {
         fprintf(stderr, "Trying to unlock a lock that isn't held! '%s' \n", pLock->lockName);
-        fflush(stderr);
+        (void)fflush(stderr);
         int x = 1;
         x--;
         x = x / x;
@@ -145,7 +157,7 @@ void RWLockFree(const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockFree Start\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
     delete pLock->pRwLock;
@@ -153,7 +165,7 @@ void RWLockFree(const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockFree End\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 }
@@ -175,7 +187,7 @@ void RWLockInit(const char* pszLockName, const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockInit Start\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -185,7 +197,7 @@ void RWLockInit(const char* pszLockName, const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockInit End\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 }
@@ -202,7 +214,7 @@ void RWLockReadLock(const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadLock Waiting\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -223,7 +235,7 @@ void RWLockReadLock(const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadLock Obtained\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
         printLocks(fpDebug, "Read Locks", mutexReadLocked, activeReadsHeld);
     }
 #endif
@@ -244,7 +256,7 @@ bool RWLockReadTryLock(const char* pszLocation, PRWLock pLock, int attempts)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadLock Trying for %d attempts\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation, attempts);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -289,7 +301,7 @@ bool RWLockReadTryLock(const char* pszLocation, PRWLock pLock, int attempts)
         else
             fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadLock Failed\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
 
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -309,7 +321,7 @@ void RWLockReadUnlock(const char* pszLocation, PRWLock pLock)
     {
         fprintf(fpDebug, "0x%16zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadUnlock Release Start\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
         printLocks(fpDebug, "Read Locks", mutexReadLocked, activeReadsHeld);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
     pLock->pRwLock->unlock_shared();
@@ -331,7 +343,7 @@ void RWLockReadUnlock(const char* pszLocation, PRWLock pLock)
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockReadUnlock Release Complete\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
         printLocks(fpDebug, "Read Locks", mutexReadLocked, activeReadsHeld);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 }
@@ -348,7 +360,7 @@ void RWLockWriteLock(const char* pszLocation, PRWLock pLock)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteLock Waiting\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
     pLock->pRwLock->lock();
@@ -379,7 +391,7 @@ void RWLockWriteLock(const char* pszLocation, PRWLock pLock)
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteLock Obtained\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
         printLocks(fpDebug, "Write Locks", mutexWriteLocked, activeWritesHeld);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 }
@@ -399,7 +411,7 @@ bool RWLockWriteTryLock(const char* pszLocation, PRWLock pLock, int attempts)
     if (IsDebugging(DEBUG_LOCKS))
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteLock Trying for %d attempts\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation, attempts);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
     bool result = false;
@@ -448,7 +460,7 @@ bool RWLockWriteTryLock(const char* pszLocation, PRWLock pLock, int attempts)
         else
             fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteLock Failed\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
 
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -468,7 +480,7 @@ void RWLockWriteUnlock(const char* pszLocation, PRWLock pLock)
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteUnlock Release Start\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
         printLocks(fpDebug, "Write Locks", mutexWriteLocked, activeWritesHeld);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -491,7 +503,7 @@ void RWLockWriteUnlock(const char* pszLocation, PRWLock pLock)
     {
         fprintf(fpDebug, "0x%016zx: Clock: 0x%08lx  RWLock:0x%p - %s - %s: RWLockWriteUnlock Release Complete\n", myThreadId, clock(), pLock, pLock->lockName, pszLocation);
         printLocks(fpDebug, "Write Locks", mutexWriteLocked, activeWritesHeld);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 }
@@ -511,7 +523,7 @@ void RWLockStats()
     {
         fprintf(fpDebug, "0x%016zx: Number of read  locks: %zd\n", myThreadId, mutexReadLocked);
         fprintf(fpDebug, "0x%016zx: Number of write locks: %zd\n", myThreadId, mutexWriteLocked);
-        fflush(fpDebug);
+        (void)fflush(fpDebug);
     }
 #endif
 
@@ -530,6 +542,6 @@ void RWLockStats()
     printLocks(fpOut, "Writes Held:", mutexWriteLocked, activeWritesHeld);
     printLocks(fpOut, "Max Writes Held", maxWriteLocked, maxWritesHeld);
 
-    fflush(fpOut);
+    (void)fflush(fpOut);
 #endif
 }

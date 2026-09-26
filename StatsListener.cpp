@@ -31,6 +31,7 @@
 #include "Mem.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* Functions */
 
@@ -89,6 +90,47 @@ static double MbpsToBoardsPerSec(double mbps)
 }
 
 /*
+** Function: AppendF
+** @brief    printf-style append into a fixed buffer that can never run past its
+**           end: the returned length is clamped to leave room for the NUL.
+** @details  The status builders used `n += snprintf(buf + n, bufSize - n, ...)`.
+**           snprintf returns the length it WANTED, so once the text outgrew the
+**           buffer `n` passed `bufSize` and `bufSize - n` wrapped to a huge
+**           unsigned size -- the next call would have written far past the
+**           buffer. Here a full buffer simply stops taking text (truncating the
+**           report) instead.
+** @param    buf     - destination buffer
+** @param    bufSize - capacity of buf in bytes
+** @param    n       - characters already in buf
+** @param    fmt     - printf-style format
+** @return   The new length, never more than bufSize - 1.
+*/
+template <typename N, typename S>
+static N AppendF(char* buf, S bufSize, N n, const char* fmt, ...)
+{
+    size_t cap = (size_t)bufSize;
+    size_t pos = (size_t)n;
+
+    if (cap == 0)
+        return n;
+    if (pos >= cap - 1)
+        return (N)(cap - 1);
+
+    va_list argptr;
+    va_start(argptr, fmt);
+    int wrote = vsnprintf(buf + pos, cap - pos, fmt, argptr);
+    va_end(argptr);
+
+    if (wrote < 0)
+        return n;
+
+    size_t newPos = pos + (size_t)wrote;
+    if (newPos > cap - 1)
+        newPos = cap - 1;
+    return (N)newPos;
+}
+
+/*
 ** Function: BuildStatusResponse
 ** @brief    Builds the full human-readable STATUS response: current-level
 **           live stats, per-drive breakdown, active merge/flush/cascade
@@ -106,10 +148,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     char     dur[16];
 
     int n = 0;
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "OthelloRingMaster v%s  |  Board: %dx%d  |  Levels: 0..%d\n",
                   VERSION, pCfg->boardSize, pCfg->boardSize, maxLevel - 1);
-    n += snprintf(buf + n, bufSize - n, "\n");
+    n = AppendF(buf, bufSize, n, "\n");
 
     /* --- Current level (live stats) --- */
     const LevelStats* cur = &pSt->levelStats[curLevel];
@@ -138,32 +180,32 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     {
         phase = curDone ? "done" : (pSt->currentPhase ? pSt->currentPhase : "RUNNING");
     }
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "=== Level %d / %d  [%s]  %s  (%llu brd/s  %llu ns/brd) ===\n",
                   curLevel, maxLevel - 1, phase,
                   dur, (unsigned long long)brdPerSec, (unsigned long long)nsBrd);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Boards in (store)      : %llu\n",
                   (unsigned long long)cur->boardsReadFromStore);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Boards generated (GPU) : %llu\n",
                   (unsigned long long)cur->boardsGenerated);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  GPU dups removed       : %llu\n",
                   (unsigned long long)cur->gpuDupsRemoved);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  GPU flushes            : %llu\n",
                   (unsigned long long)cur->gpuFlushes);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Boards recv'd (GPU)    : %llu\n",
                   (unsigned long long)cur->boardsReceivedFromGpu);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Merge dups removed     : %llu\n",
                   (unsigned long long)cur->mrgDupsRemoved);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  MW files created       : %llu\n",
                   (unsigned long long)cur->mwFilesCreated);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Boards written to disk : %llu  (%.2f GB)\n",
                   (unsigned long long)cur->boardsWrittenToDisk,
                   cur->mwBytes / (1024.0 * 1024.0 * 1024.0));
@@ -180,7 +222,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         if (consIn > 0)
         {
             double  pctSaved = 100.0 * (double)(consIn - consOut) / (double)consIn;
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "  Consol reclaimed       : %.2f GB -> %.2f GB  (%.2f%% saved)\n",
                           consIn  / (1024.0 * 1024.0 * 1024.0),
                           consOut / (1024.0 * 1024.0 * 1024.0),
@@ -189,10 +231,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     }
     if (cur->passBoards > 0 || cur->terminalBoards > 0)
     {
-        n += snprintf(buf + n, bufSize - n,
+        n = AppendF(buf, bufSize, n,
                       "  Pass boards            : %llu\n",
                       (unsigned long long)cur->passBoards);
-        n += snprintf(buf + n, bufSize - n,
+        n = AppendF(buf, bufSize, n,
                       "  Terminal boards        : %llu\n",
                       (unsigned long long)cur->terminalBoards);
     }
@@ -242,12 +284,12 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             int64_t etaNanos = (int64_t)((double)elapsedNanos / overallFrac * (1.0 - overallFrac));
             char    etaDur[16];
             FormatDuration(etaNanos, etaDur, sizeof(etaDur));
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "  Est. time remaining    : %s  (~%.1f%% of level done)\n",
                           etaDur, overallFrac * 100.0);
         }
     }
-    n += snprintf(buf + n, bufSize - n, "\n");
+    n = AppendF(buf, bufSize, n, "\n");
 
     /* Current-level drive breakdown (cumulative since level start).
     ** BlkFls/WhtFls: real, current PHYSICAL FILE COUNT on this drive for
@@ -258,9 +300,9 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     ** LIFETIME HIGH-WATER per color (never reset per level) -- a capacity
     ** watch against MAX_MW_SEGS, not a file count at all.
     */
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  Drv  Files       Disk GB     Uncomp GB       Free GB  BlkFls  WhtFls  MWSegHiB  MWSegHiW\n");
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "  ---  -----  ------------  ------------  ------------  ------  ------  --------  --------\n");
     for (int i = 0; i < pSt->numWriterDrives; i++)
     {
@@ -283,7 +325,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         int hiSegW = pSt->mwWhiteSegCountHighWater[i];
 
         if (showUncomp)
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5llu  %9.2f GB  %9.2f GB  %9.2f GB  %6d  %6d  %8d  %8d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
@@ -292,7 +334,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                           DriveAvailable(pSt, d->driveLetter) / (1024.0 * 1024.0 * 1024.0),
                           blackFiles, whiteFiles, hiSegB, hiSegW);
         else
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5llu  %9.2f GB                %9.2f GB  %6d  %6d  %8d  %8d\n",
                           d->driveLetter,
                           (unsigned long long)d->levelFilesWritten,
@@ -318,20 +360,20 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         bool showUncomp = (uncomp > 0 && uncomp != disk);
         double freeGB   = DriveAvailable(pSt, dl) / (1024.0 * 1024.0 * 1024.0);
         if (showUncomp)
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
                           dl, blk + wht,
                           disk   / (1024.0 * 1024.0 * 1024.0),
                           uncomp / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else if (disk > 0)
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
                           dl, blk + wht,
                           disk / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d                              %9.2f GB  %4d  %4d\n",
                           dl, blk + wht, freeGB, blk, wht);
     }
@@ -346,20 +388,20 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         bool showUncomp = (uncomp > 0 && uncomp != disk);
         double freeGB   = DriveAvailable(pSt, dl) / (1024.0 * 1024.0 * 1024.0);
         if (showUncomp)
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d  %9.2f GB  %9.2f GB  %9.2f GB  %4d  %4d\n",
                           dl, blk + wht,
                           disk   / (1024.0 * 1024.0 * 1024.0),
                           uncomp / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else if (disk > 0)
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d  %9.2f GB                %9.2f GB  %4d  %4d\n",
                           dl, blk + wht,
                           disk / (1024.0 * 1024.0 * 1024.0),
                           freeGB, blk, wht);
         else
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "    %c  %5d                              %9.2f GB  %4d  %4d\n",
                           dl, blk + wht, freeGB, blk, wht);
     }
@@ -385,7 +427,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                                    : 0.0;
                 char etaStr[16];
                 FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-                n += snprintf(buf + n, bufSize - n,
+                n = AppendF(buf, bufSize, n,
                               "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
                               "   files: %d\n",
                               "iMerge", kPlayerNames[p], doneGB, totalGB, pct, mbps,
@@ -424,7 +466,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                     ** been torn down yet. Don't keep recomputing a "current"
                     ** rate/ETA -- that average rate ticking on past 100% was
                     ** misleading. Show dashes + "done" until the line clears. */
-                    n += snprintf(buf + n, bufSize - n,
+                    n = AppendF(buf, bufSize, n,
                                   "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5s MB/s  %9s brd/s   ETA: %s\n",
                                   "Flush", detail, doneGB, totalGB, pct, "--", "--", "done");
                 }
@@ -437,7 +479,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                                        : 0.0;
                     char etaStr[16];
                     FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-                    n += snprintf(buf + n, bufSize - n,
+                    n = AppendF(buf, bufSize, n,
                                   "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
                                   "Flush", detail, doneGB, totalGB, pct, mbps,
                                   MbpsToBoardsPerSec(mbps), etaStr);
@@ -455,7 +497,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     */
     {
         int free = (int)InterlockedCompareExchange((volatile LONG*)&pSt->consolidatorFreeCount, 0, 0);
-        n += snprintf(buf + n, bufSize - n,
+        n = AppendF(buf, bufSize, n,
                       "  Consol workers busy    : %d / %d\n",
                       CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
 
@@ -486,7 +528,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             ** worker-pool saturation; flag it so a reader doesn't have to
             ** already know that history to recognize something unusual.
             */
-            n += snprintf(buf + n, bufSize - n,
+            n = AppendF(buf, bufSize, n,
                           "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
                           "   files: %d%s\n",
                           "Consol", detail, doneGB, totalGB, pct, mbps,
@@ -522,7 +564,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                 snprintf(detail, sizeof(detail), "%s->%c:", playerNames[p], pCfg->storeDrive);
                 char etaStr[16];
                 FormatEta(doneGB, totalGB, mbps, etaStr, sizeof(etaStr));
-                n += snprintf(buf + n, bufSize - n,
+                n = AppendF(buf, bufSize, n,
                               "  %-7s %-14s: %6.2f / %6.2f GB  (%7.3f%%)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s"
                               "   src: %df+%dp\n",
                               "Merge", detail, doneGB, totalGB, pct, mbps,
@@ -569,7 +611,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                 else
                     snprintf(etaStr, sizeof(etaStr), "--:--:--");
 
-                n += snprintf(buf + n, bufSize - n,
+                n = AppendF(buf, bufSize, n,
                               "  %-7s %-14s: group %2d / %2d  (%6.2f GB to temp)  @ %5.0f MB/s  %9.0f brd/s   ETA: %s\n",
                               "Cascade", playerName,
                               pSt->cascadeGroupsDone[p] + 1,
@@ -588,10 +630,10 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
     ** different) numbers -- confirmed live confusion. See
     ** project_status_display_cleanup_backlog memory for the full rationale.
     */
-    n += snprintf(buf + n, bufSize - n, "\n");
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n, "\n");
+    n = AppendF(buf, bufSize, n,
                   "Lvl        BoardsIn        Generated         GpuDups GpuDup%%   MrgDups(final)   Written(gross)  UniqueOut(final)       SlvGB    Duration  ConsCr  ConsRm      ns/brd\n");
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "---  --------------  ---------------  --------------  ------  ---------------  ---------------  ----------------  ----------  ----------  ------  ------  ----------\n");
     for (int lvl = 0; lvl < curLevel; lvl++)
     {
@@ -614,7 +656,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
         */
         uint64_t uniqueOut = (ls->boardsWrittenToDisk >= ls->mrgDupsRemoved)
                              ? ls->boardsWrittenToDisk - ls->mrgDupsRemoved : 0;
-        n += snprintf(buf + n, bufSize - n,
+        n = AppendF(buf, bufSize, n,
                       "%3d  %14llu  %15llu  %14llu  %6.2f  %15llu  %15llu  %16llu  %10.2f  %10s  %6llu  %6llu  %10llu\n",
                       lvl,
                       (unsigned long long)ls->boardsReadFromStore,
@@ -677,7 +719,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
             snprintf(mrgDupsStr, sizeof(mrgDupsStr), "--");
             snprintf(uniqueOutStr, sizeof(uniqueOutStr), "--");
         }
-        n += snprintf(buf + n, bufSize - n,
+        n = AppendF(buf, bufSize, n,
                       "%3d  %14llu  %15llu  %14llu  %6.2f  %15s  %15llu  %16s  %10.2f  %10s  %6llu  %6llu  %s\n",
                       curLevel,
                       (unsigned long long)cur->boardsReadFromStore,
@@ -694,7 +736,7 @@ static void BuildStatusResponse(PSolveContext pCtx, char* buf, int bufSize)
                       phaseStr);
     }
 
-    n += snprintf(buf + n, bufSize - n, "END\n");
+    n = AppendF(buf, bufSize, n, "END\n");
     (void)n;
 }
 
@@ -721,7 +763,7 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
     size_t n = 0;
 
     int free = (int)InterlockedCompareExchange((volatile LONG*)&pSt->consolidatorFreeCount, 0, 0);
-    n += snprintf(buf + n, bufSize - n,
+    n = AppendF(buf, bufSize, n,
                   "Consolidator workers busy: %d / %d\n\n", CONSOLIDATOR_POOL_THREADS - free, CONSOLIDATOR_POOL_THREADS);
 
     /* Heap, never stack -- RegistryFileNode is ~4 KB each (full-path filename),
@@ -730,6 +772,8 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
     */
     RegistryFileNode* snap = (RegistryFileNode*)MemMalloc("consolSnap",
                                  sizeof(RegistryFileNode) * (size_t)CHECKPOINT_MANIFEST_MAX_FILES);
+    if (!snap)
+        Fatal(FATAL_ALLOCATION_FAILED, "StatsListener: cannot allocate the consolidation snapshot buffer");
 
     for (int wi = 0; wi < pSt->numMergeWriters; wi++)
     {
@@ -749,7 +793,7 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
 
         for (int player = 0; player <= 1; player++)
         {
-            n += snprintf(buf + n, bufSize - n, "=== %c: %-5s ===\n",
+            n = AppendF(buf, bufSize, n, "=== %c: %-5s ===\n",
                           pSt->mwDirectory[wi][0], kPlayerNames[player]);
 
             int shown = 0;
@@ -784,16 +828,16 @@ static void BuildConsolResponse(PSolveContext pCtx, char* buf, size_t bufSize)
                     snprintf(status, sizeof(status), "reserved (%s)",
                              kReservedByNames[snap[i].reservedBy]);
 
-                n += snprintf(buf + n, bufSize - n, "  %-28s %9.2f GB  %s\n",
+                n = AppendF(buf, bufSize, n, "  %-28s %9.2f GB  %s\n",
                               baseName, snap[i].physfilesize / (1024.0 * 1024.0 * 1024.0), status);
                 shown++;
             }
             if (shown == 0)
-                n += snprintf(buf + n, bufSize - n, "  (none)\n");
+                n = AppendF(buf, bufSize, n, "  (none)\n");
         }
     }
     MemFree(snap);
-    n += snprintf(buf + n, bufSize - n, "END\n");
+    n = AppendF(buf, bufSize, n, "END\n");
     (void)n;
 }
 
@@ -817,7 +861,7 @@ static void HandleClient(SOCKET client, PSolveContext pCtx)
     if (_stricmp(cmd, "STOP") == 0)
     {
         const char* msg = "Stopping...\n";
-        send(client, msg, (int)strlen(msg), 0);
+        (void)send(client, msg, (int)strlen(msg), 0);
         LoggerLog("STOP command received via stats port -- requesting graceful shutdown...\n");
         pCtx->pState->terminateThreads = true;
     }
@@ -829,7 +873,7 @@ static void HandleClient(SOCKET client, PSolveContext pCtx)
         ** returns immediately; it doesn't wait for the checkpoint to finish.
         */
         const char* msg = "Checkpoint requested -- will take effect on the next board fed to the GPU.\n";
-        send(client, msg, (int)strlen(msg), 0);
+        (void)send(client, msg, (int)strlen(msg), 0);
         LoggerLog("CHECKPT command received via stats port -- on-demand mid-level checkpoint requested...\n");
         pCtx->pState->checkpointRequestedNow = true;
     }

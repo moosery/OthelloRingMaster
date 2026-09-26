@@ -109,6 +109,63 @@ static inline int RegistryNextFileIdx(POthelloRingMasterState pSt, int writerIdx
 }
 
 /*
+** Function: RegistryRequireNodeLocked
+** @brief    Confirms a node pointer still belongs to this drive's registry list;
+**           stops the process if it does not. The caller must already hold the
+**           drive's registry lock.
+** @details  Node pointers are handed out by RegistryReserveNew /
+**           RegistryScanUnreserved and used later by other calls with no other
+**           check. They stay valid only because of a protocol (only the job that
+**           reserved a node may erase it; resets happen after every pool has
+**           drained). A pointer that no longer matches any list element means
+**           that protocol was broken and the pointer is dangling -- writing
+**           through it would corrupt whatever the heap put there. The list holds
+**           at most a few thousand nodes and these calls are per file, so the
+**           walk costs nothing measurable.
+** @param    pSt       - solver state
+** @param    writerIdx - which writer drive the pointer should belong to
+** @param    pNode     - the pointer to validate
+** @param    pszOp     - name of the calling operation, for the failure message
+*/
+static inline void RegistryRequireNodeLocked(POthelloRingMasterState pSt, int writerIdx,
+                                             const RegistryFileNode* pNode, const char* pszOp)
+{
+    bool found = false;
+
+    if (pNode != nullptr)
+        for (const auto& n : pSt->driveRegistry[writerIdx])
+            if (&n == pNode) { found = true; break; }
+
+    if (!found)
+    {
+        LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+        Fatal(FATAL_MERGE_LOGIC_ERROR,
+              "%s: registry node %p is not in drive %d's registry (stale or dangling pointer -- "
+              "a node was erased while another job still held it)",
+              pszOp, (const void*)pNode, writerIdx);
+    }
+}
+
+/*
+** Function: RegistryEraseNode
+** @brief    Removes one node by pointer, stopping the process if the pointer is
+**           not in the list (a double removal or a stale pointer).
+** @param    pSt       - solver state
+** @param    writerIdx - which writer drive
+** @param    pNode     - the node to erase
+** @param    pszOp     - name of the calling operation, for the failure message
+*/
+static inline void RegistryEraseNode(POthelloRingMasterState pSt, int writerIdx,
+                                     PRegistryFileNode pNode, const char* pszOp)
+{
+    EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryRequireNodeLocked(pSt, writerIdx, pNode, pszOp);
+    pSt->driveRegistry[writerIdx].remove_if(
+        [pNode](const RegistryFileNode& n) { return &n == pNode; });
+    LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+}
+
+/*
 ** Function: RegistryReserveNew
 ** @brief    Registers a brand-new file that's about to be written (a flush
 **           output, a consolidation-merge output, or an iMerge output) and
@@ -129,7 +186,7 @@ static inline int RegistryNextFileIdx(POthelloRingMasterState pSt, int writerIdx
 **           std::list never invalidates other elements' references on
 **           insert/erase), or nullptr if DriveReserve failed (real low space).
 */
-static inline PRegistryFileNode RegistryReserveNew(POthelloRingMasterState pSt, int writerIdx,
+[[nodiscard]] static inline PRegistryFileNode RegistryReserveNew(POthelloRingMasterState pSt, int writerIdx,
                                                      int player, uint8_t reservedBy,
                                                      const char* filename, char driveLetter,
                                                      int64_t reserveBytes)
@@ -139,7 +196,9 @@ static inline PRegistryFileNode RegistryReserveNew(POthelloRingMasterState pSt, 
 
     RegistryFileNode node = {};
     node.color              = (uint8_t)player;
-    strncpy_s(node.filename, sizeof(node.filename), filename, _TRUNCATE);
+    if (strncpy_s(node.filename, sizeof(node.filename), filename, _TRUNCATE) != 0)
+        Fatal(FATAL_MERGE_LOGIC_ERROR, "RegistryReserveNew: path too long for a registry node (%zu characters)",
+              strlen(filename));
     node.physfilesize        = 0;
     node.isReserved          = true;
     node.reservedBy          = reservedBy;
@@ -173,6 +232,7 @@ static inline void RegistryFinishNew(POthelloRingMasterState pSt, int writerIdx,
                                       PRegistryFileNode pNode, int64_t realSize)
 {
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryRequireNodeLocked(pSt, writerIdx, pNode, "RegistryFinishNew");
     pNode->physfilesize  = realSize;
     pNode->isReserved    = false;
     pNode->reservedBy    = REGISTRY_RESERVED_NONE;
@@ -197,10 +257,7 @@ static inline void RegistryFinishNew(POthelloRingMasterState pSt, int writerIdx,
 */
 static inline void RegistryAbandonNew(POthelloRingMasterState pSt, int writerIdx, PRegistryFileNode pNode)
 {
-    EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
-    pSt->driveRegistry[writerIdx].remove_if(
-        [pNode](const RegistryFileNode& n) { return &n == pNode; });
-    LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryEraseNode(pSt, writerIdx, pNode, "RegistryAbandonNew");
 }
 
 /*
@@ -225,7 +282,7 @@ static inline void RegistryAbandonNew(POthelloRingMasterState pSt, int writerIdx
 ** @return   Number of nodes found (and written to outArray); may be less
 **           than the true total if maxOut was hit.
 */
-static inline int RegistryScanUnreserved(POthelloRingMasterState pSt, int writerIdx, int player,
+[[nodiscard]] static inline int RegistryScanUnreserved(POthelloRingMasterState pSt, int writerIdx, int player,
                                           int64_t maxSizeBytes,
                                           PRegistryFileNode* outArray, int maxOut)
 {
@@ -259,12 +316,13 @@ static inline int RegistryScanUnreserved(POthelloRingMasterState pSt, int writer
 ** @param    reservedBy - REGISTRY_RESERVED_CONSOL/IMERGE/FINAL_MERGE
 ** @return   true if claimed; false if it was already reserved by someone else.
 */
-static inline bool RegistryReserveOne(POthelloRingMasterState pSt, int writerIdx,
+[[nodiscard]] static inline bool RegistryReserveOne(POthelloRingMasterState pSt, int writerIdx,
                                        PRegistryFileNode pNode, uint8_t reservedBy)
 {
     bool claimed = false;
 
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryRequireNodeLocked(pSt, writerIdx, pNode, "RegistryReserveOne");
     if (!pNode->isReserved)
     {
         pNode->isReserved   = true;
@@ -306,6 +364,7 @@ static inline void RegistryLinkProgress(POthelloRingMasterState pSt, int writerI
                                          PRegistryFileNode pNode, volatile int64_t* pProgressBytes)
 {
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryRequireNodeLocked(pSt, writerIdx, pNode, "RegistryLinkProgress");
     pNode->pProgressBytes = pProgressBytes;
     LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
 }
@@ -325,6 +384,7 @@ static inline void RegistryLinkProgress(POthelloRingMasterState pSt, int writerI
 static inline void RegistryUnreserveOne(POthelloRingMasterState pSt, int writerIdx, PRegistryFileNode pNode)
 {
     EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryRequireNodeLocked(pSt, writerIdx, pNode, "RegistryUnreserveOne");
     pNode->isReserved = false;
     pNode->reservedBy = REGISTRY_RESERVED_NONE;
     LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
@@ -343,10 +403,7 @@ static inline void RegistryUnreserveOne(POthelloRingMasterState pSt, int writerI
 */
 static inline void RegistryRemoveNode(POthelloRingMasterState pSt, int writerIdx, PRegistryFileNode pNode)
 {
-    EnterCriticalSection(&pSt->driveRegistryCS[writerIdx]);
-    pSt->driveRegistry[writerIdx].remove_if(
-        [pNode](const RegistryFileNode& n) { return &n == pNode; });
-    LeaveCriticalSection(&pSt->driveRegistryCS[writerIdx]);
+    RegistryEraseNode(pSt, writerIdx, pNode, "RegistryRemoveNode");
 }
 
 /*

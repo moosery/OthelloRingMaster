@@ -45,7 +45,7 @@ void LoggerInit(const char* logFileName)
     if (g_filePtr != nullptr)
     {
         fprintf(stderr, "LoggerInit: Logger already initialized with file '%s'; closing previous file\n", g_logFileName);
-        fclose(g_filePtr);
+        (void)fclose(g_filePtr);
         g_filePtr = nullptr;
     }
 
@@ -173,5 +173,5 @@ static void noteLogWriteFailure(const char* pszDestination, std::atomic<bool>& a
     fprintf(stderr, "LOGGER: writing to '%s' failed (errno=%d). Later output to it may be missing -- "
                     "the log for this run may be incomplete. (Reported once.)\n",
             pszDestination, savedErrno);
-    fflush(stderr);
+    (void)fflush(stderr);
 }

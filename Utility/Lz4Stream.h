@@ -50,7 +50,7 @@ typedef struct __Lz4StreamReader Lz4StreamReader;
 ** @param    path - file path to create (overwritten if it exists)
 ** @return   A new Lz4StreamWriter. Fatals on failure (never returns nullptr).
 */
-Lz4StreamWriter* Lz4StreamWriterOpen(const char* path);
+[[nodiscard]] Lz4StreamWriter* Lz4StreamWriterOpen(const char* path);
 
 /*
 ** Function: Lz4StreamWriterWrite
@@ -76,7 +76,7 @@ void Lz4StreamWriterClose(Lz4StreamWriter* pw);
 ** @param    path - file path to open for reading
 ** @return   A new Lz4StreamReader, or nullptr if the file is missing or corrupt.
 */
-Lz4StreamReader* Lz4StreamReaderOpen(const char* path);
+[[nodiscard]] Lz4StreamReader* Lz4StreamReaderOpen(const char* path);
 
 /*
 ** Function: Lz4StreamReaderRead

@@ -124,7 +124,7 @@ int main(int argc, char* argv[])
     }
 
     printf("Whose turn is it (b/w)? ");
-    fflush(stdout);
+    (void)fflush(stdout);
     char turnLine[16];
     bool blackToMove = true;
     if (fgets(turnLine, sizeof(turnLine), stdin))

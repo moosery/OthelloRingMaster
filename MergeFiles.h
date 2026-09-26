@@ -46,9 +46,12 @@
 ** @param    compressed     - true to open outputPath via RSFWriterOpenZ
 ** @param    pTerminate     - out-of-band cancellation flag, checked between pops
 ** @param    extraReaders   - already-open readers to merge in alongside inputPaths
+**                            (ownership passes to this call, which closes every one; the
+**                            caller must not use or close them afterwards, and should clear
+**                            its own list -- the const list cannot be nulled from here)
 ** @return   Unique record count written to outputPath.
 */
-uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath,
+[[nodiscard]] uint64_t KWayMergeFiles(char** inputPaths, int numInputs, const char* outputPath,
                          volatile int64_t* pProgressBytes, bool compressed = false,
                          const volatile bool* pTerminate = nullptr,
                          const std::vector<RSFReader*>& extraReaders = {});

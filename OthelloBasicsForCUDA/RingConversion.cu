@@ -12,6 +12,7 @@
 /* Includes */
 #include "RingConversion.h"
 #include "RingPermutation.h"
+#include "Error.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
 
@@ -49,8 +50,14 @@ void OBCuda_InitRingPermutationTables()
         inverseArr[i] = inverse[i];
     }
 
-    cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr));
-    cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr));
+    /* A table that silently failed to upload would make every ring<->row-major
+    ** conversion on the GPU wrong, so a failed copy stops the run.
+    */
+    cudaError_t forwardErr = cudaMemcpyToSymbol(g_ringForwardPerm, forwardArr, sizeof(forwardArr));
+    cudaError_t inverseErr = cudaMemcpyToSymbol(g_ringInversePerm, inverseArr, sizeof(inverseArr));
+    if (forwardErr != cudaSuccess || inverseErr != cudaSuccess)
+        Fatal(FATAL_GPU_ERROR, "RingConversion: cannot upload the ring permutation tables to the GPU (%s / %s)",
+              cudaGetErrorString(forwardErr), cudaGetErrorString(inverseErr));
 }
 
 /*
@@ -128,10 +135,31 @@ bool OBCuda_TestRingRoundTrip()
         return false;
     }
 
-    cudaMemcpy(pDeviceValues, testValues, sizeof(testValues), cudaMemcpyHostToDevice);
-    cudaMemcpy(pDeviceFailCount, &hostFailCount, sizeof(int), cudaMemcpyHostToDevice);
+    /* This is a correctness self-test: a copy that silently failed would leave the
+    ** device counters unset (or, on the way back, leave hostFailCount at 0) and
+    ** the test would report a pass it never earned. Every step is checked.
+    */
+    cudaError_t upErrValues = cudaMemcpy(pDeviceValues, testValues, sizeof(testValues), cudaMemcpyHostToDevice);
+    cudaError_t upErrCount  = cudaMemcpy(pDeviceFailCount, &hostFailCount, sizeof(int), cudaMemcpyHostToDevice);
+    if (upErrValues != cudaSuccess || upErrCount != cudaSuccess)
+    {
+        fprintf(stderr, "OBCuda_TestRingRoundTrip: host-to-device copy failed (%s / %s)\n",
+                cudaGetErrorString(upErrValues), cudaGetErrorString(upErrCount));
+        cudaFree(pDeviceValues);
+        cudaFree(pDeviceFailCount);
+        return false;
+    }
 
     RingRoundTripTestKernel<<<1, count>>>(pDeviceValues, count, pDeviceFailCount);
+
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess)
+    {
+        fprintf(stderr, "OBCuda_TestRingRoundTrip: kernel launch failed: %s\n", cudaGetErrorString(launchErr));
+        cudaFree(pDeviceValues);
+        cudaFree(pDeviceFailCount);
+        return false;
+    }
 
     if (cudaDeviceSynchronize() != cudaSuccess)
     {
@@ -140,10 +168,18 @@ bool OBCuda_TestRingRoundTrip()
     }
     else
     {
-        cudaMemcpy(&hostFailCount, pDeviceFailCount, sizeof(int), cudaMemcpyDeviceToHost);
-        ok = (hostFailCount == 0);
-        if (!ok)
-            fprintf(stderr, "OBCuda_TestRingRoundTrip: %d check(s) failed\n", hostFailCount);
+        cudaError_t downErr = cudaMemcpy(&hostFailCount, pDeviceFailCount, sizeof(int), cudaMemcpyDeviceToHost);
+        if (downErr != cudaSuccess)
+        {
+            fprintf(stderr, "OBCuda_TestRingRoundTrip: device-to-host copy failed: %s\n", cudaGetErrorString(downErr));
+            ok = false;
+        }
+        else
+        {
+            ok = (hostFailCount == 0);
+            if (!ok)
+                fprintf(stderr, "OBCuda_TestRingRoundTrip: %d check(s) failed\n", hostFailCount);
+        }
     }
 
     cudaFree(pDeviceValues);

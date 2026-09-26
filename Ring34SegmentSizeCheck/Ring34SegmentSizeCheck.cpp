@@ -43,6 +43,7 @@
 #include "RingNestedIndex.h"
 #include "RingStoreFile.h"
 #include "FileAndDirUtils.h"
+#include "Error.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -231,7 +232,9 @@ int main(int argc, char* argv[])
         RSFClose(&pProbe);
 
         WIN32_FILE_ATTRIBUTE_DATA fad = {};
-        GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad);
+        if (!GetFileAttributesExA(srcPath, GetFileExInfoStandard, &fad))
+            Fatal(FATAL_FILE_OPEN, "Ring34SegmentSizeCheck: cannot read the size of '%s' (Windows error %lu)",
+                  srcPath, (unsigned long)GetLastError());
         origOnDiskBytes = ((uint64_t)fad.nFileSizeHigh << 32) | (uint64_t)fad.nFileSizeLow;
     }
 
@@ -306,7 +309,7 @@ int main(int argc, char* argv[])
 
         printf("Pass %d/%d: candidate %s (output buffer %.2fGB)\n", passNum, distinctCount, c.label,
                (double)outBufCapacity / (1024.0 * 1024.0 * 1024.0));
-        fflush(stdout);
+        (void)fflush(stdout);
 
         RSFReader* pReader = RSFOpenShaped(srcPath, RSF_SHAPE_LEAF16);
         if (!pReader)
@@ -367,7 +370,7 @@ int main(int argc, char* argv[])
                     printf("  [pass %d/%d] %d%% (%llu / %llu records)  elapsed=%.0fs  eta=%.0fs\n",
                            passNum, distinctCount, bucket,
                            (unsigned long long)processed, (unsigned long long)totalRecords, elapsedS, etaS);
-                    fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
+                    (void)fflush(stdout);   /* see the banner's own fflush comment above -- same reason */
                 }
             }
         }

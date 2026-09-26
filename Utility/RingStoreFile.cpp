@@ -142,6 +142,24 @@ struct __RSFWriter
 };
 
 /*
+** Function: RSFSetStreamBuffer
+** @brief    Gives a freshly opened stream a large full buffer, reporting (not
+**           ignoring) a refusal.
+** @details  Must be called before any other operation on the stream. A failure
+**           only costs speed -- the stream keeps its default buffering and stays
+**           correct -- so it is logged rather than stopping the run.
+** @param    f       - the just-opened stream
+** @param    bytes   - buffer size to request
+** @param    pszPath - the file's path, for the log line
+*/
+static void RSFSetStreamBuffer(FILE* f, size_t bytes, const char* pszPath)
+{
+    if (setvbuf(f, NULL, _IOFBF, bytes) != 0)
+        LoggerLog("RSF: could not set a %zu-byte stream buffer on '%s'; using the default (slower, still correct)\n",
+                  bytes, pszPath);
+}
+
+/*
 ** Function: WriteOut
 ** @brief    Writes size bytes of data to a writer's destination, whichever
 **           of file or memory mode it's in.
@@ -214,7 +232,7 @@ RSFWriter* RSFWriterOpen(const char* path)
     FILE* f = fopen(path, "wb");
     if (!f)
         Fatal(FATAL_FILE_OPEN, "RSFWriterOpen: cannot create '%s'", path);
-    setvbuf(f, NULL, _IOFBF, RSF_WRITE_BUFFER_SIZE);
+    RSFSetStreamBuffer(f, RSF_WRITE_BUFFER_SIZE, path);
 
     RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriter", sizeof(RSFWriter));
     if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpen: cannot allocate writer"); }
@@ -240,7 +258,7 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordS
     FILE* f = fopen(path, "wb");
     if (!f)
         Fatal(FATAL_FILE_OPEN, "RSFWriterOpenZ: cannot create '%s'", path);
-    setvbuf(f, NULL, _IOFBF, RSF_COMP_WRITE_BUFFER_SIZE);
+    RSFSetStreamBuffer(f, RSF_COMP_WRITE_BUFFER_SIZE, path);
 
     RSFWriter* pw = (RSFWriter*)MemMalloc("RSFWriterZ", sizeof(RSFWriter));
     if (!pw) { fclose(f); Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZ: cannot allocate writer"); }
@@ -254,7 +272,7 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordS
     pw->varBuf = (uint8_t*)MemMalloc("RSFWriterZBuf", RSF_COMP_WRITE_BUFFER_SIZE);
     if (!pw->varBuf)
     {
-        fclose(f); MemFree(pw);
+        (void)fclose(f); MemFree(pw);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFWriterOpenZ: cannot allocate write buffer");
     }
 
@@ -265,7 +283,7 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordS
         LZ4F_errorCode_t lz4Err = LZ4F_createCompressionContext(&pw->lz4Cctx, LZ4F_VERSION);
         if (LZ4F_isError(lz4Err))
         {
-            fclose(f); MemFree(pw->varBuf); MemFree(pw);
+            (void)fclose(f); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_ALLOCATION_FAILED,
                   "RSFWriterOpenZ: LZ4 context create failed on '%s': %s",
                   path, LZ4F_getErrorName(lz4Err));
@@ -280,7 +298,7 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordS
         if (!pw->lz4OutBuf)
         {
             LZ4F_freeCompressionContext(pw->lz4Cctx);
-            fclose(f); MemFree(pw->varBuf); MemFree(pw);
+            (void)fclose(f); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_ALLOCATION_FAILED,
                   "RSFWriterOpenZ: cannot allocate LZ4 output buffer");
         }
@@ -291,7 +309,7 @@ static RSFWriter* RSFWriterOpenZImpl(const char* path, bool forceLZ4, RSFRecordS
         if (LZ4F_isError(headerSize))
         {
             LZ4F_freeCompressionContext(pw->lz4Cctx);
-            fclose(f); MemFree(pw->lz4OutBuf); MemFree(pw->varBuf); MemFree(pw);
+            (void)fclose(f); MemFree(pw->lz4OutBuf); MemFree(pw->varBuf); MemFree(pw);
             Fatal(FATAL_FILE_OPEN,
                   "RSFWriterOpenZ: LZ4 frame begin failed on '%s': %s",
                   path, LZ4F_getErrorName(headerSize));
@@ -619,7 +637,7 @@ void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count)
 
     if (count > 0 && fwrite(pRecords, sizeof(UINT64_PAIR), (size_t)count, f) != (size_t)count)
     {
-        fclose(f);
+        (void)fclose(f);
         Fatal(FATAL_FILE_OPEN, "RSFWrite: record write failed for '%s'", path);
     }
 
@@ -634,11 +652,11 @@ void RSFWrite(const char* path, const UINT64_PAIR* pRecords, uint64_t count)
 
     if (fwrite(&trailer, sizeof(trailer), 1, f) != 1)
     {
-        fclose(f);
+        (void)fclose(f);
         Fatal(FATAL_FILE_OPEN, "RSFWrite: trailer write failed for '%s'", path);
     }
 
-    fclose(f);
+    FileCloseOrFatal(f, path);
 }
 
 /*
@@ -773,7 +791,7 @@ static size_t RSFRefillCompBuf(RSFReader* r, size_t toRead)
         r->f = fopen(r->path, "rb");
         if (r->f && _fseeki64(r->f, (int64_t)r->compBytesConsumed, SEEK_SET) != 0)
         {
-            fclose(r->f);
+            (void)fclose(r->f);
             r->f = nullptr;
         }
     }
@@ -873,6 +891,15 @@ static uint64_t RSFZReadVarInt(RSFReader* r)
     uint64_t v  = 0;
     int      sh = 0;
     for (;;) {
+        /* A 64-bit value needs at most ten 7-bit groups (shifts 0..63). A longer
+        ** run means the stream is corrupt; shifting by 64 or more is undefined
+        ** in C++ and would decode silent garbage instead of failing.
+        */
+        if (sh > 63)
+            Fatal(FATAL_FILE_OPEN,
+                  "RSFZReadVarInt: varint longer than 10 bytes -- corrupt stream in '%s' (%llu/%llu bytes consumed, %llu/%llu records read)",
+                  r->path, (unsigned long long)r->compBytesConsumed, (unsigned long long)r->compBytesTotal,
+                  (unsigned long long)r->recordsRead, (unsigned long long)r->trailer.recordCount);
         uint8_t b = RSFZReadByte(r);
         v |= (uint64_t)(b & 0x7F) << sh;
         sh += 7;
@@ -897,7 +924,7 @@ RSFReader* RSFOpen(const char* path)
 
     if (_fseeki64(f, -(int64_t)sizeof(RSFTrailer), SEEK_END) != 0)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpen: cannot seek to trailer in '%s'\n", path);
         return nullptr;
     }
@@ -905,7 +932,7 @@ RSFReader* RSFOpen(const char* path)
     RSFTrailer trailer = {};
     if (fread(&trailer, sizeof(trailer), 1, f) != 1)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpen: cannot read trailer in '%s'\n", path);
         return nullptr;
     }
@@ -920,13 +947,18 @@ RSFReader* RSFOpen(const char* path)
         { compressed = true; lz4 = true; }
     else
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpen: bad magic in '%s' (corrupt or incomplete)\n", path);
         return nullptr;
     }
 
-    _fseeki64(f, 0, SEEK_END);
-    int64_t actualSize = _ftelli64(f);
+    int64_t actualSize = -1;
+    if (_fseeki64(f, 0, SEEK_END) != 0 || (actualSize = _ftelli64(f)) < 0)
+    {
+        (void)fclose(f);
+        LoggerLog("RSFOpen: cannot determine the size of '%s'\n", path);
+        return nullptr;
+    }
 
     if (!compressed)
     {
@@ -934,7 +966,7 @@ RSFReader* RSFOpen(const char* path)
                              + (int64_t)sizeof(RSFTrailer);
         if (actualSize != expectedSize)
         {
-            fclose(f);
+            (void)fclose(f);
             LoggerLog("RSFOpen: size mismatch in '%s' (expected %lld, got %lld)\n",
                       path, expectedSize, actualSize);
             return nullptr;
@@ -947,7 +979,7 @@ RSFReader* RSFOpen(const char* path)
         int64_t expectedSize = (int64_t)compressedBytes + (int64_t)sizeof(RSFTrailer);
         if (actualSize != expectedSize)
         {
-            fclose(f);
+            (void)fclose(f);
             LoggerLog("RSFOpen: compressed size mismatch in '%s' (expected %lld, got %lld)\n",
                       path, expectedSize, actualSize);
             return nullptr;
@@ -956,14 +988,15 @@ RSFReader* RSFOpen(const char* path)
 
     if (_fseeki64(f, 0, SEEK_SET) != 0)
     {
-        fclose(f);
+        (void)fclose(f);
+        LoggerLog("RSFOpen: cannot seek back to the start of '%s'\n", path);
         return nullptr;
     }
 
     RSFReader* r = (RSFReader*)MemMalloc("RSFReader", sizeof(RSFReader));
     if (!r)
     {
-        fclose(f);
+        (void)fclose(f);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFOpen: cannot allocate reader");
         return nullptr;
     }
@@ -975,7 +1008,24 @@ RSFReader* RSFOpen(const char* path)
     RSFShapeMeta(RSF_SHAPE_PAIR64, &r->numFields, r->fieldBytes, &r->recordBytes);
 
     if (!compressed)
-        setvbuf(f, NULL, _IOFBF, RSF_COMP_READ_BUFFER_SIZE);
+    {
+        /* setvbuf is only defined on a stream that has not been read, seeked or
+        ** written yet, and this one has been (trailer check above). So reopen the
+        ** file and set the buffer before touching the new stream at all.
+        */
+        FILE* fBuffered = fopen(path, "rb");
+        if (!fBuffered)
+        {
+            (void)fclose(f);
+            MemFree(r);
+            LoggerLog("RSFOpen: cannot reopen '%s' for buffered reading\n", path);
+            return nullptr;
+        }
+        (void)fclose(f);
+        f    = fBuffered;
+        r->f = f;
+        RSFSetStreamBuffer(f, RSF_COMP_READ_BUFFER_SIZE, path);
+    }
 
     if (compressed)
     {
@@ -986,7 +1036,7 @@ RSFReader* RSFOpen(const char* path)
         r->compBytesTotal = compressedBytes;
         if (!r->compBuf)
         {
-            fclose(f); MemFree(r);
+            (void)fclose(f); MemFree(r);
             Fatal(FATAL_ALLOCATION_FAILED, "RSFOpen: cannot allocate read buffer");
             return nullptr;
         }
@@ -997,7 +1047,7 @@ RSFReader* RSFOpen(const char* path)
                 LZ4F_createDecompressionContext(&r->lz4Dctx, LZ4F_VERSION);
             if (LZ4F_isError(lz4Err))
             {
-                fclose(f); MemFree(r->compBuf); MemFree(r);
+                (void)fclose(f); MemFree(r->compBuf); MemFree(r);
                 Fatal(FATAL_ALLOCATION_FAILED,
                       "RSFOpen: LZ4 decomp context failed: %s",
                       LZ4F_getErrorName(lz4Err));
@@ -1008,7 +1058,7 @@ RSFReader* RSFOpen(const char* path)
             if (!r->lz4DecBuf)
             {
                 LZ4F_freeDecompressionContext(r->lz4Dctx);
-                fclose(f); MemFree(r->compBuf); MemFree(r);
+                (void)fclose(f); MemFree(r->compBuf); MemFree(r);
                 Fatal(FATAL_ALLOCATION_FAILED,
                       "RSFOpen: cannot allocate LZ4 decomp buffer");
                 return nullptr;
@@ -1138,7 +1188,7 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
 
     if (_fseeki64(f, -(int64_t)sizeof(RSFTrailer), SEEK_END) != 0)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpenShaped: cannot seek to trailer in '%s'\n", path);
         return nullptr;
     }
@@ -1146,26 +1196,31 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
     RSFTrailer trailer = {};
     if (fread(&trailer, sizeof(trailer), 1, f) != 1)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpenShaped: cannot read trailer in '%s'\n", path);
         return nullptr;
     }
 
     if (trailer.magic != RSFZL_MAGIC)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpenShaped: bad magic in '%s' (expected .rsfzl; corrupt or incomplete)\n", path);
         return nullptr;
     }
 
-    _fseeki64(f, 0, SEEK_END);
-    int64_t  actualSize      = _ftelli64(f);
+    int64_t  actualSize      = -1;
+    if (_fseeki64(f, 0, SEEK_END) != 0 || (actualSize = _ftelli64(f)) < 0)
+    {
+        (void)fclose(f);
+        LoggerLog("RSFOpenShaped: cannot determine the size of '%s'\n", path);
+        return nullptr;
+    }
     uint64_t compressedBytes = 0;
     memcpy(&compressedBytes, trailer._reserved, sizeof(uint64_t));
     int64_t expectedSize = (int64_t)compressedBytes + (int64_t)sizeof(RSFTrailer);
     if (actualSize != expectedSize)
     {
-        fclose(f);
+        (void)fclose(f);
         LoggerLog("RSFOpenShaped: compressed size mismatch in '%s' (expected %lld, got %lld)\n",
                   path, expectedSize, actualSize);
         return nullptr;
@@ -1173,14 +1228,15 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
 
     if (_fseeki64(f, 0, SEEK_SET) != 0)
     {
-        fclose(f);
+        (void)fclose(f);
+        LoggerLog("RSFOpenShaped: cannot seek back to the start of '%s'\n", path);
         return nullptr;
     }
 
     RSFReader* r = (RSFReader*)MemMalloc("RSFReaderShaped", sizeof(RSFReader));
     if (!r)
     {
-        fclose(f);
+        (void)fclose(f);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate reader");
         return nullptr;
     }
@@ -1197,7 +1253,7 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
     r->compBytesTotal = compressedBytes;
     if (!r->compBuf)
     {
-        fclose(f); MemFree(r);
+        (void)fclose(f); MemFree(r);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate read buffer");
         return nullptr;
     }
@@ -1205,7 +1261,7 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
     LZ4F_errorCode_t lz4Err = LZ4F_createDecompressionContext(&r->lz4Dctx, LZ4F_VERSION);
     if (LZ4F_isError(lz4Err))
     {
-        fclose(f); MemFree(r->compBuf); MemFree(r);
+        (void)fclose(f); MemFree(r->compBuf); MemFree(r);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: LZ4 decomp context failed: %s", LZ4F_getErrorName(lz4Err));
         return nullptr;
     }
@@ -1214,7 +1270,7 @@ RSFReader* RSFOpenShaped(const char* path, RSFRecordShape shape)
     if (!r->lz4DecBuf)
     {
         LZ4F_freeDecompressionContext(r->lz4Dctx);
-        fclose(f); MemFree(r->compBuf); MemFree(r);
+        (void)fclose(f); MemFree(r->compBuf); MemFree(r);
         Fatal(FATAL_ALLOCATION_FAILED, "RSFOpenShaped: cannot allocate LZ4 decomp buffer");
         return nullptr;
     }

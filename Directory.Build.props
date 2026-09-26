@@ -1,0 +1,17 @@
+<Project>
+  <!--
+    Solution-wide compiler policy.
+
+    C4834 is "discarding the return value of a function marked [[nodiscard]]".
+    The functions whose results must never be ignored (file opens, deletes,
+    sentinel writes, job queueing, reservations, reads, allocation) are marked
+    [[nodiscard]]; making the warning an error means a future change that drops
+    one of those results cannot even build. An intentional discard is spelled
+    (void)Call(...) with a comment saying why.
+  -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <TreatSpecificWarningsAsErrors>4834;%(TreatSpecificWarningsAsErrors)</TreatSpecificWarningsAsErrors>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

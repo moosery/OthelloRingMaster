@@ -83,9 +83,19 @@ static void RunMergeWriterJob(uint32_t thdIdx, PSolveContext pCtx, PFlushDescrip
 
     /* D2H both player regions into the fixed staging areas */
     if (blackCount > 0)
-        GpuFlushRead(pDesc->pAccum, RSF_PLAYER_BLACK, 0, blackDest, blackCount);
+    {
+        int gotBlack = GpuFlushRead(pDesc->pAccum, RSF_PLAYER_BLACK, 0, blackDest, blackCount);
+        if (gotBlack != blackCount)
+            Fatal(FATAL_GPU_ERROR, "RunMergeWriterJob: black device-to-host copy returned %d records, expected %d",
+                  gotBlack, blackCount);
+    }
     if (whiteCount > 0)
-        GpuFlushRead(pDesc->pAccum, RSF_PLAYER_WHITE, 0, whiteDest, whiteCount);
+    {
+        int gotWhite = GpuFlushRead(pDesc->pAccum, RSF_PLAYER_WHITE, 0, whiteDest, whiteCount);
+        if (gotWhite != whiteCount)
+            Fatal(FATAL_GPU_ERROR, "RunMergeWriterJob: white device-to-host copy returned %d records, expected %d",
+                  gotWhite, whiteCount);
+    }
 
     /* Signal the feeder as soon as D2H is done, not after compression. There
     ** is exactly one GPU feeder thread and it blocks on this event

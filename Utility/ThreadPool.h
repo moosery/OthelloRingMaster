@@ -73,7 +73,7 @@ public:
     **         dropped. A caller that would wait for the job to finish MUST check this -- a
     **         dropped job never runs, so waiting for it never ends.
     */
-    bool QueueJob(const std::function<void(uint32_t)>& job);
+    [[nodiscard]] bool QueueJob(const std::function<void(uint32_t)>& job);
 
     /*
     ** Method: Stop

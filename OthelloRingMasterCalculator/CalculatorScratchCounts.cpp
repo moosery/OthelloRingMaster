@@ -105,7 +105,7 @@ void JoinScratchCountsToFinal(const SegmentList& segments, int scratchByteWidth,
             }
         }
 
-        fclose(f);
+        (void)fclose(f);
     }
 
     if (pNibbleWriter) NibbleCountsWriterClose(pNibbleWriter);
