@@ -624,27 +624,31 @@ Player turn (black-to-move / white-to-move) is encoded in the filename, not the 
 
 Real measured run (D:/E: NVMe, F: HDD, Y: NAS), read directly from each completed level's
 ring-store file trailers via `OthelloRingMasterStoreStats.exe` -- no decompression, real
-on-disk sizes.
+on-disk sizes. A board's raw representation is a 16-byte `{hi, lo}` key -- **128 bits** --
+so the `Bits/Board` column below is the real yardstick for how much the ring format plus
+delta+varint+LZ4 compression is actually squeezing out of each stored board.
 
-| Level | Unique boards | Compressed | Uncompressed | Ratio | Reduction |
-|-------|---------------|------------|---------------|-------|-----------|
-| 12 | 51.1 M  | 94.46 MB    | 228.91 MB   | 2.42 | 58.73% |
-| 13 | 251.1 M | 392.20 MB   | 857.79 MB   | 2.19 | 54.28% |
-| 14 | 1.21 B  | 1.65 GB     | 3.40 GB     | 2.06 | 51.55% |
-| 15 | 5.01 B  | 5.88 GB     | 12.31 GB    | 2.09 | 52.24% |
-| 16 | 19.8 B  | 20.46 GB    | 44.72 GB    | 2.19 | 54.24% |
-| 17 | 65.9 B  | 59.62 GB    | 141.56 GB   | 2.37 | 57.89% |
-| 18 | 203.5 B | 165.01 GB   | 425.11 GB   | 2.58 | 61.19% |
-| 19 | 526.0 B | 381.84 GB   | 1,080.46 GB | 2.83 | 64.66% |
-| 20 | 1.23 T  | 816.21 GB   | 2,511.34 GB | 3.08 | 67.50% |
-| 21 | 2.42 T  | 1,459.16 GB | 4,888.74 GB | 3.35 | 70.15% |
-| 22 | 4.19 T  | 2,332.71 GB | 8,442.26 GB | 3.62 | 72.37% |
-| 23 | 6.02 T  | 3,098.07 GB | 12,087.51 GB | 3.90 | 74.37% |
-| 24 | 7.38 T  | 3,537.28 GB | 14,812.80 GB | 4.19 | 76.12% |
+| Level | Unique boards | Compressed | Uncompressed | Ratio | Reduction | Bits/Board |
+|-------|---------------|------------|---------------|-------|-----------|------------|
+| 12 | 51.1 M  | 94.46 MB    | 228.91 MB   | 2.42 | 58.73% | 14.80 |
+| 13 | 251.1 M | 392.20 MB   | 857.79 MB   | 2.19 | 54.28% | 12.50 |
+| 14 | 1.21 B  | 1.65 GB     | 3.40 GB     | 2.06 | 51.55% | 10.90 |
+| 15 | 5.01 B  | 5.88 GB     | 12.31 GB    | 2.09 | 52.24% | 9.38 |
+| 16 | 19.8 B  | 20.46 GB    | 44.72 GB    | 2.19 | 54.24% | 8.27 |
+| 17 | 65.9 B  | 59.62 GB    | 141.56 GB   | 2.37 | 57.89% | 7.24 |
+| 18 | 203.5 B | 165.01 GB   | 425.11 GB   | 2.58 | 61.19% | 6.49 |
+| 19 | 526.0 B | 381.84 GB   | 1,080.46 GB | 2.83 | 64.66% | 5.81 |
+| 20 | 1.23 T  | 816.21 GB   | 2,511.34 GB | 3.08 | 67.50% | 5.29 |
+| 21 | 2.42 T  | 1,459.16 GB | 4,888.74 GB | 3.35 | 70.15% | 4.83 |
+| 22 | 4.19 T  | 2,332.71 GB | 8,442.26 GB | 3.62 | 72.37% | 4.45 |
+| 23 | 6.02 T  | 3,098.07 GB | 12,087.51 GB | 3.90 | 74.37% | 4.12 |
+| 24 | 7.38 T  | 3,537.28 GB | 14,812.80 GB | 4.19 | 76.12% | 3.83 |
 
 **Compression keeps improving as the solve goes deeper** -- reduction crossed 50% by level
-14 and is past 76% by level 24, with no sign of leveling off yet. Levels beyond 24 aren't
-complete yet for this run.
+14 and is past 76% by level 24, with no sign of leveling off yet. Against the raw 128-bit
+representation, that's a ~33x reduction per board by level 24, not just the ~4.2x shown by
+the `Ratio` column (which is only against this format's own already-compact uncompressed
+tier). Levels beyond 24 aren't complete yet for this run.
 
 ## Project layout
 
