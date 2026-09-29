@@ -622,28 +622,29 @@ Player turn (black-to-move / white-to-move) is encoded in the filename, not the 
 
 ## Performance (6x6, RTX 4080 SUPER)
 
-Real measured run, same physical machine and drive layout as `OthelloLevelBlaster`'s own
-measured run in its README (D:/E: NVMe, F: HDD, Y: NAS). Every correctness-critical field
-(`BoardsIn`, `NewBoards`, `Pass`, `UniqueOut`, `Ends`, `MaxMv`, `Fls`) matches `OthelloLevelBlaster`'s
-row-major run **exactly**, level by level -- the ring-ordered pipeline produces bit-for-bit
-the same dedup result, just stored differently.
+Real measured run (D:/E: NVMe, F: HDD, Y: NAS), read directly from each completed level's
+ring-store file trailers via `OthelloRingMasterStoreStats.exe` -- no decompression, real
+on-disk sizes.
 
-| Level | Unique boards | Blaster store (MrgGB) | RingMaster store (MrgGB) | Smaller by | Blaster total time | RingMaster total time |
-|-------|---------------|------------------------|---------------------------|------------|---------------------|------------------------|
-| 12    | 251 M         | 0.62 GB   | 0.37 GB   | 40.3% | 12.6 s    | 13.2 s    |
-| 13    | 1.21 B        | 2.66 GB   | 1.53 GB   | 42.5% | 59.7 s    | 63.2 s    |
-| 14    | 5.01 B        | 9.75 GB   | 5.47 GB   | 43.9% | 4.3 min   | 4.9 min   |
-| 15    | 19.8 B        | 34.63 GB  | 19.06 GB  | 45.0% | 20.7 min  | 19.9 min  |
-| 16    | 65.9 B        | 103.67 GB | 55.52 GB  | 46.4% | 81.8 min  | 79.6 min  |
-| 17    | 203.5 B       | 292.92 GB | 153.67 GB | 47.5% | 4.17 h    | 4.43 h    |
-| 18    | 526.0 B       | 695.54 GB | 355.62 GB | 48.9% | 13.10 h   | 12.62 h   |
+| Level | Unique boards | Compressed | Uncompressed | Ratio | Reduction |
+|-------|---------------|------------|---------------|-------|-----------|
+| 12 | 51.1 M  | 94.46 MB    | 228.91 MB   | 2.42 | 58.73% |
+| 13 | 251.1 M | 392.20 MB   | 857.79 MB   | 2.19 | 54.28% |
+| 14 | 1.21 B  | 1.65 GB     | 3.40 GB     | 2.06 | 51.55% |
+| 15 | 5.01 B  | 5.88 GB     | 12.31 GB    | 2.09 | 52.24% |
+| 16 | 19.8 B  | 20.46 GB    | 44.72 GB    | 2.19 | 54.24% |
+| 17 | 65.9 B  | 59.62 GB    | 141.56 GB   | 2.37 | 57.89% |
+| 18 | 203.5 B | 165.01 GB   | 425.11 GB   | 2.58 | 61.19% |
+| 19 | 526.0 B | 381.84 GB   | 1,080.46 GB | 2.83 | 64.66% |
+| 20 | 1.23 T  | 816.21 GB   | 2,511.34 GB | 3.08 | 67.50% |
+| 21 | 2.42 T  | 1,459.16 GB | 4,888.74 GB | 3.35 | 70.15% |
+| 22 | 4.19 T  | 2,332.71 GB | 8,442.26 GB | 3.62 | 72.37% |
+| 23 | 6.02 T  | 3,098.07 GB | 12,087.51 GB | 3.90 | 74.37% |
+| 24 | 7.38 T  | 3,537.28 GB | 14,812.80 GB | 4.19 | 76.12% |
 
-**Storage is the clear, dramatic, and still-growing win** -- 40% smaller at level 12, up to
-49% smaller at level 18, with no sign of leveling off yet. **Wall-clock time is competitive,
-not dramatically different either way** -- within a few percent of Blaster's own row-major
-run at every level shown, sometimes a little faster, sometimes a little slower, consistent
-with writing meaningfully less data while spending some of that saved I/O time on a
-4-files-instead-of-1 compression pipeline. Levels beyond 18 aren't complete yet for this run.
+**Compression keeps improving as the solve goes deeper** -- reduction crossed 50% by level
+14 and is past 76% by level 24, with no sign of leveling off yet. Levels beyond 24 aren't
+complete yet for this run.
 
 ## Project layout
 
