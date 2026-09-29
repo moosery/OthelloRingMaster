@@ -310,8 +310,8 @@ examined -- foreign files on those drives are never touched.
 
 **Disk-scan file indices, never a recorded value.** Because consolidation keeps running
 after a checkpoint and can move pre-checkpoint boards into higher-indexed files, restart
-seeds every work dir's next-file index from a scan of what's actually on disk (highest index
-+ 1). Resumed writes therefore always land above every existing file and can never overwrite
+seeds every work dir's next-file index from a scan of what's actually on disk (one past the
+highest index found). Resumed writes therefore always land above every existing file and can never overwrite
 a pre-checkpoint file. On restart the writer/medium/store dirs are preserved (not wiped), the
 registry is rebuilt from a directory scan, and the last skip-decoded record is verified
 against the checkpoint's recorded value (Fatal if the supposedly-immutable input stream
