@@ -1,5 +1,25 @@
 # OthelloRingMaster
 
+> **WARNING -- CPU hardware risk on Intel 13th/14th-gen K/KF/KS ("Raptor Lake") chips.**
+> This solver's normal workload is a sustained, multi-day, 100%-all-core compute run. On
+> the reference machine this project is developed and run on (Intel Core i9-14900KF), that
+> workload has caused real, confirmed hardware degradation to **two separate CPUs**, each
+> replaced or in the process of being replaced under Intel warranty (case 06968815 as of
+> 2026-09). This is not a bug in this code -- it is the well-documented Intel 13th/14th-gen
+> "Raptor Lake" voltage-degradation issue (a microcode bug that requested excessive core
+> voltage under sustained load), and this kind of long-running, all-core workload is
+> exactly the stress profile that triggers and accelerates it, especially on boards whose
+> BIOS raises the K-series power limit past Intel's own default (PL1=PL2=253W was found
+> enabled here even under the board's own "Intel Default Settings" preset).
+>
+> **Do not run this solver unattended for extended periods on a K/KF/KS-series 13th- or
+> 14th-gen Intel chip without knowing this risk.** Confirm your BIOS/microcode is on
+> Intel's fixed revision first, and treat any Prime95/CoreCycler rounding error or
+> unexplained data-corruption Fatal from this solver (see Data-integrity checks below) as
+> a possible hardware symptom, not just a software one. Non-K parts (e.g. i9-14900F) use
+> much lower stock power limits and are not subject to the same unlocked-power marketing
+> push, making them a materially safer choice for this kind of sustained workload.
+
 GPU-accelerated BFS enumeration of unique Othello (Reversi) board states by level, storing
 each board in a **ring-gathered** bit layout instead of row-major -- and, as of real 6x6-scale
 measurement, meaningfully smaller and at least as fast as the row-major sibling project
@@ -178,6 +198,7 @@ from a disk scan so resumed writes never overwrite a pre-checkpoint file -- see
 
 | Component | Minimum |
 |-----------|---------|
+| CPU       | Any x64 -- **see the hardware warning at the top of this README before running sustained on an Intel 13th/14th-gen K/KF/KS chip** |
 | OS        | Windows 10/11 x64 |
 | Compiler  | Visual Studio 2022 with CUDA toolkit |
 | GPU       | NVIDIA sm_89 (RTX 40-series) -- change `sm_89` in vcxproj for other architectures |
