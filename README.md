@@ -8,17 +8,15 @@
 > 2026-09). This is not a bug in this code -- it is the well-documented Intel 13th/14th-gen
 > "Raptor Lake" voltage-degradation issue (a microcode bug that requested excessive core
 > voltage under sustained load), and this kind of long-running, all-core workload is
-> exactly the stress profile that triggers and accelerates it, especially on boards whose
-> BIOS raises the K-series power limit past Intel's own default (PL1=PL2=253W was found
-> enabled here even under the board's own "Intel Default Settings" preset).
+> exactly the stress profile that triggers and accelerates it.
 >
 > **Do not run this solver unattended for extended periods on a K/KF/KS-series 13th- or
 > 14th-gen Intel chip without knowing this risk.** Confirm your BIOS/microcode is on
 > Intel's fixed revision first, and treat any Prime95/CoreCycler rounding error or
 > unexplained data-corruption Fatal from this solver (see Data-integrity checks below) as
-> a possible hardware symptom, not just a software one. Non-K parts (e.g. i9-14900F) use
-> much lower stock power limits and are not subject to the same unlocked-power marketing
-> push, making them a materially safer choice for this kind of sustained workload.
+> a possible hardware symptom, not just a software one. Non-K parts (e.g. i9-14900F) are
+> not subject to the same unlocked-multiplier/enthusiast power profile and are a
+> materially safer choice for this kind of sustained workload.
 
 GPU-accelerated BFS enumeration of unique Othello (Reversi) board states by level, storing
 each board in a **ring-gathered** bit layout instead of row-major -- and, as of real 6x6-scale
