@@ -123,6 +123,7 @@
     </Manifest>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>--std=c++17 -Xcompiler "/Zc:preprocessor" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
@@ -146,6 +147,7 @@
     </Manifest>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>--std=c++17 -Xcompiler "/Zc:preprocessor" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>

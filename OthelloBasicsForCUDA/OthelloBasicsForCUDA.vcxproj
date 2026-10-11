@@ -129,6 +129,7 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
@@ -151,6 +152,7 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>--std=c++17 %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
