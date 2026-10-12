@@ -610,14 +610,38 @@ int main(int argc, char* argv[])
         g_state.levelStats[level].solverNanos =
             ClockNanosSinceStart(&g_state.levelStats[level].startTick);
 
+        bool mergeStarted = false;
         if (!g_state.terminateThreads)
         {
             /* Consolidate all NVMe writer files + medium-drive merge files -> single store file */
             g_state.currentPhase = "Merging to store";
+            mergeStarted = true;
             DoEndOfLevelMerge(&ctx);
             g_state.levelStats[level].totalNanos =
                 ClockNanosSinceStart(&g_state.levelStats[level].startTick);
+        }
 
+        /* Re-check the stop request AFTER the merge, not just before it. A
+        ** Ctrl+C that lands while DoEndOfLevelMerge is running makes the merge
+        ** stop early on purpose -- its output is partial, and it leaves the
+        ** _merging sentinel and every input on disk so the restart can redo
+        ** just the merge. Writing _complete here anyway marked a partly-merged
+        ** level as finished: on 2026-10-12 a Ctrl+C mid-merge produced a
+        ** Level_0018 _complete over ~18% of the level, and the restart scan
+        ** (which trusts _complete) would then have built level 19 on it and
+        ** wiped the remaining inputs as leftovers -- silent loss of ~82% of a
+        ** level. So _complete is written, and the level's checkpoint deleted,
+        ** only when the merge actually ran to the end.
+        */
+        if (mergeStarted && g_state.terminateThreads)
+        {
+            LoggerLog("Level %d: end-of-level merge interrupted by shutdown -- NOT marking level %d complete; "
+                      "its _merging sentinel and all merge inputs are kept, so the next start re-runs only the merge\n",
+                      level, level + 1);
+        }
+
+        if (!g_state.terminateThreads)
+        {
             g_state.levelStats[level].storeFreeBytes =
                 (uint64_t)DriveAvailable(&g_state, g_config.storeDrive);
 

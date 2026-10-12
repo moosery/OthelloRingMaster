@@ -547,6 +547,27 @@ static int ScanForResumeLevel(POthelloRingMasterState pState, int boardSize)
         SentinelNameComplete(sentPath, sizeof(sentPath), pState->storeDirectory, boardSize, level);
         if (GetFileAttributesA(sentPath) != INVALID_FILE_ATTRIBUTES)
         {
+            /* _complete and _merging for the same level can never both be
+            ** legitimate: a merge that runs to the end deletes _merging BEFORE
+            ** the main loop writes _complete. Both present means the merge was
+            ** cut short and something still marked the level finished (the
+            ** 2026-10-12 Ctrl+C-mid-merge bug). Trusting _complete would build
+            ** the next level on partial output and then wipe the kept merge
+            ** inputs as leftovers -- silent loss of most of a level. Stop and
+            ** name both files instead; if _complete is the bogus one, deleting
+            ** it lets the next start re-run just the merge from the kept inputs.
+            */
+            char mergingPath[MAX_FULL_PATH_NAME];
+            SentinelNameMerging(mergingPath, sizeof(mergingPath), pState->storeDirectory, boardSize, level);
+            if (GetFileAttributesA(mergingPath) != INVALID_FILE_ATTRIBUTES)
+                Fatal(FATAL_MERGE_LOGIC_ERROR,
+                      "ScanForResumeLevel: level %d has BOTH a _complete and a _merging sentinel -- its "
+                      "end-of-level merge was interrupted, so the _complete marker cannot be trusted and "
+                      "the level's output is probably partial. Refusing to continue (continuing would wipe "
+                      "the kept merge inputs). Files:\n  '%s'\n  '%s'\n"
+                      "If the merge was interrupted, delete the _complete file and restart to re-run the merge.",
+                      level, sentPath, mergingPath);
+
             if (level > 0)
             {
                 LevelStats restored = {};

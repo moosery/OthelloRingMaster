@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.6] - 2026-10-12
+
+### Fix: Ctrl+C during the end-of-level merge marked a partly-merged level complete (silent data loss on restart)
+
+Found live: a Ctrl+C at 5:04 PM landed during level 17's end-of-level merge (started 4:40 PM). The merge itself handled the stop correctly -- it ended early and, by design, kept `Level_0018_6x6_merging` and all ~286 GB of its inputs on D:/E: so a restart could re-run just the merge. But the main loop only checked `terminateThreads` *before* calling `DoEndOfLevelMerge`, never after, so on return it went straight on to write `Level_0018_6x6_complete` (with full stats) over output holding ~35.8 B of the level's ~203.5 B boards. `ScanForResumeLevel` checks `_complete` first and trusts it, so a restart would have built level 19 on the truncated level 18 and `cleanUpDrives` would then have wiped the kept inputs as leftovers -- silent loss of ~82% of a level, and every later level wrong.
+
+- `OthelloRingMaster.cpp`: after `DoEndOfLevelMerge` returns, the stop request is checked again. If the merge started and a stop arrived, `_complete` is **not** written and the level's checkpoint is **not** deleted; a log line says the merge was interrupted and the level is left for merge-resume.
+- `InitSolver.cpp` (`ScanForResumeLevel`): a level with **both** `_complete` and `_merging` now stops the run (`FATAL_MERGE_LOGIC_ERROR`) naming both files, instead of trusting `_complete`. The two can never legitimately coexist -- a merge that finishes deletes `_merging` before `_complete` is written -- so this catches the same fault from any other cause.
+- Recovery for an affected store: delete the bogus `_complete`; the next start sees `_merging`, deletes the partial output, and re-runs only the merge from the kept inputs.
+
+---
+
 ## [1.6.5] - 2026-10-12
 
 ### GPU waits now sleep instead of spinning a CPU core
