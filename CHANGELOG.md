@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.5] - 2026-10-12
+
+### GPU waits now sleep instead of spinning a CPU core
+
+Live profiling on the new AMD machine (level 17) showed the GPU feeder thread pinned near 100% on one core while the GPU itself sat mostly idle. Part of that was CUDA's default host wait mode: with more CPU cores than GPUs, `cudaDeviceScheduleAuto` spin-waits, so every `cudaStreamSynchronize` / `cudaMemcpy` the feeder makes (one after every `GpuProcessBatch`, plus `GpuFlushPrepare`'s sort/dedup) polled at full speed doing nothing, keeping one core hot for the whole run.
+
+- `GetGpuInformation` (the process's first CUDA call) now sets `cudaDeviceScheduleBlockingSync` before anything else touches the GPU, then reads the flags back with `cudaGetDeviceFlags` and exits loudly if the mode did not take effect.
+- The startup GPU summary prints a new `Host Wait Mode` line (`blocking-sync`, with the raw device flags).
+- Host-side waiting only: the same GPU work runs in the same order, so board order, results, and checkpoint/resume behaviour are unchanged. Throughput should be about the same; the feeder's core no longer burns idle cycles.
+
+### Build: CUDA 13.4 and native RTX 5080 code (since 1.6.4)
+
+- The three CUDA projects import the CUDA 13.4 build customizations (was 13.2) and compile `compute_120,sm_120`, so kernels are native Blackwell code instead of PTX JIT-compiled at startup. Binaries built from this point no longer run on pre-Blackwell GPUs.
+
+---
+
 ## [1.6.4] - 2026-09-26
 
 ### "Still waiting" notes now use the work's own ETA instead of a fixed 15 minutes

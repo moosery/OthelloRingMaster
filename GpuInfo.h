@@ -45,6 +45,9 @@ typedef struct __GpuInformation
     /* --- Concurrency --- */
     int  asyncEngineCount;   /* hardware DMA copy engines */
 
+    /* --- Host wait mode --- */
+    unsigned int  deviceFlags;   /* cudaGetDeviceFlags() result, read back after GetGpuInformation sets blocking-sync */
+
     /* --- Derived --- */
     int  optimalBatchSize;   /* boards per GPU batch to saturate SMs */
 } GpuInformation, * PGpuInformation;
@@ -54,7 +57,10 @@ typedef struct __GpuInformation
 /*
 ** Function: GetGpuInformation
 ** @brief    Queries the first CUDA device and fills pInfo.
-** @details  Calls exit(1) with a message on any CUDA error.
+** @details  Calls exit(1) with a message on any CUDA error. Also sets the
+**           device's host wait mode to blocking-sync -- this is the process's
+**           first CUDA call, so it must run before anything else touches the
+**           GPU (see GpuInfo.cu for why).
 ** @param    pInfo - out: filled with the queried device's information
 */
 void GetGpuInformation(GpuInformation* pInfo);

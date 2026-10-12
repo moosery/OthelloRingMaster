@@ -198,8 +198,8 @@ from a disk scan so resumed writes never overwrite a pre-checkpoint file -- see
 |-----------|---------|
 | CPU       | Any x64 -- **see the hardware warning at the top of this README before running sustained on an Intel 13th/14th-gen K/KF/KS chip** |
 | OS        | Windows 10/11 x64 |
-| Compiler  | Visual Studio 2022 with CUDA toolkit |
-| GPU       | NVIDIA sm_89 (RTX 40-series) -- change `sm_89` in vcxproj for other architectures |
+| Compiler  | Visual Studio 2026 (v180 toolset) with CUDA 13.4 -- if the CUDA installer doesn't register with VS, copy `CUDA\v13.4\extras\visual_studio_integration\MSBuildExtensions\*` into VS's `MSBuild\Microsoft\VC\v180\BuildCustomizations\` |
+| GPU       | NVIDIA sm_120 (RTX 50-series, Blackwell) -- change `compute_120,sm_120` (`CodeGeneration`) in the three CUDA vcxproj files for other architectures |
 | RAM       | 40 GB recommended (scales with VRAM and number of NVMe drives) |
 | Fast drives | 1-4 NVMe drives for merge-writer working space |
 | Intermediate drive | HDD/SATA SSD for overflow merge (F: by default) |
