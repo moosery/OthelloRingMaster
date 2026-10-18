@@ -4,6 +4,29 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.7] - 2026-10-18
+
+### New tool: OthelloRingMasterStoreCompare -- board-set equality between two stores
+
+For cross-checking the from-scratch 6x6 rerun (new AMD machine) against the preserved
+pre-RMA store, confirming the hardware swap never silently changed a single board.
+
+- Confirms two stores hold the exact same *set* of boards per level, not just matching
+  counts (`OthelloRingMasterStoreStats` already covers counts) -- rules out one board
+  swapped for a different one that happens to preserve the total.
+- Streaming sorted two-pointer merge per level/color via `RingNestedIndexPullReader` --
+  the same reader the live solver's own cascade k-way merge already uses, so it reads
+  whatever on-disk format either side has without a separate "legacy format" path, and
+  never loads a whole level into memory regardless of size.
+- Walks level 0 upward, stopping (not erroring) at the first level not `_complete` on
+  both sides -- comparing against an in-progress rerun is the normal case.
+- The comparable range is dispatched across a small thread pool (`--threads`, default 3)
+  since levels are independent and each mixes network I/O with CPU decode.
+- Reports one line per level, a sample of up to 20 mismatched board keys when a level
+  diverges, and a final summary. No CUDA/GPU dependency at all.
+
+---
+
 ## [1.6.6] - 2026-10-12
 
 ### Fix: Ctrl+C during the end-of-level merge marked a partly-merged level complete (silent data loss on restart)

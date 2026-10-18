@@ -215,6 +215,7 @@ Outputs:
 - `x64/Release/OthelloRingMasterCalculator.exe` -- retrograde win/tie/loss calculator
 - `x64/Release/OthelloRingMasterCalculatorStatus.exe` -- calculator's live status client (TCP)
 - `x64/Release/OthelloRingMasterStoreStats.exe` -- per-level CSV store statistics (read-only)
+- `x64/Release/OthelloRingMasterStoreCompare.exe` -- confirms two stores hold the exact same set of boards per level, not just matching counts (read-only, no GPU/CUDA dependency)
 - `x64/Release/OthelloRingMasterCalculatorCountsStats.exe` -- per-level CSV calculator counts statistics (read-only)
 - `x64/Release/OthelloRingMasterLevelIndexer.exe` -- splits a level's Ring_2 and/or Ring_3_4 files into independently-decodable segments (whichever ring's real size needs it)
 - `x64/Release/OthelloRingMasterBoardLookup.exe` -- interactive CLI: type in a board, get its level/player/segment file/offset
@@ -463,6 +464,40 @@ can only be decoded sequentially from the start, a bounded `--limit` reads a *le
 (the numerically-smallest `CellsInUse` patterns first), not a uniformly-random one across the
 whole level -- for a fully unbiased answer, run with `--limit 0` on a level cheap enough to afford
 a full decode.
+
+### Store compare
+
+```
+OthelloRingMasterStoreCompare.exe [options]
+
+  --board-size N        Board size: 4, 6, or 8                         [default: 6]
+  --old-store-drive L   Drive letter the OLD store lives on            [default: Y]
+  --old-store-dir PATH  Sub-path on the old store's drive (no drive letter)
+                                                      [default: \OthelloRingMaster.save\Store]
+  --new-store-drive L   Drive letter the NEW store lives on            [default: Y]
+  --new-store-dir PATH  Sub-path on the new store's drive (no drive letter)
+                                                      [default: \OthelloRingMaster\Store]
+  --start-level N       First level to compare                        [default: 0]
+  --threads N           Levels compared concurrently                  [default: 3]
+  --help                Show this help
+```
+
+Confirms two stores hold the exact same *set* of boards per level, not just matching counts
+(`OthelloRingMasterStoreStats` already covers counts) -- rules out the edge case of one board
+swapped for a different one that happens to preserve the total. A streaming sorted two-pointer
+merge per level/color via `RingNestedIndexPullReader` (the same reader the live solver's own
+cascade k-way merge uses), so it reads whatever on-disk format either side actually has without
+a separate "legacy format" path, and never loads a whole level into memory regardless of size.
+
+Walks level 0 upward (or `--start-level`), stopping -- not erroring -- at the first level not
+`_complete` on both sides, since comparing against an in-progress rerun is the normal case this
+tool runs against. The comparable range is dispatched across a small thread pool (`--threads`,
+default 3) since levels are fully independent and each one's work mixes network I/O (both stores
+typically share one NAS) with CPU decode, so a few concurrent levels keep both busy without
+over-saturating one shared NAS link. Reports one line per level (match or mismatch with counts),
+a sample of up to 20 actual mismatched board keys when a level diverges, and a final summary;
+exit code is non-zero if anything mismatched or a file read came back corrupted. No CUDA/GPU
+dependency at all, unlike the solver and calculator.
 
 ### Calculator counts stats
 
@@ -716,6 +751,7 @@ OthelloRingMaster/
   OthelloRingMasterCalculator/   Retrograde win/tie/loss calculator (see its own --help)
   OthelloRingMasterCalculatorStatus/  Calculator's status client project
   OthelloRingMasterStoreStats/   Per-level CSV store statistics tool (read-only, see its own --help)
+  OthelloRingMasterStoreCompare/  Board-set-equality comparison between two stores (read-only, no CUDA, see its own --help)
   OthelloRingMasterCalculatorCountsStats/  Per-level CSV calculator counts statistics tool (read-only, see its own --help)
   OthelloRingMasterLevelIndexer/  Splits a level's Ring_2/Ring_3_4 files into segments (whichever ring needs it, see its own --help)
   OthelloRingMasterBoardLookup/  Interactive board-lookup CLI (see its own --help)
