@@ -31,6 +31,9 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include <chrono>
+#include <cmath>
+#include <memory>
 #include <windows.h>
 
 /* Constants */
@@ -114,6 +117,45 @@ static bool ParseArgs(int argc, char** argv, StoreCompareConfig* pConfig)
 }
 
 /*
+** Function: MakeProgressCallback
+** @brief    Builds a StoreCompareProgressFn that prints "N% complete, ETA ..."
+**           under printMutex every time StoreCompareLevelPlayer crosses a new
+**           decile (see PROGRESS_REPORT_DECILE in StoreCompareLevel.cpp).
+** @details  The very first call always has processed==0 (StoreCompareLevelPlayer
+**           guarantees this) -- that's the signal this starts its own elapsed-
+**           time clock here rather than needing a separate "start" call. ETA is
+**           a straight-line projection (elapsed / percent-done * percent-remaining):
+**           a rough estimate, not a promise -- real throughput on a shared NAS
+**           link can speed up or slow down as sibling levels' jobs finish.
+** @param    level       - level number, for the printed label
+** @param    colorLabel  - "black" or "white", for the printed label
+** @param    pPrintMutex - serializes output across concurrently-running level jobs
+*/
+static StoreCompareProgressFn MakeProgressCallback(int level, const char* colorLabel, std::mutex* pPrintMutex)
+{
+    auto startTime = std::make_shared<std::chrono::steady_clock::time_point>();
+    return [level, colorLabel, pPrintMutex, startTime](uint64_t processed, uint64_t total)
+    {
+        auto now = std::chrono::steady_clock::now();
+        if (processed == 0)
+        {
+            *startTime = now;
+            return;   /* first call is just the clock-start signal -- nothing to report yet */
+        }
+        if (total == 0) return;
+
+        double elapsedSec = std::chrono::duration<double>(now - *startTime).count();
+        double percent = 100.0 * (double)processed / (double)total;
+        double etaSec = (percent > 0.0) ? elapsedSec * (100.0 - percent) / percent : 0.0;
+
+        std::lock_guard<std::mutex> lock(*pPrintMutex);
+        printf("Level %3d (%s): %3.0f%% complete (%llu / %llu boards), ETA %.0fm %02.0fs\n",
+               level, colorLabel, percent, (unsigned long long)processed, (unsigned long long)total,
+               etaSec / 60.0, fmod(etaSec, 60.0));
+    };
+}
+
+/*
 ** Function: LevelCompleteOnBothSides
 ** @brief    Checks the "_complete" sentinel for one level on both stores.
 ** @return   true only if both exist.
@@ -193,8 +235,10 @@ int main(int argc, char** argv)
         int lvl = levelsToCompare[idx];
         bool queued = pool.QueueJob([&, lvl, idx](uint32_t /*workerIndex*/)
         {
-            StoreCompareResult black = StoreCompareLevelPlayer(oldStoreDir, newStoreDir, config.boardSize, lvl, RSF_PLAYER_BLACK);
-            StoreCompareResult white = StoreCompareLevelPlayer(oldStoreDir, newStoreDir, config.boardSize, lvl, RSF_PLAYER_WHITE);
+            StoreCompareResult black = StoreCompareLevelPlayer(oldStoreDir, newStoreDir, config.boardSize, lvl, RSF_PLAYER_BLACK,
+                                                                MakeProgressCallback(lvl, "black", &printMutex));
+            StoreCompareResult white = StoreCompareLevelPlayer(oldStoreDir, newStoreDir, config.boardSize, lvl, RSF_PLAYER_WHITE,
+                                                                MakeProgressCallback(lvl, "white", &printMutex));
 
             bool clean = black.IsClean() && white.IsClean();
             anyMismatch[idx] = !clean;

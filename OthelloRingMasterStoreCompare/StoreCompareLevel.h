@@ -27,6 +27,7 @@
 #include "OthelloBasics.h"
 #include <cstdint>
 #include <vector>
+#include <functional>
 
 /* Constants */
 
@@ -83,6 +84,20 @@ struct StoreCompareResult
     }
 };
 
+/*
+** Type:    StoreCompareProgressFn
+** @brief   Called periodically (roughly every 10% -- see StoreCompareLevel.cpp's
+**          PROGRESS_REPORT_DECILE) during a comparison. "total" is the larger of the
+**          two sides' own Ring_3_4 trailer record counts (read once at Open(), no
+**          decompression) -- an exact denominator, not an estimate, though "processed"
+**          itself is an approximation when the two sides diverge (see .cpp Notes).
+** @param    processed - boards advanced past so far, this call
+** @param    total     - this level/player's total board count (0 if not yet known,
+**                       e.g. called once up front with processed=0 so a caller can
+**                       start its own elapsed-time clock before any real progress exists)
+*/
+using StoreCompareProgressFn = std::function<void(uint64_t processed, uint64_t total)>;
+
 /* Functions */
 
 /*
@@ -94,6 +109,7 @@ struct StoreCompareResult
 ** @param    boardSize   - board size (4, 6, or 8) -- selects which rings apply
 ** @param    level       - level number to compare
 ** @param    player      - RSF_PLAYER_BLACK or RSF_PLAYER_WHITE
+** @param    onProgress  - optional periodic progress callback (nullptr -- the default -- skips all of it)
 ** @return   Result of the comparison. A side's files failing to open at all
 **           (oldOpenFailed/newOpenFailed) is reported in the result, not
 **           thrown as Fatal() -- this tool surveys and reports, it never
@@ -101,4 +117,5 @@ struct StoreCompareResult
 **           and-keep-going posture OthelloRingMasterStoreStats already has.
 */
 StoreCompareResult StoreCompareLevelPlayer(const char* oldStoreDir, const char* newStoreDir,
-                                            int boardSize, int level, int player);
+                                            int boardSize, int level, int player,
+                                            const StoreCompareProgressFn& onProgress = nullptr);

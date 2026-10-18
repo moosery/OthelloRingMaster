@@ -4,6 +4,21 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.10] - 2026-10-18
+
+### StoreCompare: per-level progress with ETA
+
+Each level/color comparison now reports roughly every 10%: percent complete, boards
+processed so far, and an ETA. The denominator is exact, not estimated -- the larger of
+the two sides' Ring_3_4 trailer record counts (read once at open, no decompression,
+since Ring_3_4 holds exactly one record per board). ETA is a straight-line projection
+from elapsed time and percent done, so it's a rough estimate, not a promise -- real
+throughput on a shared NAS link can shift as sibling levels' concurrent jobs finish.
+Output is mutex-serialized the same way final per-level results already are, so
+progress lines from concurrently-running levels never interleave mid-line.
+
+---
+
 ## [1.6.9] - 2026-10-18
 
 ### Fix: StoreCompare flagged every early level as a mismatch

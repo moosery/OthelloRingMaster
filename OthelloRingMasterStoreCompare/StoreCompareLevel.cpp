@@ -10,7 +10,18 @@
 #include "RingNestedIndex.h"
 #include "RSFFileName.h"
 #include "FileAndDirUtils.h"
+#include "RingStoreFile.h"
 #include <cstdio>
+
+/* Constants */
+
+/* How often StoreCompareLevelPlayer calls onProgress, as a fraction of the
+** level/player's total board count -- every 10% by default, per the user's
+** request. Exact percent isn't guaranteed (one loop iteration can cross more
+** than one decile on a sparse/skewed mismatch run), only "at least once per
+** decile crossed."
+*/
+constexpr uint64_t PROGRESS_REPORT_DECILE = 10;
 
 /*
 ** Function: OpenSide
@@ -56,7 +67,8 @@ static void RecordMismatch(StoreCompareResult* pResult, const BOARD_KEY& key, bo
 }
 
 StoreCompareResult StoreCompareLevelPlayer(const char* oldStoreDir, const char* newStoreDir,
-                                            int boardSize, int level, int player)
+                                            int boardSize, int level, int player,
+                                            const StoreCompareProgressFn& onProgress)
 {
     StoreCompareResult result;
 
@@ -72,6 +84,41 @@ StoreCompareResult StoreCompareLevelPlayer(const char* oldStoreDir, const char* 
         newReader.Close();
         return result;
     }
+
+    /* Ring_3_4 holds exactly one record per board (the leaf ring, see
+    ** RingNestedIndex.h), so its trailer's recordCount -- read once at Open(),
+    ** no decompression -- is this level/player's exact total board count on
+    ** that side. Take the larger of the two as the progress denominator: when
+    ** the sides match it doesn't matter which; when they diverge, the larger
+    ** total is the one that actually bounds how long this call can run.
+    */
+    uint64_t oldTotal = RSFReaderTrailer(oldReader.pRing34)->recordCount;
+    uint64_t newTotal = RSFReaderTrailer(newReader.pRing34)->recordCount;
+    uint64_t total = oldTotal > newTotal ? oldTotal : newTotal;
+    uint64_t processed = 0, lastReportedDecile = 0;
+    if (onProgress) onProgress(0, total);   /* lets the caller start its own elapsed-time clock before any real progress exists */
+
+    /*
+    ** Function: ReportProgress (local lambda)
+    ** @brief    Advances processed by one and calls onProgress at most once
+    **           per PROGRESS_REPORT_DECILE crossed. "processed" is an
+    **           approximation of true position when the two sides diverge --
+    **           it counts loop iterations (each advances at least one side by
+    **           one record), not a position both sides agree on -- but it's
+    **           monotonic and bounded by total either way, which is all a
+    **           percent-complete estimate needs.
+    */
+    auto reportProgress = [&]()
+    {
+        processed++;
+        if (total == 0 || !onProgress) return;
+        uint64_t decile = (processed * PROGRESS_REPORT_DECILE) / total;
+        if (decile > lastReportedDecile)
+        {
+            lastReportedDecile = decile;
+            onProgress(processed, total);
+        }
+    };
 
     /* Classic sorted two-pointer merge-compare: both sides are already in
     ** global sorted order (a guarantee of the merge that wrote them), so
@@ -103,6 +150,7 @@ StoreCompareResult StoreCompareLevelPlayer(const char* oldStoreDir, const char* 
             RecordMismatch(&result, newKey, false);
             haveNew = newReader.Advance() ? newReader.Peek(&newKey) : false;
         }
+        reportProgress();
     }
     /* One side ran out first -- everything remaining on the other side is
     ** unmatched by definition; drain it the same way to pick up every
@@ -112,11 +160,13 @@ StoreCompareResult StoreCompareLevelPlayer(const char* oldStoreDir, const char* 
     {
         RecordMismatch(&result, oldKey, true);
         haveOld = oldReader.Advance() ? oldReader.Peek(&oldKey) : false;
+        reportProgress();
     }
     while (haveNew)
     {
         RecordMismatch(&result, newKey, false);
         haveNew = newReader.Advance() ? newReader.Peek(&newKey) : false;
+        reportProgress();
     }
 
     result.oldCorrupted = oldReader.IsCorrupted();
