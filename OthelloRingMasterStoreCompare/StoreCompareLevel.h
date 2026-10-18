@@ -67,12 +67,19 @@ struct StoreCompareResult
 
     /*
     ** Method: IsClean
-    ** @brief  True only if every board matched and nothing went wrong opening/reading either side.
+    ** @brief  True if every board matched and nothing went wrong opening/reading either side.
+    ** @details Othello's strict black/white alternation means an early level can
+    **          legitimately have zero boards for one color (level 0 is black-only,
+    **          level 1 white-only, level 2 black-only, ...) -- RingNestedIndexBuilder
+    **          never writes files for a color with no boards, so BOTH sides failing to
+    **          open identically is that expected case, not a divergence. Only an
+    **          ASYMMETRIC open failure (one side has the files, the other doesn't) is
+    **          a real problem -- that's the only open-failure shape this treats as unclean.
     */
     bool IsClean() const
     {
-        return onlyInOldCount == 0 && onlyInNewCount == 0
-            && !oldCorrupted && !newCorrupted && !oldOpenFailed && !newOpenFailed;
+        if (oldOpenFailed != newOpenFailed) return false;
+        return onlyInOldCount == 0 && onlyInNewCount == 0 && !oldCorrupted && !newCorrupted;
     }
 };
 

@@ -4,6 +4,22 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.9] - 2026-10-18
+
+### Fix: StoreCompare flagged every early level as a mismatch
+
+Caught on the first real run against live data: levels 0-2 all reported MISMATCH with
+one color's files failing to open on both sides. Root cause -- Othello's strict black/
+white alternation means an early level legitimately has zero boards for one color
+(level 0 is black-only, level 1 white-only, level 2 black-only, ...), and
+`RingNestedIndexBuilder` never writes files for a color with no boards, so both sides
+failing to open identically is the expected shape, not a divergence. `IsClean()` now
+only treats an ASYMMETRIC open failure (one side has the files, the other doesn't) as
+a real problem; a level 13-deep clean run (0-13, all matched or legitimately empty)
+confirmed the fix.
+
+---
+
 ## [1.6.8] - 2026-10-18
 
 ### Fix: OthelloRingMasterStoreCompare pointed at the wrong directory level
