@@ -26,12 +26,12 @@
 #include "FileAndDirUtils.h"
 #include "RSFFileName.h"
 #include "ThreadPool.h"
+#include "ClockTick.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
-#include <chrono>
 #include <cmath>
 #include <memory>
 #include <windows.h>
@@ -133,18 +133,17 @@ static bool ParseArgs(int argc, char** argv, StoreCompareConfig* pConfig)
 */
 static StoreCompareProgressFn MakeProgressCallback(int level, const char* colorLabel, std::mutex* pPrintMutex)
 {
-    auto startTime = std::make_shared<std::chrono::steady_clock::time_point>();
-    return [level, colorLabel, pPrintMutex, startTime](uint64_t processed, uint64_t total)
+    auto pTick = std::make_shared<ClockTick>();
+    return [level, colorLabel, pPrintMutex, pTick](uint64_t processed, uint64_t total)
     {
-        auto now = std::chrono::steady_clock::now();
         if (processed == 0)
         {
-            *startTime = now;
+            ClockStart(pTick.get());
             return;   /* first call is just the clock-start signal -- nothing to report yet */
         }
         if (total == 0) return;
 
-        double elapsedSec = std::chrono::duration<double>(now - *startTime).count();
+        double elapsedSec = (double)ClockMillisSinceStart(pTick.get()) / 1000.0;
         double percent = 100.0 * (double)processed / (double)total;
         double etaSec = (percent > 0.0) ? elapsedSec * (100.0 - percent) / percent : 0.0;
 

@@ -4,6 +4,18 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.11] - 2026-10-18
+
+### Fix: StoreCompare's progress timer used raw std::chrono instead of the project's own ClockTick
+
+v1.6.10's progress-reporting ETA reached for `std::chrono::steady_clock` directly instead
+of checking for existing project infrastructure first -- `Utility/ClockTick.h` already
+wraps the same underlying monotonic clock as the project's standard elapsed-time API
+(`ClockStart`/`ClockMillisSinceStart`). No behavior change, just using what's already
+there instead of reinventing it.
+
+---
+
 ## [1.6.10] - 2026-10-18
 
 ### StoreCompare: per-level progress with ETA
