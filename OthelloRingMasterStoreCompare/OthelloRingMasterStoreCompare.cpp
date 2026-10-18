@@ -19,6 +19,10 @@
 **   work is a mix of network I/O (both stores typically live on the same
 **   NAS) and CPU decode, so overlapping a few levels keeps both busy
 **   without over-saturating one shared NAS link.
+**
+**   All run output goes through LoggerLog (Utility/Logger.h) -- console
+**   and a persisted log file always match, same dual-output convention the
+**   main solver uses, rather than this tool inventing its own.
 */
 
 /* Includes */
@@ -27,6 +31,7 @@
 #include "RSFFileName.h"
 #include "ThreadPool.h"
 #include "ClockTick.h"
+#include "Logger.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,13 +59,17 @@ struct StoreCompareConfig
     char newStoreDirNameNoDrive[MAX_FULL_PATH_NAME] = "\\OthelloRingMaster\\Store";
     int  startLevel                                = 0;
     int  threads                                   = DEFAULT_THREADS;
+    char cacheDirName[MAX_FULL_PATH_NAME]           = "C:\\OthelloRingMasterStoreCompare\\Cache";
 };
 
 /* Functions */
 
 /*
 ** Function: PrintUsage
-** @brief    Prints command-line usage help.
+** @brief    Prints command-line usage help. Runs before the logger is
+**           initialized (cache-dir/board-size aren't known yet at --help
+**           time), so this writes directly to stdout rather than through
+**           LoggerLog -- the one place in this tool that does.
 */
 static void PrintUsage(const char* prog)
 {
@@ -74,6 +83,7 @@ static void PrintUsage(const char* prog)
     printf("                                                      [default: \\OthelloRingMaster\\Store]\n");
     printf("  --start-level N       First level to compare                        [default: 0]\n");
     printf("  --threads N           Levels compared concurrently                  [default: %d]\n", DEFAULT_THREADS);
+    printf("  --cache-dir PATH      Full path for this run's log file             [default: C:\\OthelloRingMasterStoreCompare\\Cache]\n");
     printf("  --help                Show this help\n\n");
     printf("Confirms the two stores hold the exact same set of boards, level by level, not\n");
     printf("just matching counts -- a streaming sorted-merge comparison, never loading a\n");
@@ -100,6 +110,8 @@ static bool ParseArgs(int argc, char** argv, StoreCompareConfig* pConfig)
             strncpy_s(pConfig->newStoreDirNameNoDrive, sizeof(pConfig->newStoreDirNameNoDrive), argv[++i], _TRUNCATE);
         else if (!strcmp(argv[i], "--start-level") && i + 1 < argc) pConfig->startLevel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) pConfig->threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cache-dir") && i + 1 < argc)
+            strncpy_s(pConfig->cacheDirName, sizeof(pConfig->cacheDirName), argv[++i], _TRUNCATE);
         else
         {
             fprintf(stderr, "Unknown or incomplete argument: %s\n\n", argv[i]);
@@ -118,7 +130,7 @@ static bool ParseArgs(int argc, char** argv, StoreCompareConfig* pConfig)
 
 /*
 ** Function: MakeProgressCallback
-** @brief    Builds a StoreCompareProgressFn that prints "N% complete, ETA ..."
+** @brief    Builds a StoreCompareProgressFn that logs "N% complete, ETA ..."
 **           under printMutex every time StoreCompareLevelPlayer crosses a new
 **           decile (see PROGRESS_REPORT_DECILE in StoreCompareLevel.cpp).
 ** @details  The very first call always has processed==0 (StoreCompareLevelPlayer
@@ -130,6 +142,8 @@ static bool ParseArgs(int argc, char** argv, StoreCompareConfig* pConfig)
 ** @param    level       - level number, for the printed label
 ** @param    colorLabel  - "black" or "white", for the printed label
 ** @param    pPrintMutex - serializes output across concurrently-running level jobs
+**                        (LoggerLog's own thread-safety isn't documented/guaranteed,
+**                        so this tool supplies its own serialization regardless)
 */
 static StoreCompareProgressFn MakeProgressCallback(int level, const char* colorLabel, std::mutex* pPrintMutex)
 {
@@ -148,9 +162,9 @@ static StoreCompareProgressFn MakeProgressCallback(int level, const char* colorL
         double etaSec = (percent > 0.0) ? elapsedSec * (100.0 - percent) / percent : 0.0;
 
         std::lock_guard<std::mutex> lock(*pPrintMutex);
-        printf("Level %3d (%s): %3.0f%% complete (%llu / %llu boards), ETA %.0fm %02.0fs\n",
-               level, colorLabel, percent, (unsigned long long)processed, (unsigned long long)total,
-               etaSec / 60.0, fmod(etaSec, 60.0));
+        LoggerLog("Level %3d (%s): %3.0f%% complete (%llu / %llu boards), ETA %.0fm %02.0fs\n",
+                  level, colorLabel, percent, (unsigned long long)processed, (unsigned long long)total,
+                  etaSec / 60.0, fmod(etaSec, 60.0));
     };
 }
 
@@ -176,6 +190,19 @@ int main(int argc, char** argv)
     StoreCompareConfig config;
     if (!ParseArgs(argc, argv, &config)) return 1;
 
+    /* Dual-output logging (console + file) starts as early as possible, same
+    ** dated-log-under-cache-dir convention InitLogger.cpp uses for the main
+    ** solver, so every line below -- including the "where did we stop and
+    ** why" scan result -- lands in a persisted file, not just the console.
+    */
+    if (!CreateFullPath(config.cacheDirName))
+        { fprintf(stderr, "Cannot create cache directory '%s'\n", config.cacheDirName); return 1; }
+    char dateStr[32], logFileName[MAX_FULL_PATH_NAME];
+    GetCurrentDateTimeString(dateStr, sizeof(dateStr));
+    snprintf(logFileName, sizeof(logFileName), "%s\\log_compare_%dx%d_%s.txt",
+             config.cacheDirName, config.boardSize, config.boardSize, dateStr);
+    LoggerInit(logFileName);
+
     char oldStoreDir[MAX_FULL_PATH_NAME], newStoreDir[MAX_FULL_PATH_NAME];
     /* The configured dir is the parent area; the real per-level ring-store files live in a
     ** fixed "storeDir" subdirectory within it (storeMergeDir, the other sibling, holds the
@@ -185,8 +212,8 @@ int main(int argc, char** argv)
     snprintf(oldStoreDir, sizeof(oldStoreDir), "%c:%s\\storeDir", config.oldStoreDrive, config.oldStoreDirNameNoDrive);
     snprintf(newStoreDir, sizeof(newStoreDir), "%c:%s\\storeDir", config.newStoreDrive, config.newStoreDirNameNoDrive);
 
-    printf("Comparing boards %dx%d, level %d upward:\n  OLD: %s\n  NEW: %s\n\n",
-           config.boardSize, config.boardSize, config.startLevel, oldStoreDir, newStoreDir);
+    LoggerLog("Comparing boards %dx%d, level %d upward:\n  OLD: %s\n  NEW: %s\n\n",
+              config.boardSize, config.boardSize, config.startLevel, oldStoreDir, newStoreDir);
 
     /* Phase 1: cheap sequential scan (file-attribute checks only, no data
     ** read) to find the comparable range -- stop at the first level not
@@ -203,11 +230,11 @@ int main(int argc, char** argv)
         if (!LevelCompleteOnBothSides(oldStoreDir, newStoreDir, config.boardSize, level, &oldComplete, &newComplete))
         {
             if (!oldComplete && !newComplete)
-                printf("Stopping before level %d: not complete on either side.\n", level);
+                LoggerLog("Stopping before level %d: not complete on either side.\n", level);
             else if (!oldComplete)
-                printf("Stopping before level %d: not complete on the OLD store.\n", level);
+                LoggerLog("Stopping before level %d: not complete on the OLD store.\n", level);
             else
-                printf("Stopping before level %d: not complete on the NEW store.\n", level);
+                LoggerLog("Stopping before level %d: not complete on the NEW store.\n", level);
             break;
         }
         levelsToCompare.push_back(level);
@@ -215,11 +242,11 @@ int main(int argc, char** argv)
 
     if (levelsToCompare.empty())
     {
-        printf("\nNothing to compare.\n");
+        LoggerLog("\nNothing to compare.\n");
         return 0;
     }
-    printf("Comparing levels %d..%d (%zu levels), %d concurrent.\n\n",
-           levelsToCompare.front(), levelsToCompare.back(), levelsToCompare.size(), config.threads);
+    LoggerLog("Comparing levels %d..%d (%zu levels), %d concurrent.\n\n",
+              levelsToCompare.front(), levelsToCompare.back(), levelsToCompare.size(), config.threads);
 
     /* Phase 2: dispatch each level's comparison (both colors) to the pool. */
     std::mutex printMutex;
@@ -246,40 +273,40 @@ int main(int argc, char** argv)
             std::lock_guard<std::mutex> lock(printMutex);
             if (clean)
             {
-                printf("Level %3d: MATCH       (black %llu boards, white %llu boards)\n",
-                       lvl, (unsigned long long)black.matched, (unsigned long long)white.matched);
+                LoggerLog("Level %3d: MATCH       (black %llu boards, white %llu boards)\n",
+                          lvl, (unsigned long long)black.matched, (unsigned long long)white.matched);
             }
             else
             {
-                printf("Level %3d: MISMATCH    black: matched=%llu onlyOld=%llu onlyNew=%llu%s%s\n",
-                       lvl, (unsigned long long)black.matched, (unsigned long long)black.onlyInOldCount,
-                       (unsigned long long)black.onlyInNewCount,
-                       black.oldOpenFailed ? " OLD-OPEN-FAILED" : "",
-                       black.newOpenFailed ? " NEW-OPEN-FAILED" : "");
-                printf("               white: matched=%llu onlyOld=%llu onlyNew=%llu%s%s\n",
-                       (unsigned long long)white.matched, (unsigned long long)white.onlyInOldCount,
-                       (unsigned long long)white.onlyInNewCount,
-                       white.oldOpenFailed ? " OLD-OPEN-FAILED" : "",
-                       white.newOpenFailed ? " NEW-OPEN-FAILED" : "");
+                LoggerLog("Level %3d: MISMATCH    black: matched=%llu onlyOld=%llu onlyNew=%llu%s%s\n",
+                          lvl, (unsigned long long)black.matched, (unsigned long long)black.onlyInOldCount,
+                          (unsigned long long)black.onlyInNewCount,
+                          black.oldOpenFailed ? " OLD-OPEN-FAILED" : "",
+                          black.newOpenFailed ? " NEW-OPEN-FAILED" : "");
+                LoggerLog("               white: matched=%llu onlyOld=%llu onlyNew=%llu%s%s\n",
+                          (unsigned long long)white.matched, (unsigned long long)white.onlyInOldCount,
+                          (unsigned long long)white.onlyInNewCount,
+                          white.oldOpenFailed ? " OLD-OPEN-FAILED" : "",
+                          white.newOpenFailed ? " NEW-OPEN-FAILED" : "");
                 for (const auto& m : black.sample)
-                    printf("             black sample: %016llx %016llx  (only in %s)\n",
-                           (unsigned long long)m.key.ullCellsInUse, (unsigned long long)m.key.ullCellColors,
-                           m.onlyInOld ? "OLD" : "NEW");
+                    LoggerLog("             black sample: %016llx %016llx  (only in %s)\n",
+                              (unsigned long long)m.key.ullCellsInUse, (unsigned long long)m.key.ullCellColors,
+                              m.onlyInOld ? "OLD" : "NEW");
                 for (const auto& m : white.sample)
-                    printf("             white sample: %016llx %016llx  (only in %s)\n",
-                           (unsigned long long)m.key.ullCellsInUse, (unsigned long long)m.key.ullCellColors,
-                           m.onlyInOld ? "OLD" : "NEW");
+                    LoggerLog("             white sample: %016llx %016llx  (only in %s)\n",
+                              (unsigned long long)m.key.ullCellsInUse, (unsigned long long)m.key.ullCellColors,
+                              m.onlyInOld ? "OLD" : "NEW");
             }
             if (black.oldCorrupted || black.newCorrupted)
-                printf("           black: CORRUPTED (old=%d new=%d) -- a file hit EOF where more data was expected\n",
-                       black.oldCorrupted, black.newCorrupted);
+                LoggerLog("           black: CORRUPTED (old=%d new=%d) -- a file hit EOF where more data was expected\n",
+                          black.oldCorrupted, black.newCorrupted);
             if (white.oldCorrupted || white.newCorrupted)
-                printf("           white: CORRUPTED (old=%d new=%d) -- a file hit EOF where more data was expected\n",
-                       white.oldCorrupted, white.newCorrupted);
+                LoggerLog("           white: CORRUPTED (old=%d new=%d) -- a file hit EOF where more data was expected\n",
+                          white.oldCorrupted, white.newCorrupted);
         });
         if (!queued)
         {
-            fprintf(stderr, "Failed to queue level %d -- pool unexpectedly shutting down\n", lvl);
+            LoggerLog("Failed to queue level %d -- pool unexpectedly shutting down\n", lvl);
             break;
         }
     }
@@ -295,11 +322,11 @@ int main(int argc, char** argv)
         else cleanCount++;
     }
 
-    printf("\n=== Summary ===\n");
-    printf("Levels compared : %zu\n", levelsToCompare.size());
-    printf("Clean matches   : %zu\n", cleanCount);
-    printf("Mismatches      : %zu\n", mismatchCount);
-    printf("Corrupted reads : %zu\n", corruptCount);
+    LoggerLog("\n=== Summary ===\n");
+    LoggerLog("Levels compared : %zu\n", levelsToCompare.size());
+    LoggerLog("Clean matches   : %zu\n", cleanCount);
+    LoggerLog("Mismatches      : %zu\n", mismatchCount);
+    LoggerLog("Corrupted reads : %zu\n", corruptCount);
 
     return (mismatchCount > 0 || corruptCount > 0) ? 1 : 0;
 }

@@ -4,6 +4,20 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.12] - 2026-10-18
+
+### StoreCompare: dual console+file logging
+
+All run output (the stop-reason scan result, progress lines, per-level match/mismatch
+reports, the final summary) now goes through `LoggerLog` (`Utility/Logger.h`), the same
+dual-output logger the main solver uses -- console and a persisted log file always
+match. New `--cache-dir` flag (default `C:\OthelloRingMasterStoreCompare\Cache`)
+selects where the dated `log_compare_<N>x<N>_<timestamp>.txt` lands, same naming
+convention `InitLogger.cpp` uses for the solver's own log. Previously this tool only
+printed to stdout -- a long multi-level run's full output existed only on screen.
+
+---
+
 ## [1.6.11] - 2026-10-18
 
 ### Fix: StoreCompare's progress timer used raw std::chrono instead of the project's own ClockTick

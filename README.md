@@ -479,6 +479,7 @@ OthelloRingMasterStoreCompare.exe [options]
                                                       [default: \OthelloRingMaster\Store]
   --start-level N       First level to compare                        [default: 0]
   --threads N           Levels compared concurrently                  [default: 3]
+  --cache-dir PATH      Full path for this run's log file             [default: C:\OthelloRingMasterStoreCompare\Cache]
   --help                Show this help
 ```
 
@@ -494,10 +495,14 @@ Walks level 0 upward (or `--start-level`), stopping -- not erroring -- at the fi
 tool runs against. The comparable range is dispatched across a small thread pool (`--threads`,
 default 3) since levels are fully independent and each one's work mixes network I/O (both stores
 typically share one NAS) with CPU decode, so a few concurrent levels keep both busy without
-over-saturating one shared NAS link. Reports one line per level (match or mismatch with counts),
-a sample of up to 20 actual mismatched board keys when a level diverges, and a final summary;
-exit code is non-zero if anything mismatched or a file read came back corrupted. No CUDA/GPU
-dependency at all, unlike the solver and calculator.
+over-saturating one shared NAS link. Each level/color reports progress roughly every 10%
+(percent complete, boards processed, straight-line ETA), then one line per level (match or
+mismatch with counts), a sample of up to 20 actual mismatched board keys when a level diverges,
+and a final summary; exit code is non-zero if anything mismatched or a file read came back
+corrupted. All output goes through the same dual console+file logger the main solver uses
+(`log_compare_<N>x<N>_<timestamp>.txt` under `--cache-dir`), so a run's full output is always
+on disk, not just whatever scrolled past on screen. No CUDA/GPU dependency at all, unlike the
+solver and calculator.
 
 ### Calculator counts stats
 
