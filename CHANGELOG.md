@@ -4,6 +4,19 @@ All notable changes to OthelloRingMaster are documented here.
 
 ---
 
+## [1.6.8] - 2026-10-18
+
+### Fix: OthelloRingMasterStoreCompare pointed at the wrong directory level
+
+Caught on first real run: it compared the configured `--old-store-dir`/`--new-store-dir`
+paths directly, but the actual per-level ring-store files live in a fixed `storeDir`
+subdirectory within that configured path (the sibling `storeMergeDir` holds the
+end-of-level merge's own cross-drive temp/output, not finished files) -- the same
+convention `OthelloRingMasterStoreStats`'s own `main()` already follows correctly. Fixed
+to append `\storeDir` the same way.
+
+---
+
 ## [1.6.7] - 2026-10-18
 
 ### New tool: OthelloRingMasterStoreCompare -- board-set equality between two stores

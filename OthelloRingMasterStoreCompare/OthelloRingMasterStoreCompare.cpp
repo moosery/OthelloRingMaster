@@ -136,8 +136,13 @@ int main(int argc, char** argv)
     if (!ParseArgs(argc, argv, &config)) return 1;
 
     char oldStoreDir[MAX_FULL_PATH_NAME], newStoreDir[MAX_FULL_PATH_NAME];
-    snprintf(oldStoreDir, sizeof(oldStoreDir), "%c:%s", config.oldStoreDrive, config.oldStoreDirNameNoDrive);
-    snprintf(newStoreDir, sizeof(newStoreDir), "%c:%s", config.newStoreDrive, config.newStoreDirNameNoDrive);
+    /* The configured dir is the parent area; the real per-level ring-store files live in a
+    ** fixed "storeDir" subdirectory within it (storeMergeDir, the other sibling, holds the
+    ** end-of-level merge's own cross-drive temp/output, not the finished per-level files) --
+    ** same convention OthelloRingMasterStoreStats's own main() uses.
+    */
+    snprintf(oldStoreDir, sizeof(oldStoreDir), "%c:%s\\storeDir", config.oldStoreDrive, config.oldStoreDirNameNoDrive);
+    snprintf(newStoreDir, sizeof(newStoreDir), "%c:%s\\storeDir", config.newStoreDrive, config.newStoreDirNameNoDrive);
 
     printf("Comparing boards %dx%d, level %d upward:\n  OLD: %s\n  NEW: %s\n\n",
            config.boardSize, config.boardSize, config.startLevel, oldStoreDir, newStoreDir);
